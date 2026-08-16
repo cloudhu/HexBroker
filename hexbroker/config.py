@@ -139,6 +139,10 @@ class BacktestConfig(BaseModel):
     margin_rate: float = 0.12
     multiplier: float = 10.0
     min_tick: float = 10.0
+    contracts: dict[str, dict] | None = Field(
+        default=None,
+        description="品种级合约参数：{symbol: {multiplier, min_tick}}（au=×1000/0.02、ag=×15/0.01、m=×10/1）",
+    )
     limit_trade_allowed: bool = False
     initial_capital: float = 1_000_000.0
 

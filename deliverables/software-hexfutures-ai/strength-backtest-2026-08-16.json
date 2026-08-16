@@ -1,0 +1,15 @@
+{
+  "top_k": 0.2,
+  "initial_capital": 1000000.0,
+  "final_equity": 1447667.367749999,
+  "total_return": 0.44766736774999893,
+  "annual_return": 0.060348145946486964,
+  "max_drawdown": -0.2193798778626943,
+  "sharpe": 0.5444987339744777,
+  "n_trades": 148,
+  "total_fees": 5728.83225,
+  "n_signals": 1056,
+  "n_long": 212,
+  "no_cost_annual_return": 0.06278508201392952,
+  "cost_drag_pp": 0.24369360674425522
+}

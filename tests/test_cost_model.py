@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from hexbroker.backtest.cost import CostModel
 
 
@@ -52,3 +54,29 @@ def test_fill_price_no_slippage_when_zero_ticks():
     cm = CostModel(slippage_ticks=0.0, min_tick=10.0, multiplier=10.0)
     fp, _, _, _ = cm.trade_cost(100.0, 1.0, is_open=True)
     assert abs(fp - 100.0) < 1e-8
+
+
+def test_cost_model_per_symbol_contracts():
+    """per-symbol 合约参数：au(×1000/0.02) vs 默认(×10/10)。"""
+    from hexbroker.backtest.cost import CostModel
+
+    c = CostModel(contracts={"au0": {"multiplier": 1000.0, "min_tick": 0.02}})
+    # au 1 手买入：滑点 0.02×1 tick，手续费按 ×1000
+    fp = c.fill_price(500.0, +1, "au0")
+    assert fp == pytest.approx(500.02)
+    fee = c.fee(fp, 1.0, is_open=True, symbol="au0")
+    assert fee == pytest.approx(500.02 * 1000 * 1 * 0.00005)
+    # 未配置品种回退默认
+    fp_def = c.fill_price(500.0, +1)
+    assert fp_def == pytest.approx(510.0)  # min_tick=10 默认
+    fee_def = c.fee(510.0, 1.0, is_open=True)
+    assert fee_def == pytest.approx(510.0 * 10 * 0.00005)
+
+
+def test_cost_model_margin_per_symbol():
+    """保证金按品种乘数计算。"""
+    from hexbroker.backtest.cost import CostModel
+
+    c = CostModel(margin_rate=0.12, contracts={"m0": {"multiplier": 10.0, "min_tick": 1.0}})
+    m = c.margin(3000.0, 1.0, "m0")
+    assert m == pytest.approx(3000.0 * 10 * 0.12)

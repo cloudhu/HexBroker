@@ -53,7 +53,7 @@ class SimBroker:
         side = 1 if delta > 0 else -1
         is_open = (current == 0.0) or (np.sign(delta) == np.sign(current))
 
-        fp, fee, _slip, _total = self.cost.trade_cost(ref_price, delta, is_open, is_today_close)
+        fp, fee, _slip, _total = self.cost.trade_cost(ref_price, delta, is_open, is_today_close, symbol)
 
         if is_open:
             # 开仓/加仓：更新加权均价
