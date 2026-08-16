@@ -1,0 +1,244 @@
+{
+  "title": "真实数据 OOS 信号验证 + R7 裁决报告",
+  "report_date": "2026-08-15",
+  "data_source": {
+    "chosen_source": "sina",
+    "priority": [
+      "pytdx",
+      "sina",
+      "akshare_fundamentals"
+    ],
+    "reachability": "pytdx 公共服务器在本沙箱 TCP 超时 -> 自动降级 sina 成功",
+    "symbols": [
+      "SHFE.cu",
+      "SHFE.rb",
+      "INE.sc"
+    ],
+    "freq": "1d",
+    "start": "2018-01-01",
+    "end": "2024-12-31",
+    "n_bars": 4718,
+    "symbols_returned": [
+      "cu0",
+      "rb0",
+      "sc0"
+    ]
+  },
+  "horizon": 5,
+  "models_requested": [
+    "lightgbm",
+    "ar_transformer",
+    "tcn",
+    "gru"
+  ],
+  "models_run": {
+    "lightgbm": {
+      "model_id": "c3fcfadee269",
+      "n_oos_signals": 2015,
+      "n_folds": "reused"
+    },
+    "ar_transformer": {
+      "model_id": "8342f2e8de40",
+      "n_oos_signals": 2015,
+      "n_folds": "reused"
+    },
+    "tcn": {
+      "model_id": "6cb4300cafd0",
+      "n_oos_signals": 2015,
+      "n_folds": "reused"
+    },
+    "gru": {
+      "model_id": "b843efeff26f",
+      "n_oos_signals": 2015,
+      "n_folds": "reused"
+    }
+  },
+  "models_failed": {},
+  "gate1_thresholds": {
+    "direction_accuracy": 0.54,
+    "effective_accuracy": 0.58,
+    "coverage": 0.3
+  },
+  "gate1_aggregated": {
+    "lightgbm": {
+      "n_oos": 2015,
+      "n_effective": 1586,
+      "coverage": 0.7870967741935484,
+      "direction_accuracy": 0.6580645161290323,
+      "effective_accuracy": 0.6954602774274905,
+      "rank_ic": 0.37033547891858815,
+      "ic": 0.02315967006424923
+    },
+    "ar_transformer": {
+      "n_oos": 2015,
+      "n_effective": 1595,
+      "coverage": 0.7915632754342432,
+      "direction_accuracy": 0.654590570719603,
+      "effective_accuracy": 0.6909090909090909,
+      "rank_ic": 0.3542493416764587,
+      "ic": 0.03299776635111836
+    },
+    "tcn": {
+      "n_oos": 2015,
+      "n_effective": 1547,
+      "coverage": 0.7677419354838709,
+      "direction_accuracy": 0.6600496277915633,
+      "effective_accuracy": 0.7007110536522301,
+      "rank_ic": 0.3828994531957607,
+      "ic": 0.03884076148878253
+    },
+    "gru": {
+      "n_oos": 2015,
+      "n_effective": 1648,
+      "coverage": 0.8178660049627792,
+      "direction_accuracy": 0.68287841191067,
+      "effective_accuracy": 0.7172330097087378,
+      "rank_ic": 0.4305409197118035,
+      "ic": -0.045667377798929286
+    }
+  },
+  "gate1_per_symbol": {
+    "lightgbm": {
+      "cu0": {
+        "n_oos": 682,
+        "n_effective": 506,
+        "coverage": 0.7419354838709677,
+        "direction_accuracy": 0.655425219941349,
+        "effective_accuracy": 0.7075098814229249,
+        "rank_ic": 0.4014634522175928,
+        "ic": 0.063553830292599
+      },
+      "rb0": {
+        "n_oos": 682,
+        "n_effective": 563,
+        "coverage": 0.8255131964809385,
+        "direction_accuracy": 0.658357771260997,
+        "effective_accuracy": 0.6909413854351687,
+        "rank_ic": 0.3842305351945583,
+        "ic": -0.04312189592346803
+      },
+      "sc0": {
+        "n_oos": 651,
+        "n_effective": 517,
+        "coverage": 0.794162826420891,
+        "direction_accuracy": 0.6605222734254992,
+        "effective_accuracy": 0.688588007736944,
+        "rank_ic": 0.32369481829102525,
+        "ic": 0.04278683520704809
+      }
+    },
+    "ar_transformer": {
+      "cu0": {
+        "n_oos": 682,
+        "n_effective": 497,
+        "coverage": 0.7287390029325513,
+        "direction_accuracy": 0.6466275659824047,
+        "effective_accuracy": 0.6921529175050302,
+        "rank_ic": 0.3657811052590826,
+        "ic": 0.15621236534486424
+      },
+      "rb0": {
+        "n_oos": 682,
+        "n_effective": 574,
+        "coverage": 0.841642228739003,
+        "direction_accuracy": 0.6686217008797654,
+        "effective_accuracy": 0.6951219512195121,
+        "rank_ic": 0.39793986642852847,
+        "ic": -0.14849520295703794
+      },
+      "sc0": {
+        "n_oos": 651,
+        "n_effective": 524,
+        "coverage": 0.804915514592934,
+        "direction_accuracy": 0.6482334869431644,
+        "effective_accuracy": 0.6851145038167938,
+        "rank_ic": 0.29266986745739615,
+        "ic": 0.04891173936604149
+      }
+    },
+    "tcn": {
+      "cu0": {
+        "n_oos": 682,
+        "n_effective": 453,
+        "coverage": 0.6642228739002932,
+        "direction_accuracy": 0.6466275659824047,
+        "effective_accuracy": 0.7130242825607064,
+        "rank_ic": 0.3755795682164999,
+        "ic": 0.04549756900269579
+      },
+      "rb0": {
+        "n_oos": 682,
+        "n_effective": 559,
+        "coverage": 0.8196480938416423,
+        "direction_accuracy": 0.6656891495601173,
+        "effective_accuracy": 0.6905187835420393,
+        "rank_ic": 0.41823565131437473,
+        "ic": -0.012350365705902267
+      },
+      "sc0": {
+        "n_oos": 651,
+        "n_effective": 535,
+        "coverage": 0.8218125960061444,
+        "direction_accuracy": 0.6682027649769585,
+        "effective_accuracy": 0.7009345794392523,
+        "rank_ic": 0.3472158229051295,
+        "ic": 0.0612883087571352
+      }
+    },
+    "gru": {
+      "cu0": {
+        "n_oos": 682,
+        "n_effective": 560,
+        "coverage": 0.8211143695014663,
+        "direction_accuracy": 0.6847507331378299,
+        "effective_accuracy": 0.7196428571428571,
+        "rank_ic": 0.45657055815586006,
+        "ic": -0.05906893966961801
+      },
+      "rb0": {
+        "n_oos": 682,
+        "n_effective": 557,
+        "coverage": 0.8167155425219942,
+        "direction_accuracy": 0.6832844574780058,
+        "effective_accuracy": 0.7109515260323159,
+        "rank_ic": 0.4390624709196047,
+        "ic": 0.009415133213140378
+      },
+      "sc0": {
+        "n_oos": 651,
+        "n_effective": 531,
+        "coverage": 0.815668202764977,
+        "direction_accuracy": 0.6804915514592934,
+        "effective_accuracy": 0.7212806026365348,
+        "rank_ic": 0.3862047675711963,
+        "ic": -0.08242154890657183
+      }
+    }
+  },
+  "gate1_pass": {
+    "lightgbm": true,
+    "ar_transformer": true,
+    "tcn": true,
+    "gru": true
+  },
+  "r7": {
+    "autoregressive_family": "ar_transformer",
+    "baseline": "lightgbm",
+    "autoregressive_wins": false,
+    "autoregressive_passed_gate": true,
+    "verdict": "R7 主位让予 LightGBM(条件性)"
+  },
+  "kronos": {
+    "status": "BLOCKED",
+    "reason": "无 third_party/Kronos submodule、无 transformers、无权重；KronosAdapter 仅能降级 ARTransformer，故真 Kronos vs LightGBM 终裁 pending Kronos 权重就绪",
+    "note": "真 Kronos vs LightGBM 终裁 pending Kronos 权重就绪"
+  },
+  "environment_notes": [
+    "Python 受管解释器 3.13；venv default。",
+    "pytdx 公共行情服务器在本沙箱 TCP 超时，脚本按 free.yaml 优先级自动降级 sina 并成功跑完。",
+    "sina 返回真实 cu/rb/sc 主力连续日线，数据截止 2024（区间按 2018-01-01~2024-12-31 过滤）。",
+    "scipy 可用=是（RankIC/IC 用 scipy.stats 计算）。",
+    "Kronos 权重/分词器/transformers 缺失，未运行 kronos；ar_transformer 作为其架构替身。",
+    "预测层推理缓存泄漏已修复（GRU/AR/TCN 的 forward 缓存现于 predict 后统一清理，见 ForecastModel._clear_inference_caches），使 gru 在本沙箱可完整跑完而不撑爆内存。"
+  ]
+}

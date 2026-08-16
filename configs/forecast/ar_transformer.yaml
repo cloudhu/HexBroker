@@ -1,0 +1,15 @@
+# 自研 AR-Transformer（CPU 主 fallback）
+forecast:
+  name: "ar_transformer"
+  horizon: 5
+  n_mc_samples: 30
+  temperature: 1.0
+  top_p: 0.9
+  fallback: true
+  effective_threshold: 0.05
+  calibration_method: "platt"
+  hidden_size: 32
+  n_layers: 2
+  n_heads: 4
+  epochs: 20
+  lr: 0.001

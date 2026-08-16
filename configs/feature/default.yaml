@@ -1,0 +1,8 @@
+# 特征清单与参数
+feature:
+  transformers: ["technical", "microstructure", "normalize"]
+  normalize_window: 120
+  technical_params:
+    atr_window: 20
+    ma_windows: [5, 10, 20, 60]
+    rsi_window: 14

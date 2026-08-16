@@ -1,0 +1,94 @@
+{
+  "title": "LightGBM 冠军模型特征工程迭代（单特征消融）",
+  "report_date": "2026-08-16",
+  "data_source": "sina",
+  "symbols": [
+    "SHFE.au",
+    "SHFE.ag",
+    "DCE.m"
+  ],
+  "horizon": 5,
+  "n_mc_samples": 30,
+  "best_params": {
+    "lgbm_n_estimators": 200.0,
+    "lgbm_lr": 0.016682542111075827,
+    "lgbm_max_depth": 11.0,
+    "lgbm_num_leaves": 57.0,
+    "lgbm_min_child_samples": 22.0,
+    "lgbm_subsample": 0.6827653754476659,
+    "lgbm_colsample_bytree": 0.9671600243145742,
+    "lgbm_reg_lambda": 0.04164800885264854,
+    "lgbm_reg_alpha": 0.002421420203310671
+  },
+  "base": {
+    "variant": "base",
+    "n_features": 25,
+    "dir_acc": 0.7023,
+    "eff_acc": 0.7299,
+    "coverage": 0.8504,
+    "rank_ic": 0.451,
+    "n_signals": 2046
+  },
+  "variants": [
+    {
+      "variant": "+f_week_ret_acc",
+      "dir_acc_pct": 69.26,
+      "dir_acc_delta_pp": -0.98,
+      "eff_acc_pct": 73.55,
+      "coverage_pct": 81.13,
+      "rank_ic": 0.4507,
+      "rank_ic_delta": -0.0004,
+      "n_signals": 2046,
+      "passed": false
+    },
+    {
+      "variant": "+f_week_pos",
+      "dir_acc_pct": 69.7,
+      "dir_acc_delta_pp": -0.54,
+      "eff_acc_pct": 73.1,
+      "coverage_pct": 83.77,
+      "rank_ic": 0.4563,
+      "rank_ic_delta": 0.0053,
+      "n_signals": 2046,
+      "passed": false
+    },
+    {
+      "variant": "+f_week_vol",
+      "dir_acc_pct": 69.75,
+      "dir_acc_delta_pp": -0.49,
+      "eff_acc_pct": 73.54,
+      "coverage_pct": 81.82,
+      "rank_ic": 0.457,
+      "rank_ic_delta": 0.006,
+      "n_signals": 2046,
+      "passed": false
+    },
+    {
+      "variant": "+f_week_prev_ret",
+      "dir_acc_pct": 68.62,
+      "dir_acc_delta_pp": -1.61,
+      "eff_acc_pct": 72.09,
+      "coverage_pct": 82.84,
+      "rank_ic": 0.4311,
+      "rank_ic_delta": -0.02,
+      "n_signals": 2046,
+      "passed": false
+    },
+    {
+      "variant": "+f_week_ret_acc+f_week_pos+f_week_vol+f_week_prev_ret",
+      "dir_acc_pct": 69.11,
+      "dir_acc_delta_pp": -1.12,
+      "eff_acc_pct": 72.74,
+      "coverage_pct": 82.11,
+      "rank_ic": 0.4433,
+      "rank_ic_delta": -0.0077,
+      "n_signals": 2046,
+      "passed": false
+    }
+  ],
+  "pass_criteria": {
+    "rank_ic_delta": 0.01,
+    "dir_acc_delta_pp": 0.3,
+    "coverage_floor": 0.8
+  }
+}

@@ -1,0 +1,22 @@
+# 风控层（复用用户交易系统 v4.0）：ATR 三档 + S1-S5 + 风险预算 + R1-R4
+risk:
+  atr_mult_high: 2.5
+  atr_mult_mid: 2.0
+  atr_mult_low: 1.5
+  atr_window: 20
+  vol_high_q: 0.8
+  vol_low_q: 0.2
+  sell_s1_window: 20
+  sell_s3_target: 0.10
+  sell_s4_bars: 20
+  sell_s5_z: 3.0
+  vol_target: 0.20
+  max_position_pct: 0.30
+  kelly_cap: 0.25
+  recovery_drawdown_r1: 0.05
+  recovery_drawdown_r2: 0.10
+  recovery_drawdown_r3: 0.15
+  position_scalar_r1: 0.5
+  position_scalar_r2: 0.0
+  position_scalar_r3: 0.2
+  position_scalar_r4: 1.0

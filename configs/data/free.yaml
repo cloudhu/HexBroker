@@ -1,0 +1,65 @@
+# 免费数据源供应链配置（§4 P0）。优先级顺序即 failover 主备顺序。
+#
+# 约定：source_priority 决定取数时的主源 -> 备源 顺序；
+# verification 段标注「在环校验源」，不与主源争抢，仅用于实时快照↔K线末值比对监测漂移。
+data:
+  symbols: ["SHFE.cu", "SHFE.rb", "INE.sc"]
+  freq: "1d"
+  start: "2018-01-01"
+  end: "2026-08-15"
+  source: "pytdx"            # 默认主源
+  main_rule: "open_interest"
+  adjust_method: "backward"
+  train_len: 250
+  test_len: 60
+  purge: 5
+  embargo: 2
+  mode: "rolling"
+
+# 数据源供应链：优先级 + 各源开关/failover/超时
+source_priority: [pytdx, sina, akshare_fundamentals]
+
+sources:
+  pytdx:
+    enabled: true
+    # 多服务器 failover（公共行情服务器，逐个试连）
+    servers:
+      - ["119.147.212.81", 7727]
+      - ["180.153.125.194", 7727]
+      - ["218.83.166.161", 7727]
+    connect_timeout: 5.0       # 单服务器连接超时（秒）
+    rate_limit_sleep: 0.2      # 请求间保护间隔（秒）
+    retries: 3                 # failover 重试次数
+    market: 30                 # 上期所/INE（期货扩展行情）
+    category: 3                # 期货
+    default_count: 1200        # 日线回拉根数（60m 用 2000）
+  sina:
+    enabled: true
+    timeout: 10.0              # 单次请求超时（秒）
+    rate_limit_sleep: 0.3      # 限频保护间隔（秒）
+    retries: 3
+    continuous_codes:          # 主力连续代码（新浪风格）
+      cu: "cu0"
+      rb: "rb0"
+      sc: "sc0"
+  akshare_fundamentals:
+    enabled: true
+    # 仅用于特征工程（库存/持仓/仓单/基差/费用），不作为行情主源
+    timeout: 10.0
+    retries: 2
+
+# 在环校验源：通达信 MCP（tdx-connector，已连接，2026-08-14 实测可靠）
+# 定位：不与主源争抢，仅实时快照 ↔ K 线末值比对，监测数据缺失/漂移。
+verification:
+  tdx_mcp:
+    enabled: true
+    role: "in_loop_verifier"     # 在环校验，不参与取数主流程
+    setcode: "30"                # 期货扩展行情必须
+    target: "1"                  # MCP 端必须显式传（pytdx 无此参数，用 market=30）
+    periods: {daily: "4", m60: "3"}
+    tqFlag: "0"                  # 不复权
+    # 漂移检测阈值建议（见 validate_sources.py 供应链设计小节）
+    drift:
+      close_pct_warn: 0.5        # 收盘价偏离 >0.5% 告警
+      close_pct_error: 2.0       # 收盘价偏离 >2.0% 视为异常
+      missing_bar_warn: 1        # 缺失 >=1 根即告警

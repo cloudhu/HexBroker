@@ -1,0 +1,22 @@
+# 基线模型超参（TCN / GRU / LightGBM）
+# 冠军模型：LightGBM（R7 终裁，au/ag/m 真实日线，方向准确率 67.89% / RankIC 0.4092 双第一）
+forecast:
+  name: "lightgbm"
+  horizon: 5
+  n_mc_samples: 30
+  effective_threshold: 0.05
+  calibration_method: "platt"
+  hidden_size: 32
+  n_layers: 2
+  epochs: 20
+  lr: 0.001
+  # LightGBM 显式超参（R7 基准值；可被 Optuna 调优覆盖）
+  lgbm_n_estimators: 300
+  lgbm_lr: 0.05
+  lgbm_max_depth: 6
+  lgbm_num_leaves: 31
+  lgbm_min_child_samples: 20
+  lgbm_subsample: 1.0
+  lgbm_colsample_bytree: 1.0
+  lgbm_reg_lambda: 0.0
+  lgbm_reg_alpha: 0.0

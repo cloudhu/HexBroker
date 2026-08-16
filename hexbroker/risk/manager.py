@@ -1,0 +1,119 @@
+"""风控管理器（§3.4 优先级链 v4.0）。
+
+决策优先级（不可被下位覆盖）：
+    硬止损 (limits) > S1–S5 (sell_engine) > 风险预算 (budget) > 回撤恢复 R1–R4 (recovery) > RL 意图
+
+每根 bar 调用 :meth:`evaluate`，输入实时 ``RiskState`` 与 RL 意图仓位、信号概率 ``p_up``，
+输出不可篡改的 ``RiskDecision``。
+"""
+
+from __future__ import annotations
+
+from typing import Any, Optional
+
+import numpy as np
+
+from ..constants import RecoveryStage, SellSignalCode
+from .budget import budget_target
+from .limits import HARD_STOP_DRAWDOWN, hard_stop_triggered, position_within_limit
+from .recovery import recovery_scalar, recovery_stage
+from .sell_engine import detect_sell_signals, strongest
+from .stoploss import ATRRatchet, compute_stop
+from .types import ATRTier, RiskDecision, RiskState
+
+
+class RiskManager:
+    """风控优先级链实现。"""
+
+    def __init__(self, cfg: Any, hard_stop: Optional[float] = None) -> None:
+        self.cfg = cfg
+        self.risk = getattr(cfg, "risk", None)
+        self.hard_stop = float(hard_stop if hard_stop is not None else HARD_STOP_DRAWDOWN)
+        self._ratchet = ATRRatchet(ATRTier.HIGH)
+
+    # --------------------------- 主入口 ---------------------------
+    def evaluate(
+        self,
+        state: RiskState,
+        intent_position: float,
+        p_up: float = 0.5,
+        recent_returns: Optional[np.ndarray] = None,
+        recent_volumes: Optional[np.ndarray] = None,
+        ma_price: Optional[float] = None,
+    ) -> RiskDecision:
+        cfg = self.risk
+        decision = RiskDecision()
+
+        # ① 硬止损（最高优先级，不可被任何下位覆盖）
+        if hard_stop_triggered(state.drawdown, self.hard_stop):
+            decision.liquidate = True
+            decision.target_position = 0.0
+            decision.reason = "hard_stop"
+            decision.atr_tier = state.atr_tier
+            return decision
+
+        # ③ 风险预算：波动率目标 + Kelly 上限给出基础允许仓位
+        vol = max(state.realized_vol, 1e-6)
+        budget = budget_target(
+            p_up, vol,
+            vol_target=getattr(cfg, "vol_target", 0.20),
+            kelly_cap=getattr(cfg, "kelly_cap", 0.25),
+            max_position_pct=getattr(cfg, "max_position_pct", 0.30),
+        )
+
+        # ④ 回撤恢复分级缩放（覆盖 RL 意图强度）
+        stage = recovery_stage(
+            state.drawdown,
+            dd_r1=getattr(cfg, "recovery_drawdown_r1", 0.05),
+            dd_r2=getattr(cfg, "recovery_drawdown_r2", 0.10),
+            dd_r3=getattr(cfg, "recovery_drawdown_r3", 0.15),
+        )
+        scalar = recovery_scalar(
+            stage,
+            s_r1=getattr(cfg, "position_scalar_r1", 0.5),
+            s_r2=getattr(cfg, "position_scalar_r2", 0.0),
+            s_r3=getattr(cfg, "position_scalar_r3", 0.2),
+            s_r4=getattr(cfg, "position_scalar_r4", 1.0),
+        )
+
+        # ⑤ RL 意图先经恢复缩放，再被预算封顶
+        target = intent_position * scalar
+        target = position_within_limit(target, max(abs(budget), getattr(cfg, "max_position_pct", 0.30)))
+        decision.stage = stage
+
+        # ② S1–S5 卖出信号（高于风险预算与 RL 意图）
+        signals = detect_sell_signals(
+            state,
+            recent_returns if recent_returns is not None else np.array([]),
+            recent_volumes if recent_volumes is not None else np.array([]),
+            ma_price,
+            cfg,
+        )
+        if signals:
+            if state.position != 0 or target != 0.0:
+                target = 0.0
+                decision.liquidate = state.position != 0
+            decision.sell_signals = list(signals)
+            decision.reason = strongest(signals).value
+        else:
+            decision.reason = "rl_intent"
+
+        decision.target_position = float(target)
+        decision.kelly_fraction = float(budget)
+
+        # ATR 三档 ratchet（只增不减）+ 止损价
+        self._ratchet.update(
+            state.vol_quantile,
+            vol_low_q=getattr(cfg, "vol_low_q", 0.2),
+            vol_high_q=getattr(cfg, "vol_high_q", 0.8),
+        )
+        tier = self._ratchet.tier
+        decision.atr_tier = tier
+        decision.stop_price = compute_stop(
+            state.entry_price, state.position or target, state.atr, tier
+        )
+        return decision
+
+    # --------------------------- 工具 ---------------------------
+    def reset_ratchet(self, tier: ATRTier = ATRTier.HIGH) -> None:
+        self._ratchet.reset(tier)

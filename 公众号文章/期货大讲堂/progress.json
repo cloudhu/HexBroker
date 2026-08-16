@@ -1,0 +1,22 @@
+{
+  "series": "期货大讲堂",
+  "total": 100,
+  "current_issue": 3,
+  "published_count": 2,
+  "last_published_issue": 2,
+  "last_published_date": "2026-08-16",
+  "history": [
+    {
+      "issue": 1,
+      "title": "什么是期货：从「未来的买卖契约」说起",
+      "date": "2026-08-15",
+      "media_id": "1foS1_C04TIfLfnUcIVl2_jGBCZ9Axq8DTBY0HQ_mcZeB-QxyH3TgjRVy2a5NJ9G"
+    },
+    {
+      "issue": 2,
+      "title": "期货的起源：从大阪堂岛米市到芝加哥期货交易所",
+      "date": "2026-08-16",
+      "media_id": "1foS1_C04TIfLfnUcIVl2-m6uRyRJbBaRXJZ-EJBuyAEPKXAvZwLJARHKyGYm_D6"
+    }
+  ]
+}

@@ -1,0 +1,187 @@
+{
+  "generated_at": "2026-08-15 11:41:56",
+  "benchmark_date": "2026-08-14",
+  "sources": {
+    "pytdx": {
+      "reachable": false,
+      "note": "HexDataError: pytdx 无法连接任何公共行情服务器（已试 3 个）：None"
+    },
+    "sina": {
+      "reachable": true,
+      "note": ""
+    }
+  },
+  "contracts": {
+    "CU2609": {
+      "benchmark": {
+        "exchange": "SHFE",
+        "product": "cu",
+        "pytdx": "CU2609",
+        "sina": "cu0",
+        "close": 107670,
+        "now": 108200,
+        "vol": 203895,
+        "chg": 2.74,
+        "high": 108730,
+        "low": 104320
+      },
+      "pytdx": {
+        "1d": {
+          "reachable": false,
+          "error": "HexDataError: pytdx 无法连接任何公共行情服务器（已试 3 个）：None"
+        },
+        "60m": {
+          "reachable": false,
+          "error": "HexDataError: pytdx 无法连接任何公共行情服务器（已试 3 个）：None"
+        }
+      },
+      "sina": {
+        "1d": {
+          "bar_count": 2324,
+          "last_close": 78500.0,
+          "first_close": 45080.0,
+          "last_date": "2024-07-17",
+          "window_high": 88940.0,
+          "window_low": 66550.0,
+          "window_open": 45500.0,
+          "window_last_high": 78890.0,
+          "window_last_low": 78280.0,
+          "freq": "1d",
+          "reachable": true,
+          "ref_close": 107670,
+          "close_dev_pct": -27.092
+        },
+        "60m": {
+          "bar_count": 192,
+          "last_close": 68290.0,
+          "first_close": 66940.0,
+          "last_date": "2023-12-02",
+          "window_high": 68290.0,
+          "window_low": 65930.0,
+          "window_open": 66680.0,
+          "window_last_high": 68290.0,
+          "window_last_low": 68290.0,
+          "freq": "60m",
+          "reachable": true,
+          "ref_close": 107670,
+          "close_dev_pct": -36.5747,
+          "high_dev_pct": -37.193,
+          "low_dev_pct": -36.8002
+        }
+      }
+    },
+    "RB2610": {
+      "benchmark": {
+        "exchange": "SHFE",
+        "product": "rb",
+        "pytdx": "RB2610",
+        "sina": "rb0",
+        "now": 3018,
+        "chg": -2.65,
+        "high": 3116,
+        "low": 2968
+      },
+      "pytdx": {
+        "1d": {
+          "reachable": false,
+          "error": "HexDataError: pytdx 无法连接任何公共行情服务器（已试 3 个）：None"
+        },
+        "60m": {
+          "reachable": false,
+          "error": "HexDataError: pytdx 无法连接任何公共行情服务器（已试 3 个）：None"
+        }
+      },
+      "sina": {
+        "1d": {
+          "bar_count": 2325,
+          "last_close": 3487.0,
+          "first_close": 2560.0,
+          "last_date": "2024-07-17",
+          "window_high": 3992.0,
+          "window_low": 3405.0,
+          "window_open": 2550.0,
+          "window_last_high": 3556.0,
+          "window_last_low": 3484.0,
+          "freq": "1d",
+          "reachable": true,
+          "ref_close": 3018,
+          "close_dev_pct": 15.5401
+        },
+        "60m": {
+          "bar_count": 192,
+          "last_close": 3949.0,
+          "first_close": 3819.0,
+          "last_date": "2023-11-27",
+          "window_high": 3949.0,
+          "window_low": 3560.0,
+          "window_open": 3820.0,
+          "window_last_high": 3949.0,
+          "window_last_low": 3949.0,
+          "freq": "60m",
+          "reachable": true,
+          "ref_close": 3018,
+          "close_dev_pct": 30.8482,
+          "high_dev_pct": 26.733,
+          "low_dev_pct": 19.9461
+        }
+      }
+    },
+    "SC2609": {
+      "benchmark": {
+        "exchange": "INE",
+        "product": "sc",
+        "pytdx": "SC2609",
+        "sina": "sc0",
+        "now": 569.3,
+        "chg": 3.53,
+        "high": 573.3,
+        "low": 501.6
+      },
+      "pytdx": {
+        "1d": {
+          "reachable": false,
+          "error": "HexDataError: pytdx 无法连接任何公共行情服务器（已试 3 个）：None"
+        },
+        "60m": {
+          "reachable": false,
+          "error": "HexDataError: pytdx 无法连接任何公共行情服务器（已试 3 个）：None"
+        }
+      },
+      "sina": {
+        "1d": {
+          "bar_count": 1536,
+          "last_close": 606.6,
+          "first_close": 429.9,
+          "last_date": "2024-07-17",
+          "window_high": 681.5,
+          "window_low": 535.4,
+          "window_open": 440.0,
+          "window_last_high": 611.7,
+          "window_last_low": 605.0,
+          "freq": "1d",
+          "reachable": true,
+          "ref_close": 569.3,
+          "close_dev_pct": 6.5519
+        },
+        "60m": {
+          "bar_count": 192,
+          "last_close": 574.7,
+          "first_close": 671.9,
+          "last_date": "2023-12-02",
+          "window_high": 677.4,
+          "window_low": 560.8,
+          "window_open": 670.5,
+          "window_last_high": 574.7,
+          "window_last_low": 574.7,
+          "freq": "60m",
+          "reachable": true,
+          "ref_close": 569.3,
+          "close_dev_pct": 0.9485,
+          "high_dev_pct": 18.158,
+          "low_dev_pct": 11.8022
+        }
+      }
+    }
+  },
+  "verification": "tdx_mcp"
+}

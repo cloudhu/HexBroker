@@ -1,0 +1,115 @@
+{
+  "title": "LightGBM 冠军模型精进报告（Optuna 调优）",
+  "report_date": "2026-08-16",
+  "data_source": "sina",
+  "symbols": [
+    "SHFE.au",
+    "SHFE.ag",
+    "DCE.m"
+  ],
+  "horizon": 5,
+  "n_mc_samples": 30,
+  "r7_baseline": {
+    "direction_accuracy": 0.6789,
+    "effective_accuracy": 0.7065,
+    "coverage": 0.846,
+    "rank_ic": 0.4092,
+    "ic": 0.0297
+  },
+  "gate1_baseline": {
+    "n_oos": 2046,
+    "n_effective": 1731,
+    "coverage": 0.8460410557184751,
+    "direction_accuracy": 0.6788856304985337,
+    "effective_accuracy": 0.706528018486424,
+    "rank_ic": 0.40919792616009054,
+    "ic": 0.02971424145193676
+  },
+  "per_symbol_baseline": {
+    "ag0": {
+      "n_oos": 682,
+      "n_effective": 575,
+      "coverage": 0.843108504398827,
+      "direction_accuracy": 0.6612903225806451,
+      "effective_accuracy": 0.6869565217391305,
+      "rank_ic": 0.3845801451211553,
+      "ic": 0.03272256618524731
+    },
+    "au0": {
+      "n_oos": 682,
+      "n_effective": 561,
+      "coverage": 0.8225806451612904,
+      "direction_accuracy": 0.6891495601173021,
+      "effective_accuracy": 0.7237076648841355,
+      "rank_ic": 0.3869822587492315,
+      "ic": -0.12259034232337811
+    },
+    "m0": {
+      "n_oos": 682,
+      "n_effective": 595,
+      "coverage": 0.8724340175953079,
+      "direction_accuracy": 0.6862170087976539,
+      "effective_accuracy": 0.7092436974789916,
+      "rank_ic": 0.48055110090609987,
+      "ic": 0.07197430422621472
+    }
+  },
+  "gate1_tuned": {
+    "n_oos": 2046,
+    "n_effective": 1694,
+    "coverage": 0.8279569892473119,
+    "direction_accuracy": 0.6730205278592375,
+    "effective_accuracy": 0.7095631641086186,
+    "rank_ic": 0.42267599824105895,
+    "ic": 0.01237633231938534
+  },
+  "per_symbol_tuned": {
+    "ag0": {
+      "n_oos": 682,
+      "n_effective": 559,
+      "coverage": 0.8196480938416423,
+      "direction_accuracy": 0.6598240469208211,
+      "effective_accuracy": 0.6923076923076923,
+      "rank_ic": 0.40371812179634425,
+      "ic": -0.01333036914099278
+    },
+    "au0": {
+      "n_oos": 682,
+      "n_effective": 540,
+      "coverage": 0.7917888563049853,
+      "direction_accuracy": 0.6818181818181818,
+      "effective_accuracy": 0.737037037037037,
+      "rank_ic": 0.420185252407553,
+      "ic": -0.12178944301275364
+    },
+    "m0": {
+      "n_oos": 682,
+      "n_effective": 595,
+      "coverage": 0.8724340175953079,
+      "direction_accuracy": 0.6774193548387096,
+      "effective_accuracy": 0.7008403361344537,
+      "rank_ic": 0.4648506355535869,
+      "ic": 0.09004719219619609
+    }
+  },
+  "tuning": {
+    "best_params": {
+      "lgbm_n_estimators": 250,
+      "lgbm_lr": 0.05354439028346284,
+      "lgbm_max_depth": 5,
+      "lgbm_num_leaves": 19,
+      "lgbm_min_child_samples": 14,
+      "lgbm_subsample": 0.634329929347881,
+      "lgbm_colsample_bytree": 0.6039311538669622,
+      "lgbm_reg_lambda": 9.462727324209498,
+      "lgbm_reg_alpha": 0.03558454421007932
+    },
+    "best_value": 0.5752378733264051,
+    "n_trials": 50
+  },
+  "improvement": {
+    "direction_accuracy": -0.0058651026392961825,
+    "rank_ic": 0.013478072080968406,
+    "coverage": -0.01808406647116323
+  }
+}

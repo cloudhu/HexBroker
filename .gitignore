@@ -1,0 +1,31 @@
+# 运行时产物
+data/raw/
+data/interim/
+data/processed/
+data/signals/
+data/sample/*.csv
+artifacts/
+__pycache__/
+*.pyc
+.env
+*.log
+.cache/
+.ipynb_checkpoints/
+.venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+# submodule 内部
+third_party/Kronos/
+# vendored 依赖包（环境依赖，可用 requirements 重建）
+third_party/pylibs/
+# 本地工作区数据（自动化/记忆，不提交）
+.workbuddy/
+# CatBoost 运行时产物
+catboost_info/
+# 模型文件与大数据
+*.parquet
+*.pkl
+*.joblib
+*.h5

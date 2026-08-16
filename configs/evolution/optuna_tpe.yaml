@@ -1,0 +1,7 @@
+# Optuna 进化：TPE 单目标 + NSGA-II 多目标 + Hyperband 剪枝
+evolution:
+  sampler: "TPE"
+  pruner: "Hyperband"
+  n_trials: 20
+  storage: "sqlite:///artifacts/optuna/study.db"
+  drift_psi_threshold: 0.2

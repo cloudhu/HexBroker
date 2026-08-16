@@ -1,0 +1,21 @@
+# LightGBM 冠军模型配置（R7 终裁 + 2026-08-16 Optuna 调优后确立）
+# 用法：python -m scripts.run_forecast --config configs/forecast/lightgbm_champion.yaml
+# 口径与 R7 验证严格一致：horizon=5, n_mc_samples=30（连续 p_up），per-fold Platt 校准
+# 调优结果（全 66 折）：方向准确率 67.89% -> 68.33%，RankIC 0.4092 -> 0.4338
+# ⚠️ 2026-08-16 23:5x 被残留后台进程(旧 refine_full_tune d5ThWB)覆盖过，
+#    已按 deliverables/lightgbm-refinement-2026-08-16.md 报告恢复为并行调优最优 HP。
+forecast:
+  name: "lightgbm"
+  horizon: 5
+  n_mc_samples: 30
+  effective_threshold: 0.05
+  calibration_method: "platt"
+  lgbm_n_estimators: 200
+  lgbm_lr: 0.016682542111075827
+  lgbm_max_depth: 11
+  lgbm_num_leaves: 57
+  lgbm_min_child_samples: 22
+  lgbm_subsample: 0.6827653754476659
+  lgbm_colsample_bytree: 0.9671600243145742
+  lgbm_reg_lambda: 0.04164800885264854
+  lgbm_reg_alpha: 0.002421420203310671

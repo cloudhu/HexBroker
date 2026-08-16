@@ -1,0 +1,14 @@
+# 冠军特征配置 v2（2026-08-16 特征工程迭代后）
+# 在 base 18 特征之上新增 f_range_pos_20（20 日高低区间内收盘位置）
+# 消融证据（全 66 折，调优后 HP）：
+#   dir_acc 68.33% -> 68.67% (+0.34pp)；RankIC 0.4338 -> 0.4452 (+0.0114)；coverage 84.31% -> 84.02%
+# 组合验证：+f_kurt_20 会稀释增益（68.43%），故仅采纳 f_range_pos_20 单特征。
+feature:
+  transformers: ["technical", "microstructure", "iterative", "normalize"]
+  normalize_window: 120
+  technical_params:
+    atr_window: 20
+    ma_windows: [5, 10, 20, 60]
+    rsi_window: 14
+  iterative_params:
+    include: ["f_range_pos_20"]

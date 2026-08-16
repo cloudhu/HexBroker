@@ -1,0 +1,17 @@
+# 实验入口：LightGBM 冠军模型（au/ag/m 真实日线，R7 终裁后确立）
+defaults:
+  - base
+  - data/futures_daily
+  - feature/default
+  - forecast/lightgbm_champion
+  - risk/v4_atr
+  - backtest/cn_commodity
+  - rl/ppo_default
+  - evolution/optuna_tpe
+
+experiment: e02_auagm_lightgbm
+data:
+  symbols: ["SHFE.au", "SHFE.ag", "DCE.m"]
+  freq: "1d"
+  start: "2018-01-01"
+  end: "2024-12-31"

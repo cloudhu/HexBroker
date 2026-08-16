@@ -1,0 +1,13 @@
+# Kronos-small（主，需 GPU + 权重，缺失则自动回退 ARTransformer）
+forecast:
+  name: "kronos_small"
+  horizon: 5
+  n_mc_samples: 30
+  temperature: 1.0
+  top_p: 0.9
+  max_context: 512
+  fallback: true
+  model_name: "NeoQuasar/Kronos-small"
+  tokenizer_name: "NeoQuasar/Kronos-Tokenizer-base"
+  effective_threshold: 0.05
+  calibration_method: "isotonic"

@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hexbroker"
+version = "0.1.0"
+description = "HexFutures-AI：中国商品期货高胜率预测+RL 双层 + 自回归进化研究框架"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+
+[project.optional-dependencies]
+torch = ["torch>=2.1,<2.6"]
+sb3 = ["stable-baselines3>=2.3,<2.7", "sb3-contrib>=2.3"]
+optional = ["pyqlib", "rqalpha", "vnpy", "mlflow"]
+
+[tool.setuptools]
+packages = ["hexbroker"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-q"
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.black]
+line-length = 100
+target-version = ["py310"]
+
+[tool.mypy]
+ignore_missing_imports = true

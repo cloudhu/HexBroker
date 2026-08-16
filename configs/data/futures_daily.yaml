@@ -1,0 +1,14 @@
+# 日线数据配置
+data:
+  symbols: ["SHFE.cu"]
+  freq: "1d"
+  start: "2018-01-01"
+  end: "2024-12-31"
+  source: "csv"
+  main_rule: "open_interest"
+  adjust_method: "backward"
+  train_len: 250
+  test_len: 60
+  purge: 5
+  embargo: 2
+  mode: "rolling"

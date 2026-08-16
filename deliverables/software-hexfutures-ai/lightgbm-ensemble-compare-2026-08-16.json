@@ -1,0 +1,31 @@
+{
+  "title": "多模型集成对比（LightGBM vs Ensemble）",
+  "report_date": "2026-08-16",
+  "symbols": [
+    "SHFE.au",
+    "SHFE.ag",
+    "DCE.m"
+  ],
+  "rows": [
+    {
+      "variant": "lightgbm",
+      "model": "LightGBMForecast",
+      "members": "single",
+      "dir_acc": 0.7023,
+      "eff_acc": 0.7299,
+      "coverage": 0.8504,
+      "rank_ic": 0.451,
+      "n_signals": 2046
+    },
+    {
+      "variant": "ensemble-lgbxgb",
+      "model": "EnsembleForecast",
+      "members": "lgb,xgb",
+      "dir_acc": 0.6877,
+      "eff_acc": 0.723,
+      "coverage": 0.8275,
+      "rank_ic": 0.4544,
+      "n_signals": 2046
+    }
+  ]
+}

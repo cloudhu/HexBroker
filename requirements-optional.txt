@@ -1,0 +1,11 @@
+# 重依赖隔离环境（独立虚拟环境安装，防止与 pandas/pyqlib 版本互踩）
+pyqlib
+rqalpha
+vnpy
+vnpy_ctp
+mlflow
+pytorch-lightning
+optuna-dashboard
+torch>=2.1,<2.6
+stable-baselines3>=2.3,<2.7
+sb3-contrib>=2.3

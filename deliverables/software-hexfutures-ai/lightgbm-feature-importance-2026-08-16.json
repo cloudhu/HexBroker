@@ -1,0 +1,153 @@
+{
+  "title": "LightGBM 冠军模型特征重要性",
+  "report_date": "2026-08-16",
+  "data_source": "sina",
+  "symbols": [
+    "SHFE.au",
+    "SHFE.ag",
+    "DCE.m"
+  ],
+  "horizon": 5,
+  "n_mc_samples": 30,
+  "gate1_baseline": {
+    "n_oos": 2046,
+    "n_effective": 1731,
+    "coverage": 0.8460410557184751,
+    "direction_accuracy": 0.6788856304985337,
+    "effective_accuracy": 0.706528018486424,
+    "rank_ic": 0.40919792616009054,
+    "ic": 0.02971424145193676
+  },
+  "importance": {
+    "n_folds": 66,
+    "n_features": 18,
+    "lookback": 30,
+    "total_importance": 268002.0,
+    "ranked_features": [
+      {
+        "feature": "f_vol_5",
+        "importance": 0.08730904993246319
+      },
+      {
+        "feature": "f_vol_ratio",
+        "importance": 0.07672703935045261
+      },
+      {
+        "feature": "f_bar_dir",
+        "importance": 0.07496212714830486
+      },
+      {
+        "feature": "f_boll_width",
+        "importance": 0.071995731375139
+      },
+      {
+        "feature": "f_vol_20",
+        "importance": 0.06306296221669988
+      },
+      {
+        "feature": "f_gap",
+        "importance": 0.060827904269371125
+      },
+      {
+        "feature": "f_up_vol_share",
+        "importance": 0.057305542495951524
+      },
+      {
+        "feature": "f_lower_shadow",
+        "importance": 0.05607420840142984
+      },
+      {
+        "feature": "f_upper_shadow",
+        "importance": 0.055618987918000615
+      },
+      {
+        "feature": "f_ret_acc_5",
+        "importance": 0.05492496324654294
+      },
+      {
+        "feature": "f_body_ratio",
+        "importance": 0.05172349460078656
+      },
+      {
+        "feature": "f_rsi",
+        "importance": 0.047283229229632615
+      },
+      {
+        "feature": "f_intraday_range",
+        "importance": 0.046775770330072165
+      },
+      {
+        "feature": "f_ret_1",
+        "importance": 0.04508548443668331
+      },
+      {
+        "feature": "f_macd_hist",
+        "importance": 0.0440780292684383
+      },
+      {
+        "feature": "f_macd",
+        "importance": 0.04056313012589458
+      },
+      {
+        "feature": "f_ret_acc_20",
+        "importance": 0.03511914090193357
+      },
+      {
+        "feature": "f_ma_spread",
+        "importance": 0.03056320475220334
+      }
+    ],
+    "top_feature_lag": [
+      {
+        "feature": "f_ret_1",
+        "lag": 0,
+        "importance": 0.009731270662159237
+      },
+      {
+        "feature": "f_ret_acc_5",
+        "lag": 0,
+        "importance": 0.006567115170782308
+      },
+      {
+        "feature": "f_boll_width",
+        "lag": 0,
+        "importance": 0.005693987358303296
+      },
+      {
+        "feature": "f_bar_dir",
+        "lag": 28,
+        "importance": 0.00522384161312229
+      },
+      {
+        "feature": "f_vol_5",
+        "lag": 0,
+        "importance": 0.005104439519108066
+      },
+      {
+        "feature": "f_bar_dir",
+        "lag": 29,
+        "importance": 0.005018619264035343
+      },
+      {
+        "feature": "f_boll_width",
+        "lag": 29,
+        "importance": 0.0047536958679412844
+      },
+      {
+        "feature": "f_macd",
+        "lag": 29,
+        "importance": 0.004440265371153947
+      },
+      {
+        "feature": "f_vol_5",
+        "lag": 20,
+        "importance": 0.0043283259080156115
+      },
+      {
+        "feature": "f_vol_ratio",
+        "lag": 24,
+        "importance": 0.004264893545570555
+      }
+    ]
+  }
+}

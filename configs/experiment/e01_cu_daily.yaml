@@ -1,0 +1,17 @@
+# 实验入口：组合上述配置片段（Hydra defaults 列表）
+defaults:
+  - base
+  - data/futures_daily
+  - feature/default
+  - forecast/ar_transformer
+  - risk/v4_atr
+  - backtest/cn_commodity
+  - rl/ppo_default
+  - evolution/optuna_tpe
+
+experiment: e01_cu_daily
+data:
+  symbols: ["SHFE.cu"]
+  freq: "1d"
+  start: "2018-01-01"
+  end: "2024-12-31"

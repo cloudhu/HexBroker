@@ -1,0 +1,160 @@
+{
+  "title": "LightGBM 冠军模型特征工程迭代（单特征消融）",
+  "report_date": "2026-08-16",
+  "data_source": "sina",
+  "symbols": [
+    "SHFE.au",
+    "SHFE.ag",
+    "DCE.m"
+  ],
+  "horizon": 5,
+  "n_mc_samples": 30,
+  "best_params": {
+    "lgbm_n_estimators": 200.0,
+    "lgbm_lr": 0.016682542111075827,
+    "lgbm_max_depth": 11.0,
+    "lgbm_num_leaves": 57.0,
+    "lgbm_min_child_samples": 22.0,
+    "lgbm_subsample": 0.6827653754476659,
+    "lgbm_colsample_bytree": 0.9671600243145742,
+    "lgbm_reg_lambda": 0.04164800885264854,
+    "lgbm_reg_alpha": 0.002421420203310671
+  },
+  "base": {
+    "variant": "base",
+    "n_features": 19,
+    "dir_acc": 0.6867,
+    "eff_acc": 0.7208,
+    "coverage": 0.8402,
+    "rank_ic": 0.4452,
+    "n_signals": 2046
+  },
+  "variants": [
+    {
+      "variant": "+f_range_pos_20",
+      "dir_acc_pct": 68.67,
+      "dir_acc_delta_pp": 0.0,
+      "eff_acc_pct": 72.08,
+      "coverage_pct": 84.02,
+      "rank_ic": 0.4452,
+      "rank_ic_delta": 0.0,
+      "n_signals": 2046,
+      "passed": false
+    },
+    {
+      "variant": "+f_intraday_ret",
+      "dir_acc_pct": 68.57,
+      "dir_acc_delta_pp": -0.1,
+      "eff_acc_pct": 72.35,
+      "coverage_pct": 84.51,
+      "rank_ic": 0.4512,
+      "rank_ic_delta": 0.006,
+      "n_signals": 2046,
+      "passed": false
+    },
+    {
+      "variant": "+f_autocorr_20",
+      "dir_acc_pct": 68.13,
+      "dir_acc_delta_pp": -0.54,
+      "eff_acc_pct": 72.51,
+      "coverage_pct": 81.62,
+      "rank_ic": 0.439,
+      "rank_ic_delta": -0.0061,
+      "n_signals": 2046,
+      "passed": false
+    },
+    {
+      "variant": "+f_skew_20",
+      "dir_acc_pct": 68.57,
+      "dir_acc_delta_pp": -0.1,
+      "eff_acc_pct": 72.48,
+      "coverage_pct": 82.94,
+      "rank_ic": 0.4419,
+      "rank_ic_delta": -0.0033,
+      "n_signals": 2046,
+      "passed": false
+    },
+    {
+      "variant": "+f_kurt_20",
+      "dir_acc_pct": 68.43,
+      "dir_acc_delta_pp": -0.24,
+      "eff_acc_pct": 71.7,
+      "coverage_pct": 84.8,
+      "rank_ic": 0.4399,
+      "rank_ic_delta": -0.0053,
+      "n_signals": 2046,
+      "passed": false
+    },
+    {
+      "variant": "+f_streak_dir",
+      "dir_acc_pct": 68.18,
+      "dir_acc_delta_pp": -0.49,
+      "eff_acc_pct": 71.73,
+      "coverage_pct": 83.68,
+      "rank_ic": 0.4349,
+      "rank_ic_delta": -0.0103,
+      "n_signals": 2046,
+      "passed": false
+    },
+    {
+      "variant": "+f_vol_ratio_5_20",
+      "dir_acc_pct": 68.04,
+      "dir_acc_delta_pp": -0.64,
+      "eff_acc_pct": 71.15,
+      "coverage_pct": 84.7,
+      "rank_ic": 0.4271,
+      "rank_ic_delta": -0.0181,
+      "n_signals": 2046,
+      "passed": false
+    },
+    {
+      "variant": "+f_ret_vol_corr_20",
+      "dir_acc_pct": 68.28,
+      "dir_acc_delta_pp": -0.39,
+      "eff_acc_pct": 73.02,
+      "coverage_pct": 79.52,
+      "rank_ic": 0.4358,
+      "rank_ic_delta": -0.0093,
+      "n_signals": 2046,
+      "passed": false
+    },
+    {
+      "variant": "+f_xr_au_ag",
+      "dir_acc_pct": 67.64,
+      "dir_acc_delta_pp": -1.03,
+      "eff_acc_pct": 72.52,
+      "coverage_pct": 79.86,
+      "rank_ic": 0.4242,
+      "rank_ic_delta": -0.021,
+      "n_signals": 2046,
+      "passed": false
+    },
+    {
+      "variant": "+f_xr_au_m",
+      "dir_acc_pct": 68.18,
+      "dir_acc_delta_pp": -0.49,
+      "eff_acc_pct": 71.47,
+      "coverage_pct": 82.75,
+      "rank_ic": 0.4219,
+      "rank_ic_delta": -0.0233,
+      "n_signals": 2046,
+      "passed": false
+    },
+    {
+      "variant": "+f_xr_ag_m",
+      "dir_acc_pct": 67.94,
+      "dir_acc_delta_pp": -0.73,
+      "eff_acc_pct": 71.53,
+      "coverage_pct": 83.09,
+      "rank_ic": 0.4247,
+      "rank_ic_delta": -0.0205,
+      "n_signals": 2046,
+      "passed": false
+    }
+  ],
+  "pass_criteria": {
+    "rank_ic_delta": 0.01,
+    "dir_acc_delta_pp": 0.3,
+    "coverage_floor": 0.8
+  }
+}

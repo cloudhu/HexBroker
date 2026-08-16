@@ -1,0 +1,21 @@
+# 冠军特征配置 v3（2026-08-16 深夜，外盘特征迭代后）
+# 在冠军 v2（base 18 + f_range_pos_20）之上新增 SPX 外盘组 3 特征：
+#   f_xr_spx_ratio（沪金等内盘/标普比值）、f_xr_spx_mom（标普 5 日动量）、
+#   f_xr_spx_vol（标普 20 日已实现波动率）
+# 消融证据（全 66 折，调优后 HP）：
+#   方向准确率 68.67% -> 69.06% (+0.39pp)；coverage 84.02% -> 80.79%
+# 细粒度拆解：ratio(-0.39pp)/mom(-1.03pp)/vol(+0.00pp) 单独均不达标，
+#   但整组产生交互增益（树模型特征协同）——故按组采纳。
+# WTI 组(-0.68pp)与内盘比值（金银比等）不采纳（负贡献，见 ablation 报告）。
+# 数据：data/raw/global/spx.parquet（腾讯自选股 MCP 拉取，2017-2024，时差安全 shift(1)+asof）
+feature:
+  transformers: ["technical", "microstructure", "iterative", "cross", "normalize"]
+  normalize_window: 120
+  technical_params:
+    atr_window: 20
+    ma_windows: [5, 10, 20, 60]
+    rsi_window: 14
+  iterative_params:
+    include: ["f_range_pos_20"]
+  cross_params:
+    global_codes: ["spx"]

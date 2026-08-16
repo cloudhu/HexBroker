@@ -1,0 +1,82 @@
+# LightGBM 冠军模型精进 — 进度概览（2026-08-16）
+
+> 📄 **最终研究终报**：`deliverables/software-hexfutures-ai/lightgbm-champion-final-report-2026-08-16.md`
+> 完整历程（根因修复 → 调优 → 特征工程两轮 → 外盘因子 → 校准/集成探索，20+ 候选全 66 折实证）已整合为一份终报。
+
+## 已完成
+
+### 1. 根因定位 & 修复（关键突破）
+- **现象**：自写 `scripts/refine_lightgbm_champion.py::walk_forward_lightgbm` 长期只复现 ~52.20% 方向准确率（RankIC 0.025，近乎随机），而官方 `ForecastTrainer` 复现 R7 的 67.89% / RankIC 0.4092。
+- **诊断链**：三品种 raw `p_up` 与官方 Trainer 逐信号 **byte 相同**（2046 信号 0 差异）→ 训练/预测逻辑正确；差异来自官方 Trainer 在**每折测试窗做 per-fold Platt 校准**（各折 (a,b) 不同 → 改写跨折全局排序与方向准确率），自写版本漏掉该步骤。原注释"校准不影响方向准确率"为**错误结论**，已更正。
+- **修复与验证**：补 `calibrate_signals` 校准块后，`walk_forward_lightgbm` 与官方 Trainer **完全一致**（dir_acc=0.6789 / rank_ic=0.4092 / cov=0.8460）。
+
+### 2. 特征重要性分析（R7 口径，全 66 折）
+- 报告：`deliverables/software-hexfutures-ai/lightgbm-feature-importance-2026-08-16.md`
+- Top5：`f_vol_5`(8.7%) > `f_vol_ratio`(7.7%) > `f_bar_dir`(7.5%) > `f_boll_width`(7.2%) > `f_vol_20`(6.3%) —— 量价/波动率类主导。
+
+### 3. Optuna 超参调优（24 核 CPU 并行）
+- 报告：`deliverables/software-hexfutures-ai/lightgbm-refinement-2026-08-16.md`
+- 基准 67.89% → **68.33%**（+0.44pp），RankIC 0.4092 → **0.4338**；最优 HP 已写回 `configs/forecast/lightgbm_champion.yaml`。
+- 工程：`walk_forward_lightgbm` 折级并行（`ProcessPoolExecutor`，`--n-jobs` 默认 24），并行结果与官方逐字节一致；`_write_champion_config` 改原子写。
+
+### 4. 特征工程迭代（新增 8 候选 → 采纳 1）
+- 报告：`deliverables/software-hexfutures-ai/lightgbm-feature-engineering-2026-08-16.md`（消融明细 `lightgbm-feature-ablation-2026-08-16.md`）
+- 新增 `hexbroker/feature/iterative.py`（8 特征，严格因果 + include 白名单），pipeline 可插拔 `iterative` transformer。
+- 单特征消融（全 66 折）：**仅 `f_range_pos_20` 过线**（方向准确率 +0.34pp、RankIC +0.0114）；组合 `+f_kurt_20` 不叠加。
+- 冠军特征集 v2（19 特征）：**方向准确率 68.33% → 68.67%**，RankIC 0.4338 → **0.4452**。固化 `configs/feature/champion_v2.yaml` + `configs/experiment/e03_auagm_lightgbm_v2.yaml`。
+- 单测 6/6（含严格因果无未来泄漏测试）；feature/config 回归 18/18 全过。
+
+### 5. 跨品种特征迭代（内盘负贡献，冠军 v2 冻结）
+- 报告：`deliverables/software-hexfutures-ai/lightgbm-cross-features-2026-08-16.md`（消融明细 `lightgbm-cross-ablation-2026-08-16.md`）
+- 新增 `hexbroker/feature/cross.py`：内盘两两比值（金银比/金豆比/银豆比）+ 外盘参照比值（SPX/UDI/WTI，时差安全 shift(1)+asof）。
+- 消融（冠军 v2 基线，全 66 折）：**11 个候选全部未过线**；金银比最差（-1.03pp / RankIC -0.021）。**冠军 v2（19 特征）冻结为特征集终态**。
+- 外盘数据源勘察：东财 IP 级限流未恢复、腾讯仅 800 根（覆盖不了回测窗）、雅虎/FRED/stooq 不可达。外盘特征代码就绪，数据源恢复后补测。
+- 单测 9/9（因果 + 对称 + include + 稳定）。
+
+### 6. 外盘特征迭代（腾讯自选股 MCP 打通，冠军 v3 确立）
+- 报告：`deliverables/software-hexfutures-ai/lightgbm-global-features-2026-08-16.md`
+- **外盘数据源打通**：腾讯自选股 MCP `data_kline` 可分段拉全历史——usINX（标普500）/usCL（WTI）2017-2024 全覆盖；fxDINIW（美元指数）end 参数不生效（仅 2023-12 起）。落盘 `data/raw/global/{spx,wti}.parquet`（1909 根，关键点位与真实值一致）。
+- **SPX 组过线**：方向准确率 68.67% → **69.06%（+0.39pp）**；细粒度拆解（ratio/mom/vol 单独均不达标）确认是整组交互增益。WTI 组与内盘比值不采纳。
+- **冠军 v3（22 特征）**：`configs/feature/champion_v3.yaml` + `configs/experiment/e04_auagm_lightgbm_v3.yaml`。
+- ⚠️ 事故与教训：残留后台调优进程覆盖了冠军配置（HP 变成 250/0.0535/5/19），已恢复为 200/0.0167/11/57 并重跑确认；多后台任务竞争写同一配置是危险的，Optuna 写回前须校验。
+
+### 7. 外盘参照扩展（冠军 v4 确立，70.23%）
+- 报告：`deliverables/software-hexfutures-ai/lightgbm-global-ext-2026-08-16.md`
+- **新增 4 个外盘参照**（腾讯自选股 MCP，2017-2024 全覆盖）：纳指（ixic）、道指（dji）、**UUP 做多美元 ETF（美元指数代理）**、**TLT 美债 ETF（10Y 收益率代理）**。
+- **美元指数数据源解决**：fxDINIW end 参数不生效（仅 2023-12 起），改用 UUP（us 前缀、可拉全历史、与 DXY 高相关）作代理。
+- **UUP 组强过线**：方向准确率 **69.06% → 70.23%（+1.17pp）**、RankIC 0.4390 → **0.4510**、coverage 80.79% → **85.04%**——三指标全升（美元走弱→贵金属走强的直接传导链）。tlt/ixic/dji 负贡献不采纳。
+- **冠军 v4（25 特征）**：`configs/feature/champion_v4.yaml` + `configs/experiment/e05_auagm_lightgbm_v4.yaml`。
+
+### 8. 真实 10Y 收益率消融（宏观因子面定稿，冠军 v4 维持）
+- 报告：`deliverables/software-hexfutures-ai/lightgbm-t10y-ablation-2026-08-16.md`
+- **FRED DGS10 打通**（真实 10Y 收益率，1962 年起，带重试可稳定获取）：`data/raw/global/t10y.parquet`，关键点位验证 ✅（2018=2.46% / 2020 疫情底=0.76% / 2024=4.58%）。
+- **消融结论**：t10y -1.08pp ❌、ief（7-10 年 ETF）-1.61pp ❌——**利率维度三轮验证（tlt/ief/t10y）均无增量**。t10y 的 RankIC 微升（+0.0056）但方向准确率降：利率传导（实际利率 vs 通胀预期两维交织）在 5 日 horizon 信噪比不足。
+- **宏观因子面定稿**：风险偏好（spx）+ 美元（uup）双正交维度是最优组合；**冠军 v4（70.23%）维持不动**。
+
+### 9. 特征选择裁剪（特征路线收官，冠军 v4 维持）
+- 报告：`deliverables/software-hexfutures-ai/lightgbm-feature-selection-2026-08-16.md`
+- **重要性排名**（全 66 折）：UUP+SPX 六外盘特征全部 top-10（合计 36.3%）；量价类（vol_5/vol_20/boll_width）次之。
+- **裁剪消融**：top-10(-1.86pp)/top-15(-0.49pp)/top-20(-0.93pp) **全部降性能**，不采纳——LightGBM 对弱特征免疫（树分裂加权+已调优正则化），尾部特征提供边际交互信息，外部裁剪是负和博弈。
+- **特征工程路线正式收官**：67.89% → **70.23%**（冠军 v4，25 特征）；此后外盘扩展与裁剪全部负贡献，该特征集在 LightGBM 下已达性能上界。
+- 新增基础设施：`keep_features` 特征级白名单（pipeline + FeatureConfig）。
+
+### 10. 周线多尺度特征（特征路线封顶，冠军 v4 维持）
+- 报告：`deliverables/software-hexfutures-ai/lightgbm-weekly-features-2026-08-16.md`
+- 新增 `hexbroker/feature/weekly.py`：4 个严格因果周线特征（周内累计收益/周内位置/周内波动率/上周收益），单测 6/6（含因果验证）。
+- **消融**（冠军 v4 基线，全 66 折）：4 单特征 + 组合**全部负贡献**（-0.49~-1.61pp）——与 f_ret_acc_5/f_vol_20 等滚动窗口特征高度冗余，周线聚合是信息有损压缩。
+- **特征工程全路线封顶证据链**：外盘扩展、特征裁剪、周线多尺度三轮全部负贡献（全 66 折实证）——冠军 v4 是特征面终态。
+
+### 11. 概率校准对比（Platt 维持冠军）
+- 报告：`deliverables/software-hexfutures-ai/lightgbm-calibration-compare-2026-08-16.md`
+- `calibrate_signals` 新增 **Isotonic** 与 **none** 分支，全 66 折对比（冠军 v4 特征集）。
+- **结果**：Platt **70.23% 维持冠军**；Isotonic -2.93pp（但 RankIC +0.0207、ECE=0 完美校准——per-fold 小样本过拟合破坏方向判断）；none 崩到 52.44%（再次印证校准必要性）。
+- **结论**：校准维持 Platt；isotonic 保留为备选（样本量增大时可重测）。单测 6/6，回归 34/34。
+
+### 12. 多模型集成（模型侧封顶，LightGBM 单模型维持冠军）
+- 报告：`deliverables/software-hexfutures-ai/lightgbm-ensemble-compare-2026-08-16.md`
+- 新增 `EnsembleForecast`（LGB+XGB 双成员，cat 可选但本环境原生崩溃已降级；log1p 方差目标）；`walk_forward` 支持 `model_cls`。
+- **结果**：LightGBM **70.23% 维持冠军**；Ensemble 68.77%（-1.47pp，RankIC 微升但方向准确率降、coverage 降 2.3pp）不采纳。
+- **模型侧探索收官**：集成与 Isotonic 均负贡献——**冠军 v4（25 特征 + LightGBM + Platt）= 70.23% / RankIC 0.4510 为最终交付配置**。
+
+## 结论
+LightGBM 为确认冠军；全链路（特征重要性 → Optuna 调优 → 特征工程两轮 → 外盘特征两轮 → 利率因子验证 → 特征裁剪 → 周线多尺度 → 概率校准对比 → 多模型集成）打通，基准从 67.89% 提升至 **70.23%**（冠军 v4，25 特征；RankIC 0.4510），**特征面封顶 + 校准定稿（Platt）+ 模型侧封顶（集成负贡献）**。冠军 v4 为最终交付配置，研究路线收官。

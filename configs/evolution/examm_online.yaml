@@ -1,0 +1,6 @@
+# EXAMM 风格神经进化（仅作用于基线小网络 <1M 参数）
+evolution:
+  examm_n_islands: 4
+  examm_n_generations: 6
+  examm_max_params: 1000000
+  drift_psi_threshold: 0.2

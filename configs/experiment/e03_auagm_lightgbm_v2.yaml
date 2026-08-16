@@ -1,0 +1,25 @@
+# 实验入口 v2：LightGBM 冠军模型 + 特征工程迭代（f_range_pos_20）
+# 与 e02 的唯一差异：feature 段启用 iterative + f_range_pos_20（19 特征 vs 18）
+# 证据：全 66 折 dir_acc 68.33% -> 68.67%，RankIC 0.4338 -> 0.4452（见 lightgbm-feature-ablation-2026-08-16.md）
+# 注意：本项目的 _merge_with_defaults 不解析 OmegaConf defaults 列表，
+# 特征段需在此平铺显式声明（其余沿用代码内默认，与 refine 脚本口径一致）。
+experiment: e03_auagm_lightgbm_v2
+data:
+  symbols: ["SHFE.au", "SHFE.ag", "DCE.m"]
+  freq: "1d"
+  start: "2018-01-01"
+  end: "2024-12-31"
+forecast:
+  name: "lightgbm"
+  horizon: 5
+  n_mc_samples: 30
+  calibration_method: "platt"
+feature:
+  transformers: ["technical", "microstructure", "iterative", "normalize"]
+  normalize_window: 120
+  technical_params:
+    atr_window: 20
+    ma_windows: [5, 10, 20, 60]
+    rsi_window: 14
+  iterative_params:
+    include: ["f_range_pos_20"]

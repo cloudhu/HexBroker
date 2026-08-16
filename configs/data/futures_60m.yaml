@@ -1,0 +1,12 @@
+# 60 分钟线配置（夜盘边界处理）
+data:
+  symbols: ["SHFE.cu"]
+  freq: "60m"
+  start: "2020-01-01"
+  end: "2024-12-31"
+  source: "csv"
+  train_len: 1000
+  test_len: 240
+  purge: 20
+  embargo: 10
+  mode: "rolling"

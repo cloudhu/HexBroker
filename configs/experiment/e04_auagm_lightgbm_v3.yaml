@@ -1,0 +1,27 @@
+# 实验入口 v3：LightGBM 冠军模型 + 特征工程迭代 v3（f_range_pos_20 + SPX 外盘组）
+# 与 e03 的差异：feature 段启用 cross + global_codes=[spx]（22 特征 vs 19）
+# 证据：全 66 折 dir_acc 68.67% -> 69.06%，coverage 84.02% -> 80.79%
+# 注意：_merge_with_defaults 不解析 OmegaConf defaults 列表，特征段平铺声明；
+# 外盘数据 data/raw/global/spx.parquet 需先经 _build_global_data.py 生成。
+experiment: e04_auagm_lightgbm_v3
+data:
+  symbols: ["SHFE.au", "SHFE.ag", "DCE.m"]
+  freq: "1d"
+  start: "2018-01-01"
+  end: "2024-12-31"
+forecast:
+  name: "lightgbm"
+  horizon: 5
+  n_mc_samples: 30
+  calibration_method: "platt"
+feature:
+  transformers: ["technical", "microstructure", "iterative", "cross", "normalize"]
+  normalize_window: 120
+  technical_params:
+    atr_window: 20
+    ma_windows: [5, 10, 20, 60]
+    rsi_window: 14
+  iterative_params:
+    include: ["f_range_pos_20"]
+  cross_params:
+    global_codes: ["spx"]

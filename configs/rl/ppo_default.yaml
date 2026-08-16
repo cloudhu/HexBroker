@@ -1,0 +1,18 @@
+# RL 默认（PPO，内置纯 numpy actor-critic；use_sb3=false 时用 CPU fallback）
+rl:
+  algo: "PPO"
+  use_sb3: false
+  action_space: "discrete5"
+  obs_window: 30
+  total_timesteps: 50000
+  w_pnl: 1.0
+  w_cost: 1.0
+  w_dd: 2.0
+  w_turn: 0.05
+  w_align: 0.1
+  align_anneal_steps: 20000
+  learning_rate: 0.003
+  gamma: 0.99
+  clip_range: 0.2
+  hidden_size: 32
+  n_hidden: 2

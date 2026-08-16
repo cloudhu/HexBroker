@@ -1,0 +1,14 @@
+# SAC + 连续仓位备选
+rl:
+  algo: "SAC"
+  use_sb3: false
+  action_space: "continuous"
+  obs_window: 30
+  total_timesteps: 50000
+  w_pnl: 1.0
+  w_cost: 1.0
+  w_dd: 2.0
+  w_turn: 0.05
+  w_align: 0.1
+  learning_rate: 0.003
+  gamma: 0.99

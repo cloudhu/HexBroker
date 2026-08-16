@@ -1,0 +1,11 @@
+# 中国商品期货回测成本假设（默认，§10 Q3）
+backtest:
+  fee_rate_open: 0.00005       # 手续费万0.5 双边
+  fee_rate_close: 0.00005
+  fee_rate_close_today: 0.00010  # 平今加倍
+  slippage_ticks: 1.0          # 滑点 1 tick
+  margin_rate: 0.12            # 保证金 12%
+  multiplier: 10.0             # 合约乘数（cu/rb = 5/10，按品种可覆盖）
+  min_tick: 10.0               # 最小变动价位
+  limit_trade_allowed: false
+  initial_capital: 1000000.0   # 本金 100 万

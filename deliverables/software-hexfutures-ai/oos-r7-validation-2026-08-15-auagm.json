@@ -1,0 +1,296 @@
+{
+  "title": "真实数据 OOS 信号验证 + R7 终裁报告（au/ag/m，真 Kronos）",
+  "report_date": "2026-08-15",
+  "data_source": {
+    "chosen_source": "sina",
+    "priority": [
+      "pytdx",
+      "sina",
+      "akshare_fundamentals"
+    ],
+    "reachability": "pytdx 公共服务器在本沙箱 TCP 超时 -> 自动降级 sina 成功",
+    "symbols": [
+      "SHFE.au",
+      "SHFE.ag",
+      "DCE.m"
+    ],
+    "freq": "1d",
+    "start": "2018-01-01",
+    "end": "2024-12-31",
+    "n_bars": 4772,
+    "symbols_returned": [
+      "ag0",
+      "au0",
+      "m0"
+    ]
+  },
+  "horizon": 5,
+  "models_requested": [
+    "lightgbm",
+    "ar_transformer",
+    "tcn",
+    "gru",
+    "kronos"
+  ],
+  "models_run": {
+    "lightgbm": {
+      "model_id": "c3fcfadee269",
+      "n_oos_signals": 2046,
+      "n_folds": "reused"
+    },
+    "ar_transformer": {
+      "model_id": "8342f2e8de40",
+      "n_oos_signals": 2046,
+      "n_folds": "reused"
+    },
+    "tcn": {
+      "model_id": "6cb4300cafd0",
+      "n_oos_signals": 2046,
+      "n_folds": "reused"
+    },
+    "gru": {
+      "model_id": "b843efeff26f",
+      "n_oos_signals": 2046,
+      "n_folds": "reused"
+    },
+    "kronos": {
+      "model_id": "kronos",
+      "n_oos_signals": 3960,
+      "n_folds": 66
+    }
+  },
+  "models_failed": {},
+  "gate1_thresholds": {
+    "direction_accuracy": 0.54,
+    "effective_accuracy": 0.58,
+    "coverage": 0.3
+  },
+  "gate1_aggregated": {
+    "lightgbm": {
+      "n_oos": 2046,
+      "n_effective": 1731,
+      "coverage": 0.8460410557184751,
+      "direction_accuracy": 0.6788856304985337,
+      "effective_accuracy": 0.706528018486424,
+      "rank_ic": 0.40919792616009054,
+      "ic": 0.02971424145193676
+    },
+    "ar_transformer": {
+      "n_oos": 2046,
+      "n_effective": 1649,
+      "coverage": 0.8059628543499511,
+      "direction_accuracy": 0.6686217008797654,
+      "effective_accuracy": 0.7010309278350515,
+      "rank_ic": 0.4021711353181837,
+      "ic": -0.0077714696355880835
+    },
+    "tcn": {
+      "n_oos": 2046,
+      "n_effective": 1561,
+      "coverage": 0.7629521016617791,
+      "direction_accuracy": 0.6764418377321603,
+      "effective_accuracy": 0.7187700192184497,
+      "rank_ic": 0.41613546392659473,
+      "ic": 0.0035966497451625857
+    },
+    "gru": {
+      "n_oos": 2046,
+      "n_effective": 1599,
+      "coverage": 0.781524926686217,
+      "direction_accuracy": 0.6700879765395894,
+      "effective_accuracy": 0.7141963727329581,
+      "rank_ic": 0.4249017782039277,
+      "ic": -0.009550708104365637
+    },
+    "kronos": {
+      "n_oos": 3960,
+      "n_effective": 3447,
+      "coverage": 0.8704545454545455,
+      "direction_accuracy": 0.4575757575757576,
+      "effective_accuracy": 0.5250942848854075,
+      "rank_ic": 0.04153204971646459,
+      "ic": 0.05577371762288106
+    }
+  },
+  "gate1_per_symbol": {
+    "lightgbm": {
+      "ag0": {
+        "n_oos": 682,
+        "n_effective": 575,
+        "coverage": 0.843108504398827,
+        "direction_accuracy": 0.6612903225806451,
+        "effective_accuracy": 0.6869565217391305,
+        "rank_ic": 0.3845801451211553,
+        "ic": 0.03272256618524731
+      },
+      "au0": {
+        "n_oos": 682,
+        "n_effective": 561,
+        "coverage": 0.8225806451612904,
+        "direction_accuracy": 0.6891495601173021,
+        "effective_accuracy": 0.7237076648841355,
+        "rank_ic": 0.3869822587492315,
+        "ic": -0.12259034232337811
+      },
+      "m0": {
+        "n_oos": 682,
+        "n_effective": 595,
+        "coverage": 0.8724340175953079,
+        "direction_accuracy": 0.6862170087976539,
+        "effective_accuracy": 0.7092436974789916,
+        "rank_ic": 0.48055110090609987,
+        "ic": 0.07197430422621472
+      }
+    },
+    "ar_transformer": {
+      "ag0": {
+        "n_oos": 682,
+        "n_effective": 572,
+        "coverage": 0.8387096774193549,
+        "direction_accuracy": 0.6524926686217009,
+        "effective_accuracy": 0.6748251748251748,
+        "rank_ic": 0.36473786879772563,
+        "ic": 0.06721285319682548
+      },
+      "au0": {
+        "n_oos": 682,
+        "n_effective": 504,
+        "coverage": 0.7390029325513197,
+        "direction_accuracy": 0.6730205278592375,
+        "effective_accuracy": 0.7182539682539683,
+        "rank_ic": 0.38262061037471196,
+        "ic": -0.003375417261052688
+      },
+      "m0": {
+        "n_oos": 682,
+        "n_effective": 573,
+        "coverage": 0.8401759530791789,
+        "direction_accuracy": 0.6803519061583577,
+        "effective_accuracy": 0.7120418848167539,
+        "rank_ic": 0.4650219935872364,
+        "ic": -0.10202351153109493
+      }
+    },
+    "tcn": {
+      "ag0": {
+        "n_oos": 682,
+        "n_effective": 524,
+        "coverage": 0.7683284457478006,
+        "direction_accuracy": 0.6788856304985337,
+        "effective_accuracy": 0.7099236641221374,
+        "rank_ic": 0.4260574209316564,
+        "ic": 0.012227544739083772
+      },
+      "au0": {
+        "n_oos": 682,
+        "n_effective": 534,
+        "coverage": 0.782991202346041,
+        "direction_accuracy": 0.6788856304985337,
+        "effective_accuracy": 0.7191011235955056,
+        "rank_ic": 0.40010645191429156,
+        "ic": -0.012340472464404558
+      },
+      "m0": {
+        "n_oos": 682,
+        "n_effective": 503,
+        "coverage": 0.7375366568914956,
+        "direction_accuracy": 0.6715542521994134,
+        "effective_accuracy": 0.7276341948310139,
+        "rank_ic": 0.4342090843522655,
+        "ic": -0.004769557408782067
+      }
+    },
+    "gru": {
+      "ag0": {
+        "n_oos": 682,
+        "n_effective": 511,
+        "coverage": 0.749266862170088,
+        "direction_accuracy": 0.656891495601173,
+        "effective_accuracy": 0.7123287671232876,
+        "rank_ic": 0.43267385966509064,
+        "ic": 0.0016441584531593483
+      },
+      "au0": {
+        "n_oos": 682,
+        "n_effective": 544,
+        "coverage": 0.7976539589442815,
+        "direction_accuracy": 0.6686217008797654,
+        "effective_accuracy": 0.7058823529411765,
+        "rank_ic": 0.370928576244143,
+        "ic": 0.028455194603136086
+      },
+      "m0": {
+        "n_oos": 682,
+        "n_effective": 544,
+        "coverage": 0.7976539589442815,
+        "direction_accuracy": 0.6847507331378299,
+        "effective_accuracy": 0.7242647058823529,
+        "rank_ic": 0.4706636370632742,
+        "ic": -0.041711972257705815
+      }
+    },
+    "kronos": {
+      "ag0": {
+        "n_oos": 1320,
+        "n_effective": 1168,
+        "coverage": 0.8848484848484849,
+        "direction_accuracy": 0.46136363636363636,
+        "effective_accuracy": 0.521404109589041,
+        "rank_ic": 0.03312650070353589,
+        "ic": 0.056497888978135055
+      },
+      "au0": {
+        "n_oos": 1320,
+        "n_effective": 1127,
+        "coverage": 0.8537878787878788,
+        "direction_accuracy": 0.4537878787878788,
+        "effective_accuracy": 0.5314995563442768,
+        "rank_ic": 0.06583622479179375,
+        "ic": 0.08456935289686215
+      },
+      "m0": {
+        "n_oos": 1320,
+        "n_effective": 1152,
+        "coverage": 0.8727272727272727,
+        "direction_accuracy": 0.4575757575757576,
+        "effective_accuracy": 0.5225694444444444,
+        "rank_ic": 0.03288172327938482,
+        "ic": 0.04946462044413661
+      }
+    }
+  },
+  "gate1_pass": {
+    "lightgbm": true,
+    "ar_transformer": true,
+    "tcn": true,
+    "gru": true,
+    "kronos": false
+  },
+  "r7": {
+    "contender": "kronos",
+    "baseline": "lightgbm",
+    "kronos_wins": false,
+    "kronos_passed_gate": false,
+    "verdict": "R7 主位让予 LightGBM(真 Kronos 数据裁决)",
+    "logic": "kronos_wins = (kronos.方向准确率 >= lightgbm.方向准确率) AND (kronos.RankIC >= lightgbm.RankIC)"
+  },
+  "kronos": {
+    "status": "RUN",
+    "reason": "真 Kronos 成功产出 OOS 信号（NeoQuasar/Kronos-small，n_mc=10）",
+    "model_name": "NeoQuasar/Kronos-small",
+    "tokenizer_name": "NeoQuasar/Kronos-Tokenizer-base",
+    "n_mc": 10,
+    "note": "真 Kronos vs LightGBM 数据裁决（非代理）"
+  },
+  "environment_notes": [
+    "Python 受管解释器 3.13；venv default。",
+    "pytdx 公共行情服务器在本沙箱 TCP 超时，脚本按 free.yaml 优先级自动降级 sina 并成功跑完。",
+    "sina 返回真实 au0/ag0/m0 主力连续日线，数据截止 2024（区间按 2018-01-01~2024-12-31 过滤）。",
+    "真 Kronos 部署：third_party/Kronos（shiyu-coder/Kronos master）+ NeoQuasar/Kronos-small 本地 HF 缓存 + Kronos-Tokenizer-base（blob 经 hf-mirror 补齐，sha256 校验通过）。",
+    "Kronos 推理设备：GPU cuda:0（torch 2.11.0+cu128，CUDA 可用）；单次 predict_batch(32)≈0.22s。",
+    "Kronos 路径分布：sample_count=1 循环 n_mc 次收集独立路径（KronosPredictor 内部 sample_count>1 为平均）。",
+    "kronos n_mc=10（KRONOS_N_MC 环境变量可调）；若样本规模过大可在报告注明并按需降 n_mc。",
+    "scipy 可用=是（RankIC/IC 用 scipy.stats 计算）。",
+    "预测层推理缓存泄漏已修复（GRU/AR/TCN 的 forward 缓存现于 predict 后统一清理）。"
+  ]
+}

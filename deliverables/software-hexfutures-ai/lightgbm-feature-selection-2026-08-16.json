@@ -1,0 +1,85 @@
+{
+  "title": "特征选择裁剪消融（冠军 v4 25 特征 vs top-K）",
+  "report_date": "2026-08-16",
+  "ranking": [
+    "f_xr_uup_mom",
+    "f_vol_5",
+    "f_xr_spx_mom",
+    "f_xr_uup_vol",
+    "f_vol_20",
+    "f_xr_uup_ratio",
+    "f_boll_width",
+    "f_xr_spx_vol",
+    "f_bar_dir",
+    "f_xr_spx_ratio",
+    "f_up_vol_share",
+    "f_ret_acc_5",
+    "f_macd_hist",
+    "f_range_pos_20",
+    "f_vol_ratio",
+    "f_rsi",
+    "f_macd",
+    "f_ret_acc_20",
+    "f_ma_spread",
+    "f_gap",
+    "f_ret_1",
+    "f_upper_shadow",
+    "f_intraday_range",
+    "f_lower_shadow",
+    "f_body_ratio"
+  ],
+  "rows": [
+    {
+      "variant": "full-25",
+      "n_features": 25,
+      "dir_acc": 0.7023,
+      "eff_acc": 0.7299,
+      "coverage": 0.8504,
+      "rank_ic": 0.451,
+      "n_signals": 2046
+    },
+    {
+      "variant": "top-10",
+      "n_features": 10,
+      "dir_acc": 0.6838,
+      "eff_acc": 0.7154,
+      "coverage": 0.8397,
+      "rank_ic": 0.4389,
+      "n_signals": 2046,
+      "dir_acc_delta_pp": -1.86,
+      "rank_ic_delta": -0.0121,
+      "coverage_delta_pp": -1.08,
+      "adopted": false
+    },
+    {
+      "variant": "top-15",
+      "n_features": 15,
+      "dir_acc": 0.6975,
+      "eff_acc": 0.7294,
+      "coverage": 0.8436,
+      "rank_ic": 0.4465,
+      "n_signals": 2046,
+      "dir_acc_delta_pp": -0.49,
+      "rank_ic_delta": -0.0045,
+      "coverage_delta_pp": -0.68,
+      "adopted": false
+    },
+    {
+      "variant": "top-20",
+      "n_features": 20,
+      "dir_acc": 0.6931,
+      "eff_acc": 0.735,
+      "coverage": 0.8172,
+      "rank_ic": 0.4503,
+      "n_signals": 2046,
+      "dir_acc_delta_pp": -0.93,
+      "rank_ic_delta": -0.0007,
+      "coverage_delta_pp": -3.32,
+      "adopted": false
+    }
+  ],
+  "adopt_criteria": {
+    "dir_acc_floor_pp": -0.2,
+    "coverage_floor_pp": -1.0
+  }
+}
