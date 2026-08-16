@@ -2,8 +2,8 @@
 # 安装：C:/Users/Administrator/.workbuddy/binaries/python/envs/default/Scripts/pip.exe install -r requirements.txt
 # 注：torch / stable-baselines3 为可选重依赖（CPU 沙箱可省略，系统会自动回退纯 numpy 实现）。
 
-numpy>=1.24
-pandas==2.2.2
+numpy>=1.26,<3
+pandas>=2.2.3,<4
 scipy>=1.11
 scikit-learn>=1.3
 joblib>=1.3
@@ -17,7 +17,7 @@ loguru>=0.7
 rich>=13
 tqdm>=4.67
 gymnasium>=0.29,<1.1
-lightgbm>=4.1
+lightgbm>=4.5,<5
 pytest>=8
 
 # ---------- 可选（heavy，不阻塞离线链路） ----------
