@@ -75,6 +75,15 @@ class FeaturePipeline:
         self.iterative_params = dict(getattr(fc, "iterative_params", {}) or {})
         self.cross_params = dict(getattr(fc, "cross_params", {}) or {})
         self.weekly_params = dict(getattr(fc, "weekly_params", {}) or {})
+        # fail-fast：配置了外盘组但未提供外盘数据 → 显式报错（防特征静默缺失）
+        # 只校验 global_codes（内盘比值 f_xr_{a}_{b} 无需外盘数据，不宜在此区分）
+        need_global = bool(self.cross_params.get("global_codes"))
+        if "cross" in self.transformers and need_global and not self.global_close:
+            raise ValueError(
+                "feature.cross_params 配置了外盘 global 特征（global_codes），"
+                "但未传入 global_close 数据。请先 load_global_close + align_global_to_inner "
+                "（见 hexbroker/feature/global_ref.py）。"
+            )
         # 特征级白名单（特征选择裁剪）：None=保留全部；否则只保留列出的 f_ 特征
         keep = getattr(fc, "keep_features", None)
         self.keep_features = set(keep) if keep else None

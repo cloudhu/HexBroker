@@ -80,3 +80,9 @@
 
 ## 结论
 LightGBM 为确认冠军；全链路（特征重要性 → Optuna 调优 → 特征工程两轮 → 外盘特征两轮 → 利率因子验证 → 特征裁剪 → 周线多尺度 → 概率校准对比 → 多模型集成）打通，基准从 67.89% 提升至 **70.23%**（冠军 v4，25 特征；RankIC 0.4510），**特征面封顶 + 校准定稿（Platt）+ 模型侧封顶（集成负贡献）**。冠军 v4 为最终交付配置，研究路线收官。
+
+### 14. GitHub 版本管理 + CI 上线（2026-08-16 傍晚）
+- **仓库**：https://github.com/cloudhu/HexBroker（private，main），token 存 Windows 凭据管理器（不落盘）。
+- **CI**：`.github/workflows/ci.yml`——push/PR 到 main 触发，py3.11/py3.12 矩阵：`pip install -r requirements.txt` + `pip install -e . --no-deps` + `pytest`。**首次运行通过**（commit a59c7e8，双矩阵 success）。
+- **CI 排障两条根因**：① requirements `pandas==2.2.2`+numpy2 不兼容 → `>=2.2.3,<4`；② `test_kronos_predictor.py` 运行时 `import torch`（可选重依赖）→ 加 `_KRONOS_NEEDS_TORCH` skip 标记只跳过 3 个 Kronos 类（无 torch 123+10skip / 有 torch 133 全过）。
+- 注：lint job 暂缓（ruff 152 个历史遗留问题，清理为独立任务）。

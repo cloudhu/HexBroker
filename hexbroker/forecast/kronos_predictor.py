@@ -97,7 +97,12 @@ class KlineKronosOOS:
         if self._predictor is not None:
             return self._predictor
         os.environ.setdefault("HF_HUB_OFFLINE", "1")
-        import torch
+        try:
+            import torch
+        except ImportError as exc:  # pragma: no cover
+            raise RuntimeError(
+                "Kronos OOS 通路需要 torch（可选重依赖）。请先安装：pip install torch 后重试。"
+            ) from exc
 
         from model import Kronos, KronosPredictor, KronosTokenizer
 

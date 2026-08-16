@@ -98,27 +98,12 @@ GLOBAL_CANDIDATES = [
     "ief",   # 7-10 年美债 ETF = 10Y 收益率价格代理（data/raw/global/ief.parquet）
 ]
 
-GLOBAL_DATA_DIR = _ROOT / "data" / "raw" / "global"
-
-
-def load_global_close(code: str) -> pd.Series:
-    """加载外盘收盘序列（datetime 索引，close 列）。"""
-    fp = GLOBAL_DATA_DIR / f"{code}.parquet"
-    df = pd.read_parquet(fp)
-    s = df["close"].astype(float).sort_index()
-    return s
-
-
-def align_global_to_inner(global_close: pd.Series, inner_index: pd.Index) -> pd.Series:
-    """时差安全对齐：外盘 shift(1) 后 asof 到内盘交易日。
-
-    美盘收盘（北京时间次日凌晨）晚于内盘收盘，故 t 日内盘只能看到外盘 t-1 收盘。
-    对每个内盘交易日 t，取外盘 index <= t 的最近值（已 shift(1)）。
-    """
-    shifted = global_close.shift(1)
-    # asof 对齐：每个内盘日期用 <= 该日期的最近外盘收盘
-    aligned = shifted.reindex(inner_index).ffill()
-    return aligned
+# 外盘加载/对齐逻辑下沉至 hexbroker 供生产复用（见 hexbroker/feature/global_ref.py）
+from hexbroker.feature.global_ref import (  # noqa: E402
+    GLOBAL_DATA_DIR,
+    align_global_to_inner,
+    load_global_close,
+)
 
 # 通过线（d_dir 已换算为 pp 单位，见 SUMMARY 段）
 PASS_RANKIC_DELTA = 0.01       # RankIC 提升阈值
@@ -234,6 +219,11 @@ def main() -> None:
     realized = compute_realized_returns(bars, int(cfg0.forecast.horizon))
 
     # 外盘上下文（可选）：shift(1)+asof 时差安全对齐到内盘交易日
+    # --global-only 时若未显式传 --global-code，自动加载全部 GLOBAL_CANDIDATES，
+    # 防止候选含外盘代码但 global_close 为空 → 静默生成 0 新特征（n_cols 不变的失真消融）
+    if args.global_only and not args.global_code:
+        args.global_code = ",".join(GLOBAL_CANDIDATES)
+        print(f"[INFO] --global-only 未指定 --global-code，自动加载全部外盘候选：{args.global_code}")
     global_close: dict[str, pd.Series] = {}
     if args.global_code:
         inner_dates = bars.df.index.get_level_values("datetime").unique().sort_values()
@@ -265,13 +255,23 @@ def main() -> None:
         variants.append((f"+{'+'.join(feats)}", ",".join(feats)))
 
     rows: list[dict] = []
+    base_cols: Optional[int] = None
     for label, extra in variants:
         print("-" * 72)
         print(f"[VARIANT] {label}")
         cfg_v = build_variant_cfg(cfg0, extra, base_feature=base_feature, global_codes=list(global_close.keys()))
         features = build_features(bars, cfg_v, global_close=global_close)
-        print(f"[OK] 特征：n_cols={len(features.df.columns)} "
+        if label == "base":
+            base_cols = len(features.df.columns)
+        n_cols = len(features.df.columns)
+        print(f"[OK] 特征：n_cols={n_cols} "
               f"({features.symbols})")
+        # 防静默失真：非 base 变体必须比 base 多至少 1 列，否则候选特征未生效（消融结论无效）
+        if label != "base" and base_cols is not None and n_cols <= base_cols:
+            raise RuntimeError(
+                f"[FATAL] 变体 {label} 特征列数未增加（base={base_cols} -> {n_cols}），"
+                f"候选特征未生效——检查 --global-code/特征名是否正确加载。"
+            )
         wf = walk_forward_lightgbm(
             cfg_v, bars, features, params=best_params,
             collect_models=False, splitter_overrides=None,

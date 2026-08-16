@@ -292,9 +292,15 @@ class EnsembleForecast(LightGBMForecast):
 
     # ---- 成员构造（懒导入，避免重依赖阻塞其它模型） ----
     def _build_member(self, kind: str):
-        from lightgbm import LGBMRegressor
-        from xgboost import XGBRegressor
-        from catboost import CatBoostRegressor
+        try:
+            from lightgbm import LGBMRegressor
+            from xgboost import XGBRegressor
+            from catboost import CatBoostRegressor
+        except ImportError as exc:  # pragma: no cover
+            raise RuntimeError(
+                "EnsembleForecast 需要 lightgbm/xgboost/catboost。请安装："
+                "pip install lightgbm xgboost catboost"
+            ) from exc
 
         common = dict(
             n_estimators=self.n_estimators,

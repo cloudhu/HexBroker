@@ -46,6 +46,23 @@ def _build_source(cfg, source: Optional[str]) -> Any:
     raise ValueError(f"未知数据源：{src}")
 
 
+def _load_global_context(cfg, barframe) -> dict[str, pd.Series]:
+    """按 feature.cross_params.global_codes 加载外盘数据并做时差安全对齐。
+
+    无 global_codes 配置时返回空 dict（不加载、不报错）。
+    """
+    gcodes = (getattr(cfg.feature, "cross_params", {}) or {}).get("global_codes") or []
+    if not gcodes:
+        return {}
+    from hexbroker.feature.global_ref import align_global_to_inner, load_global_close
+
+    inner_dates = barframe.df.index.get_level_values("datetime").unique().sort_values()
+    return {
+        code: align_global_to_inner(load_global_close(code), inner_dates)
+        for code in gcodes
+    }
+
+
 def _signal_eval(barframe, features, cfg, model_name: str, store_dir: str) -> tuple[pd.DataFrame, dict]:
     """walk-forward 训练并落 OOS 信号，返回 (signals_df, train_result_dict)。"""
     store = SignalStore(store_dir)
@@ -369,7 +386,9 @@ def run_pipeline(cfg, *, source=None, model=None, store_dir=None, skip_rl=False,
 
     src = _build_source(cfg, source)
     barframe = src.fetch_bars(list(cfg.data.symbols), start=cfg.data.start, end=cfg.data.end, freq=cfg.data.freq)
-    features = build_features(barframe, cfg)
+    # 外盘上下文（时差安全对齐）——冠军配置含 spx/uup global 特征，生产路径必须注入
+    global_close = _load_global_context(cfg, barframe)
+    features = build_features(barframe, cfg, global_close=global_close)
     prices = _prices_df(barframe)
     model_name = model or cfg.forecast.name
 

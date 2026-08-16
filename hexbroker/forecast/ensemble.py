@@ -33,9 +33,10 @@ def ensemble_signals(signal_lists: Iterable[list[ForecastSignal]], weights: list
     out: list[ForecastSignal] = []
     for key, items in by_key.items():
         w_sum = sum(w for w, _ in items)
-        p_up = float(np.sum(w * s.p_up for w, s in items) / w_sum)
-        exp_ret = float(np.sum(w * s.exp_ret for w, s in items) / w_sum)
-        vol = float(np.sum(w * s.vol_hat for w, s in items) / w_sum)
+        # numpy>=2 弃用 np.sum(generator)，用内置 sum 聚合
+        p_up = float(sum(w * s.p_up for w, s in items) / w_sum)
+        exp_ret = float(sum(w * s.exp_ret for w, s in items) / w_sum)
+        vol = float(sum(w * s.vol_hat for w, s in items) / w_sum)
         # 取最早 train_end 作为集成指纹
         train_end = min((s.train_end for _, s in items), default=key[1])
         model_ids = sorted({s.model_id for _, s in items})
@@ -51,7 +52,8 @@ def ensemble_signals(signal_lists: Iterable[list[ForecastSignal]], weights: list
                 conf=float(np.mean([s.conf for _, s in items])),
                 model_id="|".join(model_ids)[:24],
                 train_end=train_end,
-                is_effective=abs(p_up - 0.5) > items[0][1].eff_thr,
+                # ForecastSignal 无 eff_thr 字段（校准层才赋予），默认 0.05 与校准契约一致
+                is_effective=abs(p_up - 0.5) > getattr(items[0][1], "eff_thr", 0.05),
             )
         )
     out.sort(key=lambda s: (s.symbol, s.ts))

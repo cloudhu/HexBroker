@@ -29,3 +29,5 @@ catboost_info/
 *.pkl
 *.joblib
 *.h5
+# numpy 二进制（测试残留/缓存）
+*.npy

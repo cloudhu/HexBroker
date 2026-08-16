@@ -216,13 +216,15 @@ class ForecastModel(ABC):
         self, paths: np.ndarray, valid_index: pd.MultiIndex
     ) -> list[ForecastSignal]:
         n = paths.shape[1]
+        n_mc = paths.shape[0]  # MC 采样路径数（vol_hat 的样本维度，非窗口数）
         out: list[ForecastSignal] = []
         for i in range(n):
-            cum = paths[:, i, :].sum(axis=1)  # 累计 horizon 步收益
+            cum = paths[:, i, :].sum(axis=1)  # 累计 horizon 步收益（每路径一个标量）
             p_up = float(np.mean(cum > 0))
             exp_ret = float(np.mean(cum))
             qs = {f"q{q}": float(np.quantile(cum, q / 100)) for q in (10, 25, 50, 75, 90)}
-            vol_hat = float(np.std(cum, ddof=1)) if n > 1 else 0.0
+            # 用 n_mc 判 ddof：单条路径时 ddof=1 的 std 为 NaN；之前误用窗口数 n
+            vol_hat = float(np.std(cum, ddof=1)) if n_mc > 1 else 0.0
             iqr = qs["q90"] - qs["q10"]
             conf = float(np.clip(1 - iqr / (6 * (vol_hat + 1e-9)), 0.0, 1.0))
             ts = valid_index[i][1]
