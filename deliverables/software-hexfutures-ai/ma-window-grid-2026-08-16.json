@@ -1,0 +1,64 @@
+{
+  "rows": [
+    {
+      "label": "none（无过滤基线）",
+      "ma_window": null,
+      "trigger_rate": 0.3001893939393939,
+      "annual_return": 0.10323537693565799,
+      "max_drawdown": -0.20762083132163933,
+      "sharpe": 0.8534069610070745,
+      "total_return": 0.8594530362499988,
+      "n_trades": 217
+    },
+    {
+      "label": "MA5",
+      "ma_window": 5,
+      "trigger_rate": 0.14772727272727273,
+      "annual_return": 0.09354281922073882,
+      "max_drawdown": -0.08230080367125858,
+      "sharpe": 1.1238813748244472,
+      "total_return": 0.7586907187499985,
+      "n_trades": 156
+    },
+    {
+      "label": "MA10",
+      "ma_window": 10,
+      "trigger_rate": 0.14583333333333334,
+      "annual_return": 0.05543061103271629,
+      "max_drawdown": -0.07029416089092222,
+      "sharpe": 0.7565019066982399,
+      "total_return": 0.405798697999999,
+      "n_trades": 136
+    },
+    {
+      "label": "MA20",
+      "ma_window": 20,
+      "trigger_rate": 0.1590909090909091,
+      "annual_return": 0.10182963828160507,
+      "max_drawdown": -0.08838598858113778,
+      "sharpe": 1.2113382142990914,
+      "total_return": 0.8445449709999988,
+      "n_trades": 147
+    },
+    {
+      "label": "MA30",
+      "ma_window": 30,
+      "trigger_rate": 0.15625,
+      "annual_return": 0.08420487731998216,
+      "max_drawdown": -0.21192346308260213,
+      "sharpe": 0.8197077129091234,
+      "total_return": 0.6660010524999989,
+      "n_trades": 142
+    },
+    {
+      "label": "MA50",
+      "ma_window": 50,
+      "trigger_rate": 0.1590909090909091,
+      "annual_return": 0.07400882801418307,
+      "max_drawdown": -0.21386996127722369,
+      "sharpe": 0.7579256191418388,
+      "total_return": 0.5695234979999988,
+      "n_trades": 143
+    }
+  ]
+}
