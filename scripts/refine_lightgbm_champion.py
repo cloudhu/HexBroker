@@ -246,14 +246,37 @@ def _lookback(cfg: Any) -> int:
     return min(int(cfg.feature.normalize_window), 30)
 
 
+def _calibrate_and_split(sigs, valid, y_true, cal_method: str, cal_split: Optional[float]):
+    """per-fold 校准（可嵌套）：返回评估用信号列表。
+
+    - ``cal_split is None``：现口径——用全部测试窗信号拟合校准器，评估全部信号。
+    - ``cal_split`` 为 0~1：嵌套验证——只用测试窗前 ``cal_split`` 比例信号拟合校准器，
+      仅返回剩余（评估子窗）信号。评估与校准数据不重叠，消除「用测试标签挑阈值」的乐观偏差。
+    """
+    if cal_split is None:
+        if valid.sum() >= 20:
+            calibrate_signals(
+                [s for i, s in enumerate(sigs) if valid[i]],
+                y_true[valid],
+                method=cal_method,
+            )
+        return sigs
+    k = int(len(sigs) * cal_split)
+    k = max(1, min(k, len(sigs) - 1))  # 保证校准/评估子窗均非空
+    cal_valid = [i for i in range(k) if valid[i]]
+    if len(cal_valid) >= 20:
+        calibrate_signals([sigs[i] for i in cal_valid], y_true[cal_valid], method=cal_method)
+    return sigs[k:]
+
+
 def _train_eval_fold(task):
-    """进程池 worker：单折训练 + OOS 预测（含 per-fold Platt 校准）。
+    """进程池 worker：单折训练 + OOS 预测（含 per-fold Platt 校准，可嵌套分割）。
 
     所有入参均可 pickle；在 worker 内重建 OmegaConf cfg，避免跨进程传递自定义对象。
     返回 ``(sym, fold_idx, records, importance_or_None)``。
     """
     (sym, fi, train_max_pos, test_start, test_end,
-     feat, close, cfg_dict, params, collect_models, cal_method, model_cls) = task
+     feat, close, cfg_dict, params, collect_models, cal_method, model_cls, cal_split) = task
     from omegaconf import OmegaConf
 
     cfg = OmegaConf.create(cfg_dict)
@@ -289,12 +312,7 @@ def _train_eval_fold(task):
     realized = fwd.loc[test_ts].to_numpy(dtype=float)
     y_true = (realized > 0).astype(float)
     valid = ~np.isnan(realized)
-    if valid.sum() >= 20:
-        calibrate_signals(
-            [s for i, s in enumerate(sigs) if valid[i]],
-            y_true[valid],
-            method=str(cal_method),
-        )
+    sigs = _calibrate_and_split(sigs, valid, y_true, str(cal_method), cal_split)
     for s in sigs:
         records.append(dict(
             symbol=sym, ts=s.ts, p_up=s.p_up,
@@ -315,6 +333,7 @@ def walk_forward_lightgbm(
     splitter_overrides: Optional[dict] = None,
     n_jobs_folds: int = 1,
     model_cls: Any = None,
+    cal_split: Optional[float] = None,
 ) -> WFResult:
     """对 au/ag/m 逐标的 walk-forward 训练 LightGBM，产出 OOS 信号（可选收集重要性）。
 
@@ -322,6 +341,7 @@ def walk_forward_lightgbm(
     - 训练切片截到 ``train_max_pos - horizon``（标签不窥探测试窗）。
     - 测试窗预测为 OOS；n_mc=30 采样得到连续 p_up（与 R7 一致）。
     model_cls：模型类（默认 LightGBMForecast；可传 EnsembleForecast 等）。
+    cal_split：嵌套验证分割（None=现口径；0~1=用测试窗前比例校准、剩余评估，防乐观偏差）。
     """
     if model_cls is None:
         from hexbroker.forecast.baselines import LightGBMForecast as model_cls
@@ -371,7 +391,7 @@ def walk_forward_lightgbm(
                 feat_names = list(feat.columns)
             for fi, fold in enumerate(folds):
                 tasks.append((sym, fi, fold.train_max_pos, fold.test_start, fold.test_end,
-                              feat, close, cfg_dict, params, collect_models, cal_method, model_cls))
+                              feat, close, cfg_dict, params, collect_models, cal_method, model_cls, cal_split))
         with _cf.ProcessPoolExecutor(max_workers=int(n_jobs_folds)) as ex:
             for sym_r, fi, recs, imp in ex.map(_train_eval_fold, tasks):
                 records.extend(recs)
@@ -412,17 +432,12 @@ def walk_forward_lightgbm(
 
             test_feat = feat.iloc[fold.test_start : fold.test_end]
             sigs = model.predict(test_feat)
-            # 镜像 ForecastTrainer：用测试窗已实现方向做 per-fold Platt 校准
+            # 镜像 ForecastTrainer：用测试窗已实现方向做 per-fold Platt 校准（可嵌套分割）
             test_ts = [s.ts for s in sigs]
             realized = fwd.loc[test_ts].to_numpy(dtype=float)
             y_true = (realized > 0).astype(float)
             valid = ~np.isnan(realized)
-            if valid.sum() >= 20:
-                calibrate_signals(
-                    [s for i, s in enumerate(sigs) if valid[i]],
-                    y_true[valid],
-                    method=cal_method,
-                )
+            sigs = _calibrate_and_split(sigs, valid, y_true, cal_method, cal_split)
             for s in sigs:
                 records.append(dict(
                     symbol=sym, ts=s.ts, p_up=s.p_up,

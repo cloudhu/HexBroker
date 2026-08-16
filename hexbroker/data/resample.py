@@ -16,21 +16,32 @@ from .schema import BarFrame
 
 _DAY_OPEN = time(9, 0)
 _NIGHT_OPEN = time(21, 0)
+# 夜盘收盘（au/ag 至次日 02:30；部分品种 01:00/23:00）。跨零点段归属前一日夜盘。
+_NIGHT_CLOSE = time(2, 30)
 
 
 def _session_key(elem) -> tuple[str, int]:
     """返回 (session_label, session_local_minute_offset_from_session_open)。
 
     兼容 MultiIndex（label 为 (symbol, datetime) 元组）与单列 DatetimeIndex。
+
+    时段归属（防止跨零点夜盘 bar 被误判为次日日盘）：
+    - 21:00 <= t <= 23:59            -> 当天 night（含 23:30 等原遗漏时段）
+    - 00:00 <= t <= night_close      -> 前一日 night（au/ag 夜盘至 02:30）
+    - 其余（09:00 起）               -> 当天 day
     """
-    ts = elem[1] if isinstance(elem, tuple) else elem
-    t = pd.Timestamp(ts).time()
+    ts = pd.Timestamp(elem[1] if isinstance(elem, tuple) else elem)
+    t = ts.time()
     date = ts.date()
-    if _NIGHT_OPEN <= t <= time(23, 0):
-        # 夜盘：以当天 21:00 为 session 起点
+    if t >= _NIGHT_OPEN:  # 21:00 及以后（含 23:30/23:59）
         start = pd.Timestamp.combine(date, _NIGHT_OPEN)
         offset = int((ts - start).total_seconds() // 60)
         return (f"{date.isoformat()}-night", offset)
+    if t < _DAY_OPEN:  # 凌晨段（00:00-08:59，实际交易至 night_close）-> 前一日夜盘，防负 offset
+        prev = date - pd.Timedelta(days=1)
+        start = pd.Timestamp.combine(prev, _NIGHT_OPEN)
+        offset = int((ts - start).total_seconds() // 60)
+        return (f"{prev.isoformat()}-night", offset)
     # 日盘：以当天 09:00 为 session 起点
     start = pd.Timestamp.combine(date, _DAY_OPEN)
     offset = int((ts - start).total_seconds() // 60)

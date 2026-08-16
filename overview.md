@@ -86,3 +86,16 @@ LightGBM 为确认冠军；全链路（特征重要性 → Optuna 调优 → 特
 - **CI**：`.github/workflows/ci.yml`——push/PR 到 main 触发，py3.11/py3.12 矩阵：`pip install -r requirements.txt` + `pip install -e . --no-deps` + `pytest`。**首次运行通过**（commit a59c7e8，双矩阵 success）。
 - **CI 排障两条根因**：① requirements `pandas==2.2.2`+numpy2 不兼容 → `>=2.2.3,<4`；② `test_kronos_predictor.py` 运行时 `import torch`（可选重依赖）→ 加 `_KRONOS_NEEDS_TORCH` skip 标记只跳过 3 个 Kronos 类（无 torch 123+10skip / 有 torch 133 全过）。
 - 注：lint job 暂缓（ruff 152 个历史遗留问题，清理为独立任务）。
+
+### 15. 嵌套验证：校准乐观偏差量化（2026-08-16 晚，⚠️ 重大方法学发现）
+- 报告：`deliverables/software-hexfutures-ai/calibration-leakage-verification-2026-08-16.md`
+- **发现**：现口径（per-fold 校准用本折测试标签拟合后同批评估）的 **70.23% 含约 +20.7pp 协议幻觉**——嵌套验证（cal_split=0.5，校准与评估零重叠）后方向准确率跌至 **49.53%**（vs 50% 随机线无显著差异）、RankIC 0.4510→0.0108 归零。
+- **根因**：Platt 每折内单调不改变折内秩，但**跨折 (a,b) 不同改写跨折全局排序**——校准把"各折方向比例"编码进 p_up 尺度制造伪相关；`compute_gate1` 用校准后 p_up 算 Spearman 放大之。
+- **真实状态**：raw p_up 无校准口径 52.44%（±1.1pp≈2.2σ，极微弱 alpha）；嵌套口径确认 5 日方向净 alpha 统计不显著。
+- **裁决建议**：历史数值加注"现口径含乐观偏差"；新实验一律嵌套口径（`cal_split` 已支持）；真实 alpha 确立前暂停消融/调优。
+- 代码：`_calibrate_and_split` + `walk_forward_lightgbm(cal_split=...)` + `compare_calibration_leakage.py`。
+
+### 16. 代码审核三项建议落地（2026-08-16 晚）
+- **夜盘跨零点修复**：`data/resample.py` 凌晨段（00:00-08:59）归属前一日夜盘（au/ag 至 02:30），修复负 offset/错误桶时间戳；+2 回归测试。
+- **utils/evaluation 测试覆盖**：新增 `test_utils_core.py`（registry/seed/timeutil/io/fingerprint，12 项）与 `test_evaluation_metrics.py`（metrics/stats/baseline，9 项）；utils/evaluation 覆盖缺口补齐。
+- **回归**：165/165 全过（+26 新增）。

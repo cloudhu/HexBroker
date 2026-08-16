@@ -1,0 +1,49 @@
+{
+  "title": "嵌套验证：per-fold 校准乐观偏差量化",
+  "report_date": "2026-08-16",
+  "symbols": [
+    "SHFE.au",
+    "SHFE.ag",
+    "DCE.m"
+  ],
+  "rows": [
+    {
+      "variant": "现口径(全测试窗校准)",
+      "cal_split": null,
+      "dir_acc": 0.7023,
+      "eff_acc": 0.7299,
+      "coverage": 0.8504,
+      "rank_ic": 0.451,
+      "n_signals": 2046
+    },
+    {
+      "variant": "嵌套 0.33(前1/3校准)",
+      "cal_split": 0.33,
+      "dir_acc": 0.5101,
+      "eff_acc": 0.5208,
+      "coverage": 0.956,
+      "rank_ic": 0.0433,
+      "n_signals": 1386
+    },
+    {
+      "variant": "嵌套 0.50(前半校准)",
+      "cal_split": 0.5,
+      "dir_acc": 0.4953,
+      "eff_acc": 0.506,
+      "coverage": 0.9545,
+      "rank_ic": 0.0108,
+      "n_signals": 1056
+    },
+    {
+      "variant": "嵌套 0.67(前2/3校准)",
+      "cal_split": 0.67,
+      "dir_acc": 0.4711,
+      "eff_acc": 0.4798,
+      "coverage": 0.9559,
+      "rank_ic": -0.0527,
+      "n_signals": 726
+    }
+  ],
+  "optimistic_bias_pp": 20.71,
+  "conclusion": "嵌套 0.50 与现口径之差即校准乐观偏差幅度；若嵌套口径仍显著高于 0.5 随机线则模型 alpha 真实存在"
+}
