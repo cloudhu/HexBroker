@@ -122,3 +122,11 @@ LightGBM 为确认冠军；全链路（特征重要性 → Optuna 调优 → 特
   - **34.8% 信号级估算为口径幻觉**（满仓单信号 vs 实际触发 17%+资金稀释）——真实水平年化 ~6%；
 - 工程：CostModel **per-symbol 合约参数**（修复全局 multiplier=10 对 au/ag 错误）+ BacktestConfig.contracts + 回测脚本参数化；回归 224/224。
 - **口径纪律**：后续收益讨论一律以完整回测为准。
+
+### 19. P0 完整回测（2026-08-16 深夜，真实可交易水平确立）
+- 报告：`deliverables/software-hexfutures-ai/strength-backtest-2026-08-16.md`
+- 单边多头（exp_ret top20%）BacktestEngine 完整回测（滑点/手续费/保证金/逐 bar 调仓）：
+  - 名义 20/50/100%：年化 **1.26%→3.29%→6.03%**，回撤 4.9%→21.9%，**Sharpe 稳定 0.51-0.54**；成本拖累 <0.3pp/年；
+  - **34.8% 信号级估算为口径幻觉**（满仓单信号 vs 实际触发 17%+资金稀释）——真实水平年化 ~6%；
+- 工程：CostModel **per-symbol 合约参数**（修复全局 multiplier=10 对 au/ag 错误）+ BacktestConfig.contracts + 回测脚本参数化；回归 224/224。
+- **口径纪律**：后续收益讨论一律以完整回测为准。
