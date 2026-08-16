@@ -99,3 +99,11 @@ LightGBM 为确认冠军；全链路（特征重要性 → Optuna 调优 → 特
 - **夜盘跨零点修复**：`data/resample.py` 凌晨段（00:00-08:59）归属前一日夜盘（au/ag 至 02:30），修复负 offset/错误桶时间戳；+2 回归测试。
 - **utils/evaluation 测试覆盖**：新增 `test_utils_core.py`（registry/seed/timeutil/io/fingerprint，12 项）与 `test_evaluation_metrics.py`（metrics/stats/baseline，9 项）；utils/evaluation 覆盖缺口补齐。
 - **回归**：165/165 全过（+26 新增）。
+
+### 17. Raw Alpha 诊断（2026-08-16 深夜，模型战略转向点）
+- 报告：`deliverables/software-hexfutures-ai/raw-alpha-diagnosis-2026-08-16.md`
+- **模型有真实 alpha**：raw p_up 方向准确率 53.37%（二项 p=0.0012，随机对照 2% 分位）；
+- **真实信息在收益强度排序**：exp_ret 分位 Q0→Q4 实际收益 -0.20%→+0.70% 单调（0.9pp/5日）；RankIC +0.056；
+- **看多可用看空反指**：p_up>0.6 组实际涨 57.4%；p_up<0.4 组实际涨 53.6%；
+- **品种分化**：ag0/m0 显著（54.7%/55.6%），au0 无；**时间不持续**：2020/2023 强、2021/2024 负；
+- **战略转向**：方向预测（70.23% 幻觉）→ 强度排序 + 单边多头（真实可交易）。
