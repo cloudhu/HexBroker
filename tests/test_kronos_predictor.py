@@ -21,6 +21,19 @@ from hexbroker.data.sources.sina_source import SinaSource
 from hexbroker.data.splitter import WalkForwardSplitter
 from hexbroker.forecast.kronos_predictor import KlineKronosOOS
 
+# KlineKronosOOS 通路运行时硬依赖 torch（可选重依赖，CI 不安装）：
+# 仅跳过依赖 torch 的 3 个测试类；TestSinaRepairOhlc（纯 pandas）不受影响。
+try:
+    import torch  # noqa: F401
+
+    _HAS_TORCH = True
+except ImportError:  # pragma: no cover
+    _HAS_TORCH = False
+
+_KRONOS_NEEDS_TORCH = pytest.mark.skipif(
+    not _HAS_TORCH, reason="KlineKronosOOS 运行时依赖 torch（可选重依赖）"
+)
+
 
 # ---------------------------------------------------------------------------
 # 最小 cfg 桩（与真实 HexConfig 默认值一致）
@@ -130,6 +143,7 @@ def _make_oos(cfg=None, predictor=None, n=400) -> tuple[list, pd.DataFrame, pd.D
 # ---------------------------------------------------------------------------
 # 1. 因果性
 # ---------------------------------------------------------------------------
+@_KRONOS_NEEDS_TORCH
 class TestCausality:
     def test_context_never_includes_future_bars(self):
         oos = KlineKronosOOS(_CfgStub(), _StoreStub(), n_mc=1, seed=42)
@@ -174,6 +188,7 @@ class TestCausality:
 # ---------------------------------------------------------------------------
 # 2. 符号语义（p_up 方向）
 # ---------------------------------------------------------------------------
+@_KRONOS_NEEDS_TORCH
 class TestSymbolSemantics:
     def test_p_up_up_when_pred_close_above_last_close(self):
         """pred_close/close_lasts-1 > 0 -> p_up 高（≈1）。"""
@@ -240,6 +255,7 @@ class TestSymbolSemantics:
 # ---------------------------------------------------------------------------
 # 3. 边界 / 契约
 # ---------------------------------------------------------------------------
+@_KRONOS_NEEDS_TORCH
 class TestBoundaryAndContract:
     def test_skips_bars_without_full_future_horizon(self):
         """t + horizon >= len(sdf) 的 bar 跳过（保留末尾 NaN 语义）。"""
