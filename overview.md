@@ -136,3 +136,9 @@ LightGBM 为确认冠军；全链路（特征重要性 → Optuna 调优 → 特
 - top-k 网格（10-70%）完整回测：**top-30% 最优**——Sharpe 0.85（+57%）、年化 10.3%（+71%）、回撤持平（-20.8%）；
 - 收益平台结构（30% 后饱和）、Sharpe 30% 见顶；机制 = 极端信号噪声高，30% 有效带更宽；
 - 固化：默认 `TOP_K=0.30`（backtest_strength_signal.py）；grid_topk_backtest.py 网格脚本（walk_forward 单次复用）。
+
+### 20. 触发阈值网格（2026-08-16 深夜，Sharpe 0.54→0.85）
+- 报告：`deliverables/software-hexfutures-ai/topk-grid-backtest-2026-08-16.md`
+- top-k 网格（10-70%）完整回测：**top-30% 最优**——Sharpe 0.85（+57%）、年化 10.3%（+71%）、回撤持平（-20.8%）；
+- 收益平台结构（30% 后饱和）、Sharpe 30% 见顶；机制 = 极端信号噪声高，30% 有效带更宽；
+- 固化：默认 `TOP_K=0.30`（backtest_strength_signal.py）；grid_topk_backtest.py 网格脚本（walk_forward 单次复用）。
