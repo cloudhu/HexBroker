@@ -19,7 +19,7 @@ optional = ["pyqlib", "rqalpha", "vnpy", "mlflow"]
 packages = ["hexbroker"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests", "hexbroker/data/sources"]
 python_files = ["test_*.py"]
 addopts = "-q"
 filterwarnings = ["ignore::DeprecationWarning"]

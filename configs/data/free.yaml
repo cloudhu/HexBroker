@@ -17,7 +17,7 @@ data:
   mode: "rolling"
 
 # 数据源供应链：优先级 + 各源开关/failover/超时
-source_priority: [pytdx, sina, akshare_fundamentals]
+source_priority: [sina, pytdx]  # sina 已验证全历史可用；pytdx 网络不可达排后（2026-08-16 实采验证）
 
 sources:
   pytdx:

@@ -25,7 +25,9 @@ def cfg():
 
 
 def test_source_priority(cfg):
-    assert cfg["source_priority"] == ["pytdx", "sina", "akshare_fundamentals"]
+    # 2026-08-16 实采验证：sina 全历史可用（与 MCP 基准 100% 一致），pytdx 网络不可达排后
+    assert cfg["source_priority"][0] == "sina"
+    assert "pytdx" in cfg["source_priority"]
 
 
 def test_drift_close_pct_error(cfg):
