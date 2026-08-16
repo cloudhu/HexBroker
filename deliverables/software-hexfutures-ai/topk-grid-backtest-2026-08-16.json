@@ -1,0 +1,72 @@
+{
+  "rows": [
+    {
+      "top_k": 0.1,
+      "trigger_rate": 0.10037878787878787,
+      "n_long": 106,
+      "n_trades": 89,
+      "total_return": 0.2564036229999991,
+      "annual_return": 0.03681474511946714,
+      "max_drawdown": -0.0937668865287139,
+      "sharpe": 0.569038428591016,
+      "final_equity": 1256403.622999999
+    },
+    {
+      "top_k": 0.2,
+      "trigger_rate": 0.20075757575757575,
+      "n_long": 212,
+      "n_trades": 148,
+      "total_return": 0.44766736774999893,
+      "annual_return": 0.060348145946486964,
+      "max_drawdown": -0.2193798778626943,
+      "sharpe": 0.5444987339744777,
+      "final_equity": 1447667.367749999
+    },
+    {
+      "top_k": 0.3,
+      "trigger_rate": 0.3001893939393939,
+      "n_long": 317,
+      "n_trades": 217,
+      "total_return": 0.8594530362499988,
+      "annual_return": 0.10323537693565799,
+      "max_drawdown": -0.20762083132163933,
+      "sharpe": 0.8534069610070745,
+      "final_equity": 1859453.0362499987
+    },
+    {
+      "top_k": 0.4,
+      "trigger_rate": 0.4005681818181818,
+      "n_long": 423,
+      "n_trades": 242,
+      "total_return": 0.8340285257499986,
+      "annual_return": 0.1008322393983605,
+      "max_drawdown": -0.21726467178225528,
+      "sharpe": 0.8075240325807235,
+      "final_equity": 1834028.5257499986
+    },
+    {
+      "top_k": 0.5,
+      "trigger_rate": 0.5009469696969697,
+      "n_long": 529,
+      "n_trades": 267,
+      "total_return": 0.8298614359999983,
+      "annual_return": 0.10043569311572287,
+      "max_drawdown": -0.20216331957006461,
+      "sharpe": 0.7679324173148591,
+      "final_equity": 1829861.4359999984
+    },
+    {
+      "top_k": 0.7,
+      "trigger_rate": 0.7007575757575758,
+      "n_long": 740,
+      "n_trades": 235,
+      "total_return": 0.9871943484999985,
+      "annual_return": 0.1149068173119443,
+      "max_drawdown": -0.1890153982554842,
+      "sharpe": 0.7858687031982957,
+      "final_equity": 1987194.3484999985
+    }
+  ],
+  "best": 0.3,
+  "notional_frac": 1.0
+}

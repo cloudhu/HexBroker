@@ -130,3 +130,9 @@ LightGBM 为确认冠军；全链路（特征重要性 → Optuna 调优 → 特
   - **34.8% 信号级估算为口径幻觉**（满仓单信号 vs 实际触发 17%+资金稀释）——真实水平年化 ~6%；
 - 工程：CostModel **per-symbol 合约参数**（修复全局 multiplier=10 对 au/ag 错误）+ BacktestConfig.contracts + 回测脚本参数化；回归 224/224。
 - **口径纪律**：后续收益讨论一律以完整回测为准。
+
+### 20. 触发阈值网格（2026-08-16 深夜，Sharpe 0.54→0.85）
+- 报告：`deliverables/software-hexfutures-ai/topk-grid-backtest-2026-08-16.md`
+- top-k 网格（10-70%）完整回测：**top-30% 最优**——Sharpe 0.85（+57%）、年化 10.3%（+71%）、回撤持平（-20.8%）；
+- 收益平台结构（30% 后饱和）、Sharpe 30% 见顶；机制 = 极端信号噪声高，30% 有效带更宽；
+- 固化：默认 `TOP_K=0.30`（backtest_strength_signal.py）；grid_topk_backtest.py 网格脚本（walk_forward 单次复用）。

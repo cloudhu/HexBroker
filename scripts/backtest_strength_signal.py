@@ -38,7 +38,7 @@ from scripts.ablate_features import (  # noqa: E402
 REPORT_DATE = "2026-08-16"
 DELIVERABLE_DIR = _ROOT / "deliverables" / "software-hexfutures-ai"
 GLOBAL_CODES = ["spx", "uup"]
-TOP_K = 0.20  # exp_ret 全局前 20% 做多
+TOP_K = 0.30  # exp_ret 全局前 30% 做多（网格最优：Sharpe 0.85，2026-08-16 topk-grid）
 NOTIONAL_FRAC = 0.20  # 每标的名义金额 = 权益 × NOTIONAL_FRAC（参数化，脚本支持覆盖）
 # 品种级合约参数（multiplier=合约乘数, min_tick=最小变动价位）
 CONTRACTS = {
