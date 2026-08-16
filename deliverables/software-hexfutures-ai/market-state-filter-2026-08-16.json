@@ -1,0 +1,51 @@
+{
+  "rows": [
+    {
+      "annual_return": 0.10323537693565799,
+      "max_drawdown": -0.20762083132163933,
+      "sharpe": 0.8534069610070745,
+      "total_return": 0.8594530362499988,
+      "final_equity": 1859453.0362499987,
+      "label": "none（基线 top-30%）",
+      "mode": "none",
+      "trigger_rate": 0.3001893939393939,
+      "n_long": 317
+    },
+    {
+      "annual_return": 0.10182963828160507,
+      "max_drawdown": -0.08838598858113778,
+      "sharpe": 1.2113382142990914,
+      "total_return": 0.8445449709999988,
+      "final_equity": 1844544.9709999987,
+      "label": "trend 过滤（close<MA20 空仓）",
+      "mode": "trend",
+      "trigger_rate": 0.1590909090909091,
+      "n_long": 168
+    },
+    {
+      "annual_return": 0.0728145064510688,
+      "max_drawdown": -0.20690321672307244,
+      "sharpe": 0.7180565904912275,
+      "total_return": 0.558536779999999,
+      "final_equity": 1558536.7799999989,
+      "label": "vol 过滤（波动>70 分位空仓）",
+      "mode": "vol",
+      "trigger_rate": 0.17329545454545456,
+      "n_long": 183
+    },
+    {
+      "annual_return": 0.07497071536089472,
+      "max_drawdown": -0.05906900217436806,
+      "sharpe": 1.072375055824403,
+      "total_return": 0.5784193444999992,
+      "final_equity": 1578419.3444999992,
+      "label": "combo（趋势 OR 波动差→空仓）",
+      "mode": "combo",
+      "trigger_rate": 0.10037878787878787,
+      "n_long": 106
+    }
+  ],
+  "top_k": 0.3,
+  "ma_window": 20,
+  "vol_pct": 0.7
+}

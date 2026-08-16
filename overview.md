@@ -142,3 +142,9 @@ LightGBM 为确认冠军；全链路（特征重要性 → Optuna 调优 → 特
 - top-k 网格（10-70%）完整回测：**top-30% 最优**——Sharpe 0.85（+57%）、年化 10.3%（+71%）、回撤持平（-20.8%）；
 - 收益平台结构（30% 后饱和）、Sharpe 30% 见顶；机制 = 极端信号噪声高，30% 有效带更宽；
 - 固化：默认 `TOP_K=0.30`（backtest_strength_signal.py）；grid_topk_backtest.py 网格脚本（walk_forward 单次复用）。
+
+### 21. 市场状态过滤器（2026-08-16 深夜，Sharpe 0.85→1.21）
+- 报告：`deliverables/software-hexfutures-ai/market-state-filter-2026-08-16.md`
+- **trend 过滤采纳**（close<MA20 空仓）：Sharpe 0.85→**1.21**（+42%）、回撤 -20.8%→**-8.8%**（-58%）、年化持平（10.2%）——几乎纯增益；vol 过滤负贡献、combo 保守可选；
+- **最终策略**：exp_ret top-30% 做多 + 趋势过滤 → 年化 10.2% / 回撤 8.8% / **Sharpe 1.21**；
+- 脚本：filter_market_state.py；待验证：MA20/波动阈值样本外确认。
