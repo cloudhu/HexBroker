@@ -196,3 +196,8 @@ LightGBM 为确认冠军；全链路（特征重要性 → Optuna 调优 → 特
 - 数据延长实测：sina/tdx/westock 均无现成 2024-07 后连续（tdx 需多合约拼接）→ 工程化脚手架待执行；
 - 重排分段 OOS 扩到 1.2 年（240 信号）：**SENTINEL RL Sharpe 3.83 vs 规则基线 0.88 同段**——RL 全面占优，验证通过；
 - ⚠️ 绝对年化 79.6% 偏高（OOS 行情偏多），真新数据验证为 P0。
+
+### 26. 数据源寻找（2026-08-17 中午）
+- 报告：`deliverables/software-hexfutures-ai/data-source-evaluation-2026-08-17.md`
+- 实测 5 源全有缺口：sina 截止 2024-07 / tdx 仅未交割 / westock 仅现货 / mx skill 无期货 / akshare 安装被沙箱 safe-delete 破坏（venv pip 不可靠）；
+- **推荐连接**：PandaData（明确含期货）/ Wind / 东财妙想——连接后即可完成数据延长 + SENTINEL 最终验证。
