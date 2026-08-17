@@ -252,3 +252,8 @@ LightGBM 为确认冠军；全链路（特征重要性 → Optuna 调优 → 特
 - 报告：`deliverables/software-hexfutures-ai/cross-segment-valid-2026-08-17.md`
 - 进化适应度 = 3 子段交叉平均 Sharpe：**OOS -0.02 → +0.36**（BacktestEngine 完整口径，年化 0.70%/回撤 -3.0%）；
 - RL 定位辅助增强；最优权重极度保守（高趋势惩罚）。
+
+### 31. 多分段 valid 交叉选择（2026-08-17 傍晚）
+- 报告：`deliverables/software-hexfutures-ai/cross-segment-valid-2026-08-17.md`
+- 进化适应度 = 3 子段交叉平均 Sharpe：**OOS -0.02 → +0.36**（BacktestEngine 完整口径，年化 0.70%/回撤 -3.0%）；
+- RL 定位辅助增强；最优权重极度保守（高趋势惩罚）。
