@@ -262,3 +262,9 @@ LightGBM 为确认冠军；全链路（特征重要性 → Optuna 调优 → 特
 - 报告：`deliverables/software-hexfutures-ai/symbol-pool-extension-2026-08-17.md`
 - 品种 3→6（cu/rb/i PandaData 全历史）、动作 2 档、状态 36 维、valid 3 段交叉；
 - **OOS（592 信号）：RL Sharpe 0.38 vs 基线 -0.27**——提升边际但统计更稳健；RL 定位辅助增强层。
+
+### 33. 全项目反思（2026-08-17 傍晚，信号反转诊断）
+- 报告：`deliverables/software-hexfutures-ai/project-reflection-2026-08-17.md`
+- **主病灶**：OOS 真新数据段分位桶倒挂（+0.688% → -0.884%）——截面排序信号在 regime 切换（贵金属牛+黑色熊）中系统性反转；非典型欠拟合，有过拟合（MA20/top30/valid）但非主因；
+- 跨品种多空验证失败（空头侧无 alpha）——排除该路径；
+- **提升路径**：信号监控自适应降仓（P0）→ 滚动重训参数（P0）→ 多信号融合+板块分层（P1）→ RL 辅助（P2）。
