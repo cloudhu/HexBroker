@@ -303,3 +303,8 @@ LightGBM 为确认冠军；全链路（特征重要性 → Optuna 调优 → 特
 - 报告：`deliverables/software-hexfutures-ai/combo-validation-2026-08-17.md`
 - **C（top30%+信号监控 W=20 step）= 最终配置**：全样本 Sharpe 0.48/回撤 -9%；叠加 MA20 证伪（冗余非正交，0.44）；
 - 推翻 P0-2 叠加建议；收益提升待 P1-1 多信号融合。
+
+### 36. 叠加验证（2026-08-17 傍晚，最终配置确立）
+- 报告：`deliverables/software-hexfutures-ai/combo-validation-2026-08-17.md`
+- **C（top30%+信号监控 W=20 step）= 最终配置**：全样本 Sharpe 0.48/回撤 -9%；叠加 MA20 证伪（冗余非正交，0.44）；
+- 推翻 P0-2 叠加建议；收益提升待 P1-1 多信号融合。
