@@ -1,10 +1,10 @@
 {
   "series": "期货大讲堂",
   "total": 100,
-  "current_issue": 3,
-  "published_count": 2,
-  "last_published_issue": 2,
-  "last_published_date": "2026-08-16",
+  "current_issue": 4,
+  "published_count": 3,
+  "last_published_issue": 3,
+  "last_published_date": "2026-08-17",
   "history": [
     {
       "issue": 1,
@@ -17,6 +17,11 @@
       "title": "期货的起源：从大阪堂岛米市到芝加哥期货交易所",
       "date": "2026-08-16",
       "media_id": "1foS1_C04TIfLfnUcIVl2-m6uRyRJbBaRXJZ-EJBuyAEPKXAvZwLJARHKyGYm_D6"
+    },
+    {
+      "issue": 3,
+      "title": "期货 vs 现货 vs 股票：三张图看懂区别",
+      "date": "2026-08-17"
     }
   ]
 }

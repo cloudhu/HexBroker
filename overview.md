@@ -164,3 +164,9 @@ LightGBM 为确认冠军；全链路（特征重要性 → Optuna 调优 → 特
 - 报告：`deliverables/software-hexfutures-ai/ma-window-grid-2026-08-16.md`
 - MA5/10/20/30/50 → Sharpe 1.12/0.76/**1.21**/0.82/0.76：短窗口过滤方向稳健（回撤全减半），**MA20 为尖峰非平台**——参数选择过拟合风险高；
 - 建议：保守部署 MA5；**上线前样本外分段验证**（2018-2021→2022-2024）。
+
+### 23. SENTINEL 新架构启动（2026-08-17，四层模型）
+- 架构文档：`deliverables/software-hexfutures-ai/sentinel-architecture-2026-08-17.md`（L1 强度排序/L2 状态门控/L3 RL 决策/L4 自回归进化）
+- Phase 1：自研 RankNet 排序目标未胜出（Q4-Q0 0.32% vs LGBM 0.70%）→ 信号源用 exp_ret；
+- **Phase 3：SentinelTradingEnv + 自研 PPO，OOS(2022-2024) 年化 +13.8%/Sharpe 0.83 ✅**；
+- 报告：sentinel-phase1-3-2026-08-17.md。
