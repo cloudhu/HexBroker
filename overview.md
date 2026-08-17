@@ -219,3 +219,9 @@ LightGBM 为确认冠军；全链路（特征重要性 → Optuna 调优 → 特
 - **env 模拟 = 口径幻觉**（5 日收益窗口归因放大 ~5 倍）：RL 真实水平 = OOS 年化 0.41%/Sharpe 0.22（vs 模拟 100.9%/2.27）；
 - **P0 修复**：RL 环境奖励逐日化（与 BacktestEngine 口径对齐）后重训；
 - 外盘 UUP 可得/SPX 待权限；影响有限（NaN 由 LightGBM 处理）。
+
+### 28. RL 接入 BacktestEngine（2026-08-17 傍晚，口径幻觉暴露）
+- 报告：`deliverables/software-hexfutures-ai/rl-backtestengine-2026-08-17.md`
+- **env 模拟 = 口径幻觉**（5 日收益窗口归因放大 ~5 倍）：RL 真实水平 = OOS 年化 0.41%/Sharpe 0.22（vs 模拟 100.9%/2.27）；
+- **P0 修复**：RL 环境奖励逐日化（与 BacktestEngine 口径对齐）后重训；
+- 外盘 UUP 可得/SPX 待权限；影响有限（NaN 由 LightGBM 处理）。
