@@ -190,3 +190,9 @@ LightGBM 为确认冠军；全链路（特征重要性 → Optuna 调优 → 特
 - 数据延长实测：sina/tdx/westock 均无现成 2024-07 后连续（tdx 需多合约拼接）→ 工程化脚手架待执行；
 - 重排分段 OOS 扩到 1.2 年（240 信号）：**SENTINEL RL Sharpe 3.83 vs 规则基线 0.88 同段**——RL 全面占优，验证通过；
 - ⚠️ 绝对年化 79.6% 偏高（OOS 行情偏多），真新数据验证为 P0。
+
+### 25. SENTINEL 全链路重跑（2026-08-17 上午，OOS 扩样本 + 同段对比）
+- 报告：`deliverables/software-hexfutures-ai/sentinel-full-rerun-2026-08-17.md`
+- 数据延长实测：sina/tdx/westock 均无现成 2024-07 后连续（tdx 需多合约拼接）→ 工程化脚手架待执行；
+- 重排分段 OOS 扩到 1.2 年（240 信号）：**SENTINEL RL Sharpe 3.83 vs 规则基线 0.88 同段**——RL 全面占优，验证通过；
+- ⚠️ 绝对年化 79.6% 偏高（OOS 行情偏多），真新数据验证为 P0。
