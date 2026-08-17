@@ -308,3 +308,10 @@ LightGBM 为确认冠军；全链路（特征重要性 → Optuna 调优 → 特
 - 报告：`deliverables/software-hexfutures-ai/combo-validation-2026-08-17.md`
 - **C（top30%+信号监控 W=20 step）= 最终配置**：全样本 Sharpe 0.48/回撤 -9%；叠加 MA20 证伪（冗余非正交，0.44）；
 - 推翻 P0-2 叠加建议；收益提升待 P1-1 多信号融合。
+
+### 37. P1-1 多信号融合（2026-08-17 傍晚，根本解验证成功）
+- 报告：`deliverables/software-hexfutures-ai/multi-signal-fusion-2026-08-17.md`
+- **F1 = 0.7·rank(exp_ret) + 0.3·rank(mom60)，top30% + W=20 监控**：
+  - 全样本 Sharpe **0.48→0.61**（+27%）、回撤 **-8.98%→-3.08%**（-66%）、年化 1.90%；
+  - **OOS（真新数据）Sharpe -0.05→+0.19**——动量补截面失效期收益，首个全样本+OOS 双改善；
+- mom20 太噪、纯动量全样本负（不可单用）；权重权衡曲线非尖峰。
