@@ -207,3 +207,9 @@ LightGBM 为确认冠军；全链路（特征重要性 → Optuna 调优 → 特
 - **PandaData 主力连续延长成功**（2018→2026-08，+501 根/品种，重叠期 cv<0.001 无缝拼接）；
 - **最终 OOS（2 年真新数据）：SENTINEL RL Sharpe 2.27 vs 规则基线 -0.13**——最强证据；
 - ⚠️ 年化 100.9% 含贵金属牛市 beta，回撤 39% 需风控；环境 akshare 灾难致 14 包损坏已全部修复（224/224）。
+
+### 27. SENTINEL 数据延长 + 最终验证（2026-08-17 下午，全链路收官）
+- 报告：`deliverables/software-hexfutures-ai/sentinel-final-verification-2026-08-17.md`
+- **PandaData 主力连续延长成功**（2018→2026-08，+501 根/品种，重叠期 cv<0.001 无缝拼接）；
+- **最终 OOS（2 年真新数据）：SENTINEL RL Sharpe 2.27 vs 规则基线 -0.13**——最强证据；
+- ⚠️ 年化 100.9% 含贵金属牛市 beta，回撤 39% 需风控；环境 akshare 灾难致 14 包损坏已全部修复（224/224）。
