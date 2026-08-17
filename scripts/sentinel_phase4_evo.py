@@ -150,11 +150,37 @@ def main() -> None:
 
     rng = np.random.default_rng(42)
 
+    # ---- 进化适应度：直连 BacktestEngine（2026-08-17，消除 env-引擎口径差距） ----
+    from hexbroker.backtest.engine import BacktestEngine
+    from hexbroker.backtest.cost import CostModel
+    _BT_CONTRACTS = {"au0": {"multiplier": 1000.0, "min_tick": 0.02}, "ag0": {"multiplier": 15.0, "min_tick": 0.01}, "m0": {"multiplier": 10.0, "min_tick": 1.0}}
+    _BT_COST = CostModel(fee_open=0.00005, fee_close=0.00005, fee_close_today=0.00010,
+                         slippage_ticks=1.0, margin_rate=0.12, contracts=_BT_CONTRACTS)
+    _BT_NOTIONAL = cfg0.backtest.initial_capital * 0.30
+    _prices_v = prices[prices.index.get_level_values(1) <= pd.Timestamp(VALID_SPLIT)]  # valid 段子集加速
+
     def _eval(w: np.ndarray, seed: int) -> float:
         env_tr = make_env(tr_sig, prices, cfg0, w)
         policy, _ = train_ppo(env_tr, total_timesteps=args.steps, seed=seed)
         env_v = make_env(valid_sig, prices, cfg0, w)
-        return oos_sharpe(policy, env_v)
+        obs = env_v.reset()
+        rows = []
+        for d in env_v.dates:
+            a_idx = int(policy.act(obs.reshape(1, -1))[0][0])
+            act = env_v._pos_map[a_idx]
+            for j, sym in enumerate(env_v.symbols):
+                px = _prices_v.xs(sym, level=0)["close"].get(d)
+                if px is not None:
+                    mult = _BT_CONTRACTS[sym]["multiplier"]
+                    n = int(act[j] * _BT_NOTIONAL / (px * mult))
+                    rows.append({"symbol": sym, "ts": d, "target": n})
+            obs, _, _, _ = env_v.step(a_idx)
+        if not rows:
+            return -1e6
+        targets = pd.DataFrame(rows).set_index(["symbol", "ts"])[["target"]].sort_index()
+        _eng = BacktestEngine(cfg0, cost=_BT_COST, initial_capital=cfg0.backtest.initial_capital)
+        _pf = _eng.run(_prices_v, targets)
+        return float(compute_metrics(_pf.equity_curve, freq="1d").sharpe)
 
     # ---- 自回归 ES ----
     w_mean = np.array([1.0, 0.5, 2.0])  # 默认/先验

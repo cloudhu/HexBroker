@@ -235,3 +235,9 @@ LightGBM 为确认冠军；全链路（特征重要性 → Optuna 调优 → 特
 - 报告：`deliverables/software-hexfutures-ai/rl-daily-reward-2026-08-17.md`
 - 奖励 5 日归因 → 当日收益（fwd 1 日），与 BacktestEngine 对齐；
 - **OOS 完整口径：Sharpe 0.22→0.35、年化 0.41%→1.04%**——修复有效；仍弱需进化适应度直连 BacktestEngine。
+
+### 30. 进化直连 BacktestEngine（2026-08-17 傍晚，最终裁决）
+- 报告：`deliverables/software-hexfutures-ai/evolution-bt-fitness-2026-08-17.md`
+- 适应度直连 BacktestEngine：valid 选择 Sharpe 0.78 但 **OOS -0.02**——valid 过拟合暴露；
+- **四轮校准后 SENTINEL RL OOS ≈ 0（噪声级）**——不升格主策略；规则基线（全样本 Sharpe 1.21）为最稳健策略；
+- 口径纪律固化：完整回测 + OOS 留出为准。
