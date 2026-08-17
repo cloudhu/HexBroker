@@ -30,7 +30,9 @@ from hexbroker.data.schema import BarFrame  # noqa: E402
 def load_local_bars(symbols: list[str], end: str = "2026-08-17") -> BarFrame:
     """从本地延长 parquet 加载（sina 只到 2024-07，PandaData 延长已拼接落盘）。"""
     import glob
-    dir_map = {"SHFE.au": "au0", "SHFE.ag": "ag0", "DCE.m": "m0", "au0": "au0", "ag0": "ag0", "m0": "m0"}
+    dir_map = {"SHFE.au": "au0", "SHFE.ag": "ag0", "DCE.m": "m0",
+               "SHFE.cu": "cu0", "SHFE.rb": "rb0", "DCE.i": "i0",
+               "au0": "au0", "ag0": "ag0", "m0": "m0", "cu0": "cu0", "rb0": "rb0", "i0": "i0"}
     parts = []
     for sym in symbols:
         d = dir_map.get(sym, sym)
@@ -46,9 +48,12 @@ from hexbroker.rl.sentinel_env import SentinelTradingEnv  # noqa: E402
 from hexbroker.rl.agent import train_ppo  # noqa: E402
 from hexbroker.evaluation.metrics import compute_metrics  # noqa: E402
 from scripts.refine_lightgbm_champion import (  # noqa: E402
-    SYMBOLS, FREQ, DATA_START, DATA_END,
+    FREQ, DATA_START, DATA_END,
     build_source_plan, fetch_with_failover, walk_forward_lightgbm,
 )
+
+# 品种池扩展（2026-08-17）：au/ag/m（sina+PandaData 拼接）+ cu/rb/i（PandaData 全历史）
+SYMBOLS6 = ["SHFE.au", "SHFE.ag", "DCE.m", "SHFE.cu", "SHFE.rb", "DCE.i"]
 from scripts.ablate_features import (  # noqa: E402
     load_best_params, load_global_close, align_global_to_inner,
 )
@@ -69,7 +74,7 @@ EMA_ALPHA = 0.5
 
 def build_cfg():
     cfg = load_config()
-    cfg.data.symbols = list(SYMBOLS)
+    cfg.data.symbols = list(SYMBOLS6)
     cfg.data.freq = FREQ
     cfg.data.start = DATA_START
     cfg.data.end = "2026-08-17"  # 延长后数据（PandaData）
@@ -83,12 +88,15 @@ def build_cfg():
     return cfg
 
 
+LOCAL6 = ["au0", "ag0", "m0", "cu0", "rb0", "i0"]
+
+
 def make_env(sig, prices, cfg0, w: np.ndarray) -> SentinelTradingEnv:
-    """按奖励权重构造环境（覆盖 cfg.rl 的 w_*）。"""
+    """按奖励权重构造环境（覆盖 cfg.rl 的 w_*）；强制 6 品种集保证 obs_dim 一致。"""
     cfg0.rl.w_pnl = float(w[0])
     cfg0.rl.w_turn = float(w[1])
     cfg0.rl.w_trend = float(w[2])
-    return SentinelTradingEnv(sig, prices, cfg0)
+    return SentinelTradingEnv(sig, prices, cfg0, symbols=LOCAL6)
 
 
 def oos_sharpe(policy, env: SentinelTradingEnv) -> float:
@@ -121,7 +129,7 @@ def main() -> None:
     print("=" * 72)
 
     cfg0 = build_cfg()
-    bars = load_local_bars(SYMBOLS)
+    bars = load_local_bars(SYMBOLS6)
     bars.validate()
     chosen = "local-parquet"  # sina 截止 2024-07，本地含 PandaData 延长到 2026-08
     inner_dates = bars.df.index.get_level_values("datetime").unique().sort_values()
@@ -153,7 +161,8 @@ def main() -> None:
     # ---- 进化适应度：多分段 valid 交叉 + 直连 BacktestEngine（2026-08-17） ----
     from hexbroker.backtest.engine import BacktestEngine
     from hexbroker.backtest.cost import CostModel
-    _BT_CONTRACTS = {"au0": {"multiplier": 1000.0, "min_tick": 0.02}, "ag0": {"multiplier": 15.0, "min_tick": 0.01}, "m0": {"multiplier": 10.0, "min_tick": 1.0}}
+    _BT_CONTRACTS = {"au0": {"multiplier": 1000.0, "min_tick": 0.02}, "ag0": {"multiplier": 15.0, "min_tick": 0.01}, "m0": {"multiplier": 10.0, "min_tick": 1.0},
+                     "cu0": {"multiplier": 5.0, "min_tick": 10.0}, "rb0": {"multiplier": 10.0, "min_tick": 1.0}, "i0": {"multiplier": 100.0, "min_tick": 0.5}}
     _BT_COST = CostModel(fee_open=0.00005, fee_close=0.00005, fee_close_today=0.00010,
                          slippage_ticks=1.0, margin_rate=0.12, contracts=_BT_CONTRACTS)
     _BT_NOTIONAL = cfg0.backtest.initial_capital * 0.30
@@ -228,7 +237,8 @@ def main() -> None:
     env_oos = make_env(oos_sig, prices, cfg0, best["w"])  # OOS = 2024-07-18 起（真新数据，完全未参与选择）
     from hexbroker.backtest.engine import BacktestEngine
     from hexbroker.backtest.cost import CostModel
-    _CONTRACTS = {"au0": {"multiplier": 1000.0, "min_tick": 0.02}, "ag0": {"multiplier": 15.0, "min_tick": 0.01}, "m0": {"multiplier": 10.0, "min_tick": 1.0}}
+    _CONTRACTS = {"au0": {"multiplier": 1000.0, "min_tick": 0.02}, "ag0": {"multiplier": 15.0, "min_tick": 0.01}, "m0": {"multiplier": 10.0, "min_tick": 1.0},
+                  "cu0": {"multiplier": 5.0, "min_tick": 10.0}, "rb0": {"multiplier": 10.0, "min_tick": 1.0}, "i0": {"multiplier": 100.0, "min_tick": 0.5}}
     _notional = cfg0.backtest.initial_capital * 0.30  # 名义等权 30%/标的（与规则基线一致）
     obs = env_oos.reset()
     rows = []
@@ -253,7 +263,8 @@ def main() -> None:
     from hexbroker.backtest.engine import BacktestEngine
     from hexbroker.backtest.cost import CostModel
     from hexbroker.evaluation.metrics import compute_metrics as _cm
-    _CONTRACTS = {"au0": {"multiplier": 1000.0, "min_tick": 0.02}, "ag0": {"multiplier": 15.0, "min_tick": 0.01}, "m0": {"multiplier": 10.0, "min_tick": 1.0}}
+    _CONTRACTS = {"au0": {"multiplier": 1000.0, "min_tick": 0.02}, "ag0": {"multiplier": 15.0, "min_tick": 0.01}, "m0": {"multiplier": 10.0, "min_tick": 1.0},
+                  "cu0": {"multiplier": 5.0, "min_tick": 10.0}, "rb0": {"multiplier": 10.0, "min_tick": 1.0}, "i0": {"multiplier": 100.0, "min_tick": 0.5}}
     sig_all = sig.copy()
     sig_all["ts"] = pd.to_datetime(sig_all["ts"])
     oos_s = sig_all[sig_all["ts"] >= pd.Timestamp(VALID_SPLIT)].copy()

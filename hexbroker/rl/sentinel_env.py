@@ -28,7 +28,9 @@ class SentinelTradingEnv:
         cfg: Any,
         ma_window: int = 20,
         vol_window: int = 20,
+        symbols: list[str] | None = None,
     ) -> None:
+        """symbols: 强制品种集（缺信号的品种 exp_ret=0，保证 train/valid 同 obs_dim）。"""
         """signals: 含 symbol/ts/exp_ret（及可选 is_effective）的评估集信号；prices: MultiIndex+close。"""
         self.signals = signals
         self.prices = prices
@@ -38,7 +40,10 @@ class SentinelTradingEnv:
         rlc = getattr(cfg, "rl", None)
         btc = getattr(cfg, "backtest", None)
 
-        self.symbols = list(signals["symbol"].unique()) if "symbol" in signals.columns else list(signals.index.get_level_values(0).unique())
+        if symbols is not None:
+            self.symbols = list(symbols)  # 强制品种集（保证 train/valid 同 obs_dim）
+        else:
+            self.symbols = list(signals["symbol"].unique()) if "symbol" in signals.columns else list(signals.index.get_level_values(0).unique())
         # 奖励权重（奖励工程 2026-08-17：pnl 以 bp 计，w_pnl/w_turn/w_trend 可配/可进化）
         self.w_pnl = float(getattr(rlc, "w_pnl", 1.0))
         self.w_turn = float(getattr(rlc, "w_turn", 0.5))
@@ -59,15 +64,22 @@ class SentinelTradingEnv:
             sub = prices.xs(sym, level=0)["close"].astype(float).sort_index()
             self._close_by_sym[sym] = sub
 
-        # 预计算每交易日快照
+        # 预计算每交易日快照（状态增强 2026-08-17：+ 横截面 rank + 短窗口 vol）
         self._snapshots: list[dict[str, np.ndarray]] = []
         for d in self.dates:
             day = df[df["ts"] == d].set_index("symbol")
             exp_ret = np.array([float(day.loc[s, "exp_ret"]) if s in day.index else 0.0 for s in self.symbols])
-            # 状态：趋势（close>=MA → 1）与波动（20日 std）
+            # 横截面相对强度（rank pct：当日截面内 exp_ret 排名比例 0-1）
+            rank = np.zeros(len(self.symbols))
+            valid_mask = exp_ret != 0.0
+            if valid_mask.sum() > 1:
+                from scipy.stats import rankdata
+                rank[valid_mask] = rankdata(exp_ret[valid_mask]) / valid_mask.sum()
+            # 状态：趋势（close>=MA → 1）与波动（20日/5日 std）
             trend = np.array([self._trend(s, d) for s in self.symbols])
-            vol = np.array([self._vol(s, d) for s in self.symbols])
-            self._snapshots.append({"exp_ret": exp_ret, "trend": trend, "vol": vol})
+            vol = np.array([self._vol(s, d, 20) for s in self.symbols])
+            vol5 = np.array([self._vol(s, d, 5) for s in self.symbols])
+            self._snapshots.append({"exp_ret": exp_ret, "rank": rank, "trend": trend, "vol": vol, "vol5": vol5})
 
         # 当日收益（奖励逐日化 2026-08-17：fwd 1 日 mark，与 BacktestEngine 逐 bar 口径一致；
         # 修复此前 5 日归因的重叠窗口放大幻觉）
@@ -79,9 +91,10 @@ class SentinelTradingEnv:
                 if d in fwd.index:
                     self._realized[(sym, d)] = float(fwd.loc[d])
 
-        self.obs_dim = 3 * len(self.symbols) + len(self.symbols)  # exp_ret + trend + vol + pos
-        # 离散动作：每品种 3 档仓位 {0, 0.5, 1.0} → 组合动作数 3^n
-        self._pos_levels = np.array([0.0, 0.5, 1.0])
+        # obs = exp_ret + rank + trend + vol20 + vol5 + pos（状态增强）
+        self.obs_dim = 5 * len(self.symbols) + len(self.symbols)
+        # 离散动作：每品种 2 档仓位 {0, 1.0} → 组合动作数 2^n（6 品种 = 64，控制动作空间）
+        self._pos_levels = np.array([0.0, 1.0])
         self._pos_map = _build_pos_map(len(self.symbols), self._pos_levels)  # (n_actions, n_sym)
         self.n_actions = len(self._pos_map)
         self.action_space = _Discrete(self.n_actions)
@@ -99,15 +112,17 @@ class SentinelTradingEnv:
         ma = st.rolling(self.ma_window, min_periods=self.ma_window).mean().iloc[-1]
         return 1.0 if st.iloc[-1] >= ma else 0.0
 
-    def _vol(self, sym: str, ts) -> float:
+    def _vol(self, sym: str, ts, window: int | None = None) -> float:
+        w = window or self.vol_window
         st = self._close_by_sym[sym].loc[:ts]
-        if len(st) < self.vol_window:
+        if len(st) < w:
             return 0.0
-        return float(st.pct_change().rolling(self.vol_window, min_periods=self.vol_window).std().iloc[-1] or 0.0)
+        return float(st.pct_change().rolling(w, min_periods=w).std().iloc[-1] or 0.0)
 
     def _obs(self, i: int) -> np.ndarray:
         snap = self._snapshots[i]
-        return np.concatenate([snap["exp_ret"], snap["trend"], snap["vol"], self._pos]).astype(float)
+        return np.concatenate([snap["exp_ret"], snap["rank"], snap["trend"],
+                               snap["vol"], snap["vol5"], self._pos]).astype(float)
 
     # ---- 环境接口 ----
     def reset(self) -> np.ndarray:

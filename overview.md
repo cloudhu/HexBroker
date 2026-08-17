@@ -257,3 +257,8 @@ LightGBM 为确认冠军；全链路（特征重要性 → Optuna 调优 → 特
 - 报告：`deliverables/software-hexfutures-ai/cross-segment-valid-2026-08-17.md`
 - 进化适应度 = 3 子段交叉平均 Sharpe：**OOS -0.02 → +0.36**（BacktestEngine 完整口径，年化 0.70%/回撤 -3.0%）；
 - RL 定位辅助增强；最优权重极度保守（高趋势惩罚）。
+
+### 32. P1 三件套：品种池 6 + 更长 valid + 状态增强（2026-08-17 傍晚）
+- 报告：`deliverables/software-hexfutures-ai/symbol-pool-extension-2026-08-17.md`
+- 品种 3→6（cu/rb/i PandaData 全历史）、动作 2 档、状态 36 维、valid 3 段交叉；
+- **OOS（592 信号）：RL Sharpe 0.38 vs 基线 -0.27**——提升边际但统计更稳健；RL 定位辅助增强层。
