@@ -150,37 +150,51 @@ def main() -> None:
 
     rng = np.random.default_rng(42)
 
-    # ---- 进化适应度：直连 BacktestEngine（2026-08-17，消除 env-引擎口径差距） ----
+    # ---- 进化适应度：多分段 valid 交叉 + 直连 BacktestEngine（2026-08-17） ----
     from hexbroker.backtest.engine import BacktestEngine
     from hexbroker.backtest.cost import CostModel
     _BT_CONTRACTS = {"au0": {"multiplier": 1000.0, "min_tick": 0.02}, "ag0": {"multiplier": 15.0, "min_tick": 0.01}, "m0": {"multiplier": 10.0, "min_tick": 1.0}}
     _BT_COST = CostModel(fee_open=0.00005, fee_close=0.00005, fee_close_today=0.00010,
                          slippage_ticks=1.0, margin_rate=0.12, contracts=_BT_CONTRACTS)
     _BT_NOTIONAL = cfg0.backtest.initial_capital * 0.30
-    _prices_v = prices[prices.index.get_level_values(1) <= pd.Timestamp(VALID_SPLIT)]  # valid 段子集加速
+    # valid 段拆 3 子段（2022 / 2023 / 2024-01~07）——交叉选择，缓解单一 valid 段过拟合
+    _v_dates = sorted(valid_sig["ts"].unique())
+    _v_segments = [
+        [d for d in _v_dates if d < pd.Timestamp("2023-01-01")],
+        [d for d in _v_dates if pd.Timestamp("2023-01-01") <= d < pd.Timestamp("2024-01-01")],
+        [d for d in _v_dates if d >= pd.Timestamp("2024-01-01")],
+    ]
+    _v_segments = [s for s in _v_segments if len(s) >= 40]
+    print(f"[OK] valid 交叉子段: {[f'{len(s)}天' for s in _v_segments]}")
 
     def _eval(w: np.ndarray, seed: int) -> float:
         env_tr = make_env(tr_sig, prices, cfg0, w)
         policy, _ = train_ppo(env_tr, total_timesteps=args.steps, seed=seed)
-        env_v = make_env(valid_sig, prices, cfg0, w)
-        obs = env_v.reset()
-        rows = []
-        for d in env_v.dates:
-            a_idx = int(policy.act(obs.reshape(1, -1))[0][0])
-            act = env_v._pos_map[a_idx]
-            for j, sym in enumerate(env_v.symbols):
-                px = _prices_v.xs(sym, level=0)["close"].get(d)
-                if px is not None:
-                    mult = _BT_CONTRACTS[sym]["multiplier"]
-                    n = int(act[j] * _BT_NOTIONAL / (px * mult))
-                    rows.append({"symbol": sym, "ts": d, "target": n})
-            obs, _, _, _ = env_v.step(a_idx)
-        if not rows:
+        seg_sharpes = []
+        for seg in _v_segments:
+            env_v = make_env(valid_sig[valid_sig["ts"].isin(seg)], prices, cfg0, w)
+            prices_seg = prices[prices.index.get_level_values(1) <= seg[-1]]
+            obs = env_v.reset()
+            rows = []
+            for d in env_v.dates:
+                a_idx = int(policy.act(obs.reshape(1, -1))[0][0])
+                act = env_v._pos_map[a_idx]
+                for j, sym in enumerate(env_v.symbols):
+                    px = prices_seg.xs(sym, level=0)["close"].get(d)
+                    if px is not None:
+                        mult = _BT_CONTRACTS[sym]["multiplier"]
+                        n = int(act[j] * _BT_NOTIONAL / (px * mult))
+                        rows.append({"symbol": sym, "ts": d, "target": n})
+                obs, _, _, _ = env_v.step(a_idx)
+            if not rows:
+                continue
+            targets = pd.DataFrame(rows).set_index(["symbol", "ts"])[["target"]].sort_index()
+            _eng = BacktestEngine(cfg0, cost=_BT_COST, initial_capital=cfg0.backtest.initial_capital)
+            _pf = _eng.run(prices_seg, targets)
+            seg_sharpes.append(float(compute_metrics(_pf.equity_curve, freq="1d").sharpe))
+        if not seg_sharpes:
             return -1e6
-        targets = pd.DataFrame(rows).set_index(["symbol", "ts"])[["target"]].sort_index()
-        _eng = BacktestEngine(cfg0, cost=_BT_COST, initial_capital=cfg0.backtest.initial_capital)
-        _pf = _eng.run(_prices_v, targets)
-        return float(compute_metrics(_pf.equity_curve, freq="1d").sharpe)
+        return float(np.mean(seg_sharpes))  # 交叉平均（多子段同时表现好才高分）
 
     # ---- 自回归 ES ----
     w_mean = np.array([1.0, 0.5, 2.0])  # 默认/先验

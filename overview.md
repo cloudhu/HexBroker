@@ -247,3 +247,8 @@ LightGBM 为确认冠军；全链路（特征重要性 → Optuna 调优 → 特
 - 适应度直连 BacktestEngine：valid 选择 Sharpe 0.78 但 **OOS -0.02**——valid 过拟合暴露；
 - **四轮校准后 SENTINEL RL OOS ≈ 0（噪声级）**——不升格主策略；规则基线（全样本 Sharpe 1.21）为最稳健策略；
 - 口径纪律固化：完整回测 + OOS 留出为准。
+
+### 31. 多分段 valid 交叉选择（2026-08-17 傍晚）
+- 报告：`deliverables/software-hexfutures-ai/cross-segment-valid-2026-08-17.md`
+- 进化适应度 = 3 子段交叉平均 Sharpe：**OOS -0.02 → +0.36**（BacktestEngine 完整口径，年化 0.70%/回撤 -3.0%）；
+- RL 定位辅助增强；最优权重极度保守（高趋势惩罚）。
