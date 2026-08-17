@@ -69,11 +69,12 @@ class SentinelTradingEnv:
             vol = np.array([self._vol(s, d) for s in self.symbols])
             self._snapshots.append({"exp_ret": exp_ret, "trend": trend, "vol": vol})
 
-        # 5 日前向收益（评估奖励用：当前 ts 的 exp_ret 对应未来 5 日）
+        # 当日收益（奖励逐日化 2026-08-17：fwd 1 日 mark，与 BacktestEngine 逐 bar 口径一致；
+        # 修复此前 5 日归因的重叠窗口放大幻觉）
         self._realized: dict[tuple[str, Any], float] = {}
         for sym in self.symbols:
             closes = self._close_by_sym[sym]
-            fwd = closes.shift(-5) / closes - 1.0
+            fwd = closes.shift(-1) / closes - 1.0
             for d in self.dates:
                 if d in fwd.index:
                     self._realized[(sym, d)] = float(fwd.loc[d])

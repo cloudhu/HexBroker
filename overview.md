@@ -225,3 +225,8 @@ LightGBM 为确认冠军；全链路（特征重要性 → Optuna 调优 → 特
 - **env 模拟 = 口径幻觉**（5 日收益窗口归因放大 ~5 倍）：RL 真实水平 = OOS 年化 0.41%/Sharpe 0.22（vs 模拟 100.9%/2.27）；
 - **P0 修复**：RL 环境奖励逐日化（与 BacktestEngine 口径对齐）后重训；
 - 外盘 UUP 可得/SPX 待权限；影响有限（NaN 由 LightGBM 处理）。
+
+### 29. P0 RL 奖励逐日化（2026-08-17 傍晚，修复有效）
+- 报告：`deliverables/software-hexfutures-ai/rl-daily-reward-2026-08-17.md`
+- 奖励 5 日归因 → 当日收益（fwd 1 日），与 BacktestEngine 对齐；
+- **OOS 完整口径：Sharpe 0.22→0.35、年化 0.41%→1.04%**——修复有效；仍弱需进化适应度直连 BacktestEngine。
