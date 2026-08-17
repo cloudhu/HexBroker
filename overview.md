@@ -201,3 +201,9 @@ LightGBM 为确认冠军；全链路（特征重要性 → Optuna 调优 → 特
 - 报告：`deliverables/software-hexfutures-ai/data-source-evaluation-2026-08-17.md`
 - 实测 5 源全有缺口：sina 截止 2024-07 / tdx 仅未交割 / westock 仅现货 / mx skill 无期货 / akshare 安装被沙箱 safe-delete 破坏（venv pip 不可靠）；
 - **推荐连接**：PandaData（明确含期货）/ Wind / 东财妙想——连接后即可完成数据延长 + SENTINEL 最终验证。
+
+### 27. SENTINEL 数据延长 + 最终验证（2026-08-17 下午，全链路收官）
+- 报告：`deliverables/software-hexfutures-ai/sentinel-final-verification-2026-08-17.md`
+- **PandaData 主力连续延长成功**（2018→2026-08，+501 根/品种，重叠期 cv<0.001 无缝拼接）；
+- **最终 OOS（2 年真新数据）：SENTINEL RL Sharpe 2.27 vs 规则基线 -0.13**——最强证据；
+- ⚠️ 年化 100.9% 含贵金属牛市 beta，回撤 39% 需风控；环境 akshare 灾难致 14 包损坏已全部修复（224/224）。

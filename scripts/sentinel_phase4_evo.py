@@ -24,6 +24,23 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from hexbroker.config import load_config  # noqa: E402
+from hexbroker.data.schema import BarFrame  # noqa: E402
+
+
+def load_local_bars(symbols: list[str], end: str = "2026-08-17") -> BarFrame:
+    """从本地延长 parquet 加载（sina 只到 2024-07，PandaData 延长已拼接落盘）。"""
+    import glob
+    dir_map = {"SHFE.au": "au0", "SHFE.ag": "ag0", "DCE.m": "m0", "au0": "au0", "ag0": "ag0", "m0": "m0"}
+    parts = []
+    for sym in symbols:
+        d = dir_map.get(sym, sym)
+        for fp in sorted(glob.glob(f"data/raw/processed/{d}/1d/*.parquet")):
+            parts.append(pd.read_parquet(fp))
+    df = pd.concat(parts, ignore_index=True)
+    df["datetime"] = pd.to_datetime(df["datetime"])
+    df = df.set_index(["symbol", "datetime"]).sort_index()
+    df = df[~df.index.duplicated(keep="last")]
+    return BarFrame(df=df, freq="1d", source="local")
 from hexbroker.feature import build_features  # noqa: E402
 from hexbroker.rl.sentinel_env import SentinelTradingEnv  # noqa: E402
 from hexbroker.rl.agent import train_ppo  # noqa: E402
@@ -40,7 +57,7 @@ REPORT_DATE = "2026-08-17"
 DELIVERABLE_DIR = _ROOT / "deliverables" / "software-hexfutures-ai"
 GLOBAL_CODES = ["spx", "uup"]
 TRAIN_SPLIT = "2022-01-01"   # PPO 训练 < 2022
-VALID_SPLIT = "2023-05-01"  # 进化适应度: 2022~2023-05；最终 OOS: 2023-05~2024-07（~1年，扩样本）
+VALID_SPLIT = "2024-07-18"  # 进化适应度: 2022~2024-07-17；最终 OOS: 2024-07-18~2026-08（真新数据，未参与任何训练/选择）
 # 奖励权重搜索空间（log 空间：w_pnl∈[0.1,10], w_turn∈[0.01,2], w_trend∈[0,8]）
 W_LOW = np.array([0.1, 0.01, 0.0])
 W_HIGH = np.array([10.0, 2.0, 8.0])
@@ -55,7 +72,7 @@ def build_cfg():
     cfg.data.symbols = list(SYMBOLS)
     cfg.data.freq = FREQ
     cfg.data.start = DATA_START
-    cfg.data.end = DATA_END
+    cfg.data.end = "2026-08-17"  # 延长后数据（PandaData）
     cfg.forecast.horizon = 5
     cfg.forecast.n_mc_samples = 30
     cfg.forecast.calibration_method = "platt"
@@ -104,9 +121,9 @@ def main() -> None:
     print("=" * 72)
 
     cfg0 = build_cfg()
-    plan = build_source_plan()
-    bars, chosen = fetch_with_failover(cfg0, plan)
+    bars = load_local_bars(SYMBOLS)
     bars.validate()
+    chosen = "local-parquet"  # sina 截止 2024-07，本地含 PandaData 延长到 2026-08
     inner_dates = bars.df.index.get_level_values("datetime").unique().sort_values()
     gc = {c: align_global_to_inner(load_global_close(c), inner_dates) for c in GLOBAL_CODES}
     features = build_features(bars, cfg0, global_close=gc)
@@ -168,7 +185,7 @@ def main() -> None:
     print("[OK] 用最优权重训练最终 PPO（30k steps）...")
     env_tr = make_env(tr_sig, prices, cfg0, best["w"])
     policy, _ = train_ppo(env_tr, total_timesteps=30_000, seed=best["seed"])
-    env_oos = make_env(oos_sig, prices, cfg0, best["w"])  # OOS = 2023-05 起，完全未参与选择
+    env_oos = make_env(oos_sig, prices, cfg0, best["w"])  # OOS = 2024-07-18 起（真新数据，完全未参与选择）
     obs = env_oos.reset()
     vals, dts = [], []
     for d in env_oos.dates:
@@ -184,6 +201,42 @@ def main() -> None:
     eq = pd.Series(vals, index=dts).cumprod() * cfg0.backtest.initial_capital
     m = compute_metrics(eq, freq="1d")
     print("\n[最终 OOS 回测（进化后 RL，OOS=2024 起，未参与选择）]")
+    # ---- 规则基线同段对比（top-30% + trend 过滤，名义 30%/标的） ----
+    from hexbroker.backtest.engine import BacktestEngine
+    from hexbroker.backtest.cost import CostModel
+    from hexbroker.evaluation.metrics import compute_metrics as _cm
+    _CONTRACTS = {"au0": {"multiplier": 1000.0, "min_tick": 0.02}, "ag0": {"multiplier": 15.0, "min_tick": 0.01}, "m0": {"multiplier": 10.0, "min_tick": 1.0}}
+    sig_all = sig.copy()
+    sig_all["ts"] = pd.to_datetime(sig_all["ts"])
+    oos_s = sig_all[sig_all["ts"] >= pd.Timestamp(VALID_SPLIT)].copy()
+    close_by2 = {}
+    close_parts2 = []
+    for sym in bars.symbols:
+        sub = bars.by_symbol(sym)["close"].astype(float).reset_index()
+        close_by2[sym] = sub.set_index("datetime")["close"].sort_index()
+        close_parts2.append(sub)
+    prices2 = pd.concat(close_parts2).set_index(["symbol", "datetime"]).sort_index()
+    prices2 = prices2.loc[~prices2.index.duplicated(keep="last")]
+    oos_s["rank_pct"] = oos_s["exp_ret"].rank(pct=True)
+    oos_s["_px"] = oos_s.apply(lambda r: prices2.xs(r["symbol"], level=0)["close"].get(r["ts"]), axis=1)
+    oos_s["_mult"] = oos_s["symbol"].map({s_: _CONTRACTS[s_]["multiplier"] for s_ in _CONTRACTS})
+    def _tok(sym_, ts_, w=20):
+        st = close_by2[sym_].loc[:ts_]
+        if len(st) < w:
+            return False
+        return st.iloc[-1] >= st.rolling(w, min_periods=w).mean().iloc[-1]
+    oos_s["_ok"] = oos_s.apply(lambda r: _tok(r["symbol"], r["ts"]), axis=1)
+    _notional = cfg0.backtest.initial_capital * 0.30
+    oos_s["target"] = np.where((oos_s["rank_pct"] >= 0.7) & oos_s["_px"].notna() & oos_s["_ok"],
+                               (_notional / (oos_s["_px"] * oos_s["_mult"])).astype(int), 0)
+    _tg = oos_s.set_index(["symbol", "ts"])[["target"]].sort_index()
+    _cost = CostModel(fee_open=0.00005, fee_close=0.00005, fee_close_today=0.00010,
+                      slippage_ticks=1.0, margin_rate=0.12, contracts=_CONTRACTS)
+    _eng = BacktestEngine(cfg0, cost=_cost, initial_capital=cfg0.backtest.initial_capital)
+    _pf = _eng.run(prices2, _tg)
+    _m = _cm(_pf.equity_curve, freq="1d")
+    print(f"[规则基线 OOS 同段] 年化={_m.annual_return*100:+.2f}% 回撤={_m.max_drawdown*100:.2f}% Sharpe={_m.sharpe:.2f} (n={len(oos_s)})")
+
     print(f"  年化={m.annual_return*100:+.2f}% 回撤={m.max_drawdown*100:.2f}% Sharpe={m.sharpe:.2f}")
     print("  [对比] 规则基线 top-30%+trend（全样本）: 年化 10.2%/回撤 8.8%/Sharpe 1.21")
 

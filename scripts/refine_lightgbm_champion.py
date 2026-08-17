@@ -65,7 +65,7 @@ from hexbroker.forecast.calibration import calibrate_signals
 SYMBOLS = ["SHFE.au", "SHFE.ag", "DCE.m"]
 FREQ = "1d"
 DATA_START = "2018-01-01"
-DATA_END = "2024-12-31"
+DATA_END = "2026-08-17"  # 数据延长（PandaData 拼接 2026-08-14）
 REPORT_DATE = "2026-08-16"
 
 # 闸门1（与 R7 一致）
