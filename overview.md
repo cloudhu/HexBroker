@@ -241,3 +241,9 @@ LightGBM 为确认冠军；全链路（特征重要性 → Optuna 调优 → 特
 - 适应度直连 BacktestEngine：valid 选择 Sharpe 0.78 但 **OOS -0.02**——valid 过拟合暴露；
 - **四轮校准后 SENTINEL RL OOS ≈ 0（噪声级）**——不升格主策略；规则基线（全样本 Sharpe 1.21）为最稳健策略；
 - 口径纪律固化：完整回测 + OOS 留出为准。
+
+### 30. 进化直连 BacktestEngine（2026-08-17 傍晚，最终裁决）
+- 报告：`deliverables/software-hexfutures-ai/evolution-bt-fitness-2026-08-17.md`
+- 适应度直连 BacktestEngine：valid 选择 Sharpe 0.78 但 **OOS -0.02**——valid 过拟合暴露；
+- **四轮校准后 SENTINEL RL OOS ≈ 0（噪声级）**——不升格主策略；规则基线（全样本 Sharpe 1.21）为最稳健策略；
+- 口径纪律固化：完整回测 + OOS 留出为准。
