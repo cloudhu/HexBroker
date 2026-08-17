@@ -40,7 +40,7 @@ REPORT_DATE = "2026-08-17"
 DELIVERABLE_DIR = _ROOT / "deliverables" / "software-hexfutures-ai"
 GLOBAL_CODES = ["spx", "uup"]
 TRAIN_SPLIT = "2022-01-01"   # PPO 训练 < 2022
-VALID_SPLIT = "2024-01-01"  # 进化适应度: 2022~2024；最终 OOS: >=2024（完全留出）
+VALID_SPLIT = "2023-05-01"  # 进化适应度: 2022~2023-05；最终 OOS: 2023-05~2024-07（~1年，扩样本）
 # 奖励权重搜索空间（log 空间：w_pnl∈[0.1,10], w_turn∈[0.01,2], w_trend∈[0,8]）
 W_LOW = np.array([0.1, 0.01, 0.0])
 W_HIGH = np.array([10.0, 2.0, 8.0])
@@ -168,7 +168,7 @@ def main() -> None:
     print("[OK] 用最优权重训练最终 PPO（30k steps）...")
     env_tr = make_env(tr_sig, prices, cfg0, best["w"])
     policy, _ = train_ppo(env_tr, total_timesteps=30_000, seed=best["seed"])
-    env_oos = make_env(oos_sig, prices, cfg0, best["w"])  # OOS = 2024 起，完全未参与选择
+    env_oos = make_env(oos_sig, prices, cfg0, best["w"])  # OOS = 2023-05 起，完全未参与选择
     obs = env_oos.reset()
     vals, dts = [], []
     for d in env_oos.dates:

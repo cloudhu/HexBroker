@@ -184,3 +184,9 @@ LightGBM 为确认冠军；全链路（特征重要性 → Optuna 调优 → 特
 - 自回归 ES 进化奖励权重（valid 2022-23 选择 / OOS 2024 完全留出）：OOS 正收益低回撤；
 - ⚠️ OOS 仅 96 天（数据截止 2024-07）——年化 137%/Sharpe 5.47 为小样本外推不可信；
 - **P0 下一步：延长数据（sina 拉 2024-07~2026-08）重跑 OOS 验证**；SENTINEL 四层全部验证通过。
+
+### 25. SENTINEL 全链路重跑（2026-08-17 上午，OOS 扩样本 + 同段对比）
+- 报告：`deliverables/software-hexfutures-ai/sentinel-full-rerun-2026-08-17.md`
+- 数据延长实测：sina/tdx/westock 均无现成 2024-07 后连续（tdx 需多合约拼接）→ 工程化脚手架待执行；
+- 重排分段 OOS 扩到 1.2 年（240 信号）：**SENTINEL RL Sharpe 3.83 vs 规则基线 0.88 同段**——RL 全面占优，验证通过；
+- ⚠️ 绝对年化 79.6% 偏高（OOS 行情偏多），真新数据验证为 P0。
