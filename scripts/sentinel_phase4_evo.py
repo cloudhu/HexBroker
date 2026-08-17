@@ -32,7 +32,13 @@ def load_local_bars(symbols: list[str], end: str = "2026-08-17") -> BarFrame:
     import glob
     dir_map = {"SHFE.au": "au0", "SHFE.ag": "ag0", "DCE.m": "m0",
                "SHFE.cu": "cu0", "SHFE.rb": "rb0", "DCE.i": "i0",
-               "au0": "au0", "ag0": "ag0", "m0": "m0", "cu0": "cu0", "rb0": "rb0", "i0": "i0"}
+               "SHFE.al": "al0", "SHFE.zn": "zn0", "SHFE.ni": "ni0", "SHFE.hc": "hc0",
+               "DCE.y": "y0", "DCE.p": "p0", "DCE.j": "j0", "DCE.jm": "jm0",
+               "CZCE.sr": "sr0", "CZCE.cf": "cf0", "CZCE.ta": "ta0", "INE.sc": "sc0",
+               "au0": "au0", "ag0": "ag0", "m0": "m0", "cu0": "cu0", "rb0": "rb0", "i0": "i0",
+               "al0": "al0", "zn0": "zn0", "ni0": "ni0", "hc0": "hc0",
+               "y0": "y0", "p0": "p0", "j0": "j0", "jm0": "jm0",
+               "sr0": "sr0", "cf0": "cf0", "ta0": "ta0", "sc0": "sc0"}
     parts = []
     for sym in symbols:
         d = dir_map.get(sym, sym)
@@ -54,6 +60,11 @@ from scripts.refine_lightgbm_champion import (  # noqa: E402
 
 # 品种池扩展（2026-08-17）：au/ag/m（sina+PandaData 拼接）+ cu/rb/i（PandaData 全历史）
 SYMBOLS6 = ["SHFE.au", "SHFE.ag", "DCE.m", "SHFE.cu", "SHFE.rb", "DCE.i"]
+SYMBOLS18 = SYMBOLS6 + [
+    "SHFE.al", "SHFE.zn", "SHFE.ni", "SHFE.hc",
+    "DCE.y", "DCE.p", "DCE.j", "DCE.jm",
+    "CZCE.sr", "CZCE.cf", "CZCE.ta", "INE.sc",
+]
 from scripts.ablate_features import (  # noqa: E402
     load_best_params, load_global_close, align_global_to_inner,
 )
