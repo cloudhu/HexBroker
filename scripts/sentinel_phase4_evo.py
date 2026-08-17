@@ -181,26 +181,34 @@ def main() -> None:
     print("=" * 72)
     print(f"[进化完成] 最优 w={np.round(best['w'],3)} OOS Sharpe={best['fitness']:.3f} (seed={best['seed']})")
 
-    # ---- 最终 PPO（更长训练）+ 完整 OOS 回测 ----
+    # ---- 最终 PPO（更长训练）+ 完整 OOS 回测（BacktestEngine 口径） ----
     print("[OK] 用最优权重训练最终 PPO（30k steps）...")
     env_tr = make_env(tr_sig, prices, cfg0, best["w"])
     policy, _ = train_ppo(env_tr, total_timesteps=30_000, seed=best["seed"])
     env_oos = make_env(oos_sig, prices, cfg0, best["w"])  # OOS = 2024-07-18 起（真新数据，完全未参与选择）
+    from hexbroker.backtest.engine import BacktestEngine
+    from hexbroker.backtest.cost import CostModel
+    _CONTRACTS = {"au0": {"multiplier": 1000.0, "min_tick": 0.02}, "ag0": {"multiplier": 15.0, "min_tick": 0.01}, "m0": {"multiplier": 10.0, "min_tick": 1.0}}
+    _notional = cfg0.backtest.initial_capital * 0.30  # 名义等权 30%/标的（与规则基线一致）
     obs = env_oos.reset()
-    vals, dts = [], []
+    rows = []
     for d in env_oos.dates:
         a_idx = int(policy.act(obs.reshape(1, -1))[0][0])
         act = env_oos._pos_map[a_idx]
-        pnl_t = 0.0
         for j, sym in enumerate(env_oos.symbols):
-            r = env_oos._realized.get((sym, d), 0.0)
-            pnl_t += act[j] * env_oos.notional_frac * r
-        vals.append(1.0 + pnl_t)
-        dts.append(d)
+            px = prices.xs(sym, level=0)["close"].get(d)
+            if px is not None:
+                mult = _CONTRACTS[sym]["multiplier"]
+                n = int(act[j] * _notional / (px * mult))
+                rows.append({"symbol": sym, "ts": d, "target": n})
         obs, _, _, _ = env_oos.step(a_idx)
-    eq = pd.Series(vals, index=dts).cumprod() * cfg0.backtest.initial_capital
-    m = compute_metrics(eq, freq="1d")
-    print("\n[最终 OOS 回测（进化后 RL，OOS=2024 起，未参与选择）]")
+    rl_targets = pd.DataFrame(rows).set_index(["symbol", "ts"])[["target"]].sort_index()
+    _cost = CostModel(fee_open=0.00005, fee_close=0.00005, fee_close_today=0.00010,
+                      slippage_ticks=1.0, margin_rate=0.12, contracts=_CONTRACTS)
+    _eng = BacktestEngine(cfg0, cost=_cost, initial_capital=cfg0.backtest.initial_capital)
+    _pf = _eng.run(prices, rl_targets)
+    m = compute_metrics(_pf.equity_curve, freq="1d")
+    print("\n[最终 OOS 回测（进化后 RL → BacktestEngine 完整口径，含滑点/手续费/逐 bar）]")
     # ---- 规则基线同段对比（top-30% + trend 过滤，名义 30%/标的） ----
     from hexbroker.backtest.engine import BacktestEngine
     from hexbroker.backtest.cost import CostModel

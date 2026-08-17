@@ -6,9 +6,9 @@
   ],
   "best_seed": 7783,
   "final_oos": {
-    "annual_return": 1.0090621430401354,
-    "max_drawdown": -0.38937771171982805,
-    "sharpe": 2.2687209316973793
+    "annual_return": 0.004063334917215888,
+    "max_drawdown": -0.05106266467035914,
+    "sharpe": 0.21923507312463036
   },
   "history": [
     {
