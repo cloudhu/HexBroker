@@ -170,3 +170,10 @@ LightGBM 为确认冠军；全链路（特征重要性 → Optuna 调优 → 特
 - Phase 1：自研 RankNet 排序目标未胜出（Q4-Q0 0.32% vs LGBM 0.70%）→ 信号源用 exp_ret；
 - **Phase 3：SentinelTradingEnv + 自研 PPO，OOS(2022-2024) 年化 +13.8%/Sharpe 0.83 ✅**；
 - 报告：sentinel-phase1-3-2026-08-17.md。
+
+### 24. SENTINEL Phase 4 进化闭环（2026-08-17 上午，四层架构全验证）
+- 报告：`deliverables/software-hexfutures-ai/sentinel-phase4-2026-08-17.md`
+- 奖励工程：bp 尺度 + 趋势惩罚（trend 过滤编码进奖励）+ 权重可进化；
+- 自回归 ES 进化奖励权重（valid 2022-23 选择 / OOS 2024 完全留出）：OOS 正收益低回撤；
+- ⚠️ OOS 仅 96 天（数据截止 2024-07）——年化 137%/Sharpe 5.47 为小样本外推不可信；
+- **P0 下一步：延长数据（sina 拉 2024-07~2026-08）重跑 OOS 验证**；SENTINEL 四层全部验证通过。

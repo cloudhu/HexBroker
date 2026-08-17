@@ -39,8 +39,10 @@ class SentinelTradingEnv:
         btc = getattr(cfg, "backtest", None)
 
         self.symbols = list(signals["symbol"].unique()) if "symbol" in signals.columns else list(signals.index.get_level_values(0).unique())
+        # 奖励权重（奖励工程 2026-08-17：pnl 以 bp 计，w_pnl/w_turn/w_trend 可配/可进化）
         self.w_pnl = float(getattr(rlc, "w_pnl", 1.0))
-        self.w_turn = float(getattr(rlc, "w_turn", 0.1))
+        self.w_turn = float(getattr(rlc, "w_turn", 0.5))
+        self.w_trend = float(getattr(rlc, "w_trend", 2.0))
         self.initial_capital = float(getattr(btc, "initial_capital", 1_000_000.0))
         self.notional_frac = float(getattr(getattr(cfg, "risk", None), "max_position_pct", 0.30))
 
@@ -127,12 +129,16 @@ class SentinelTradingEnv:
         for j, sym in enumerate(self.symbols):
             r = self._realized.get((sym, d), 0.0)
             pnl += self._pos[j] * self.notional_frac * r
-        # 换手惩罚
+        # 奖励工程：pnl 以基点计（×10000，避免与换手惩罚尺度失衡）；趋势惩罚编码
+        # "下跌趋势不做多"经验：trend=0 时持仓 → 惩罚
+        snap = self._snapshots[self._step]
+        pnl_bp = pnl * 10000.0
+        trend_pen = float(np.sum(act * (1.0 - snap["trend"])))  # 下跌趋势中的多头仓位和
         turn = float(np.abs(act - self._pos).sum())
-        reward = self.w_pnl * pnl - self.w_turn * turn
+        reward = self.w_pnl * pnl_bp - self.w_turn * turn - self.w_trend * trend_pen
         self._pos = act
         self._step += 1
-        info = {"step": self._step, "pnl": pnl, "turn": turn}
+        info = {"step": self._step, "pnl_bp": pnl_bp, "turn": turn, "trend_pen": trend_pen}
         return self._obs(self._step), float(reward), False, info
 
     def close(self):  # noqa: D401
