@@ -445,3 +445,8 @@ LightGBM 为确认冠军；全链路（特征重要性 → Optuna 调优 → 特
 - 报告：`deliverables/software-hexfutures-ai/vix-landing-2026-08-18.md`
 - VIX（CBOE G0003892）落盘 vix.parquet（2018~2026-08 完整）；贵金属组 +vix 验证：**IC 恶化（au0 -0.068→-0.113）+ 全样本 Sharpe 0.99→0.91**——单因子相关性 ≈0（|r|<0.04）无预测力；
 - **不采纳为默认特征**；数据保留（宏观多因子组合 + 避险 regime 监控）；当前最优 v1.1 不变（Sharpe 0.99/OOS 0.39）。
+
+### 48. P1 VIX 落盘（2026-08-18 下午，基础设施+单因子验证）
+- 报告：`deliverables/software-hexfutures-ai/vix-landing-2026-08-18.md`
+- VIX（CBOE G0003892）落盘 vix.parquet（2018~2026-08 完整）；贵金属组 +vix 验证：**IC 恶化（au0 -0.068→-0.113）+ 全样本 Sharpe 0.99→0.91**——单因子相关性 ≈0（|r|<0.04）无预测力；
+- **不采纳为默认特征**；数据保留（宏观多因子组合 + 避险 regime 监控）；当前最优 v1.1 不变（Sharpe 0.99/OOS 0.39）。
