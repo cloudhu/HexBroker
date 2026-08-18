@@ -1,9 +1,10 @@
 """P0 基本面数据落地脚手架：PandaData DeepView 拉取（基差/期限结构/仓单/席位持仓）。
 
-【阻塞状态 2026-08-18 傍晚】
-- get_future_basis / get_future_warehouse_receipt / get_future_term_structure 等 DeepView 方法
-  经 MCP 网关调用报 `unknown params: underlying_symbol`（行情类 get_future_daily_post 同参数名可用）；
-- 无过滤参数时偶发 `reauth_required`（token 抖动）——疑似 DeepView 服务授权范围或网关 schema 未对齐。
+【阻塞状态 2026-08-18 傍晚（诊断完成）】
+- 网关参数名实测：DeepView 方法必须用 **`symbol`**（`underlying_symbol` 报 unknown params；
+  `symbol` 通过参数校验走到 token 检查）——本脚本已修正；
+- 唯一阻塞：**PandaData token 过期**（mcp__pandadata__auth_status 实测
+  `pandadata_token_expires_in=0`，reauth_required=false 矛盾态）——需连接器管理页重新授权刷新 token。
 - 前置验证（现有 open_interest 代理）：OI 变化因子 IC ≈ 0（+0.002/+0.004/量比 -0.004）——粗糙代理否决，
   必须真席位/基差数据。DeepView 恢复即执行本脚本。
 
@@ -48,7 +49,7 @@ def build_pull_plan() -> list[dict]:
             plan.append({
                 "method": method,
                 "metric": metric,
-                "params": {"underlying_symbol": SYMBOLS, "start_date": start, "end_date": end},
+                "params": {"symbol": SYMBOLS, "start_date": start, "end_date": end},  # 网关实测：symbol（underlying_symbol 报 unknown params）
                 "expected": f"{metric} × {len(SYMBOLS)}品种 × {start}~{end}",
             })
     return plan
