@@ -476,3 +476,9 @@ LightGBM 为确认冠军；全链路（特征重要性 → Optuna 调优 → 特
 ### 51. 模型架构整理 + 开发者指南（2026-08-18 下午）
 - 创建 `docs/developer-guide.md`（v2.1 权威架构文档）：分层数据流/各层详述/v2.1 全参数表/文件索引/20 阶段演进史/9 条幻觉清单/初始设计偏离记录/复现路径；
 - 架构事实：真实 alpha = 分组建模 exp_ret + mom90 融合 + 监控/波目标双风控；Kronos/RL 未入主路径（保留研究框架）。
+
+### 52. 架构升级提案 Sentinel-2（2026-08-18 傍晚）
+- 报告：`deliverables/software-hexfutures-ai/architecture-upgrade-proposal-2026-08-18.md`
+- 瓶颈诊断：25 特征全为价格衍生 + 趋势形态胜率天花板——需换信息维度；PandaData DeepView 提供基差/期限结构/仓单/席位持仓（四大 alpha 源）；
+- **Sentinel-2 双引擎**：趋势（v2.1）+ 基本面/均值回归（高胜率 55-65%）+ 低相关组合；目标胜率 55%+/OOS 年化 5-10%；
+- 路线：P0 数据落地→P1 单因子验证→P2 引擎B→P3 组合（token 待恢复）。
