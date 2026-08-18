@@ -467,3 +467,8 @@ LightGBM 为确认冠军；全链路（特征重要性 → Optuna 调优 → 特
 - 报告：`deliverables/software-hexfutures-ai/vol-ewma-tune-2026-08-18.md`
 - **EWMA10 采纳**：全样本 Sharpe 0.94→0.96、回撤持平 -17.9%；**OOS Sharpe 0.24→0.31（+29%）双改善**；半衰期 8-12 平滑非尖峰；
 - **部署级配置 v2.1**：17 品种分组+0.8/0.2/top35%/W20-linear+波目标17.5% EWMA(hl=10) → 全样本 Sharpe 0.96/回撤 -17.91%；OOS 0.31。
+
+### 50. 波动率 EWMA 半衰微调（2026-08-18 下午，v2.1 确立）
+- 报告：`deliverables/software-hexfutures-ai/vol-ewma-tune-2026-08-18.md`
+- **EWMA10 采纳**：全样本 Sharpe 0.94→0.96、回撤持平 -17.9%；**OOS Sharpe 0.24→0.31（+29%）双改善**；半衰期 8-12 平滑非尖峰；
+- **部署级配置 v2.1**：17 品种分组+0.8/0.2/top35%/W20-linear+波目标17.5% EWMA(hl=10) → 全样本 Sharpe 0.96/回撤 -17.91%；OOS 0.31。
