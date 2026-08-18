@@ -410,3 +410,9 @@ LightGBM 为确认冠军；全链路（特征重要性 → Optuna 调优 → 特
 - **最优：0.8·rank(exp_ret)+0.2·rank(mom90)，top35%，W20-linear 监控 → 全样本 Sharpe 1.001 / OOS +0.334**（18 品种真实口径，平台性 std=0.063 非尖峰）；
 - 演进：合并 0.57 → 分组 0.70 → **分组+搜索 1.00**；OOS 0.09→0.33；
 - 下一步：组内细分（修 p0）、VIX 落盘、回撤控制后部署。
+
+### 45. P0 分组×参数搜索（2026-08-18 上午，Sharpe 破 1）
+- 报告：`deliverables/software-hexfutures-ai/group-param-search-2026-08-18.md`
+- **最优：0.8·rank(exp_ret)+0.2·rank(mom90)，top35%，W20-linear 监控 → 全样本 Sharpe 1.001 / OOS +0.334**（18 品种真实口径，平台性 std=0.063 非尖峰）；
+- 演进：合并 0.57 → 分组 0.70 → **分组+搜索 1.00**；OOS 0.09→0.33；
+- 下一步：组内细分（修 p0）、VIX 落盘、回撤控制后部署。
