@@ -29,7 +29,7 @@ from scripts.sentinel_phase4_evo import load_local_bars
 
 # 分组定义（本地短名）
 GROUPS = {
-    "precious": {"syms": ["au0", "ag0"], "global": ["spx", "uup", "t10y"]},
+    "precious": {"syms": ["au0", "ag0"], "global": ["spx", "uup", "t10y", "vix"]},  # +vix 避险因子 (2026-08-18)
     "ferrous": {"syms": ["rb0", "i0", "hc0", "j0", "jm0"], "global": ["spx", "t10y"]},
     "industrial": {"syms": ["cu0", "al0", "zn0", "ni0"], "global": ["spx", "uup"]},
     "agri": {"syms": ["m0", "y0", "p0", "sr0", "cf0"], "global": ["spx"]},
