@@ -538,5 +538,11 @@ engine_a_targets_cs(prices,
     group_map=cfg.backtest.engine_a.group_map)  # 18 键 ferrous_all
 ```
 
+### 9.19 P11 引擎 B 参数复验 + 期限结构探测（2026-08-20）
+
+**参数复验（数据补齐后）**：12 组合网格（win∈{63,126,252,504}×thr∈{0.6,0.7,0.8}）12/12 OOS 全正（0.97~1.78）；**生产 win252/thr0.70 OOS 1.622 精确复现**（Δ=0.000）。QA 统计佐证：OOS SE≈0.068，超越者 win63/0.7（Δ+0.156≈2.3 SE）、win252/0.6（Δ+0.077≈1.1 SE）均在噪声内 → **维持 EngineBConfig win252/thr0.70**；win252/thr0.60 留 watch item（thr=0.6 做多占比 99.6% 几乎恒多、IS 无印证）。
+
+**期限结构斜率**：数据源可行（PandaData `get_future_term_structure` **含已交割历史合约**，~200 行/次需分批）但 **暂缓立项**——弱 IC（|t|≤0.89、窗口级 t=-0.48）+ 复权口径限制（近月后复权 vs 远月原始价，复权因子主导）+ 小样本 n=3；⚠️ 工程师"与引擎 B 信号重叠"理由未实证（QA 补测正交化后无一致增量）→ 暂缓依据修正为上述三项。未来立项前置：近月原始价重构 + 扩 18 品种 + **正交化增量 IC 验证**。
+
 ---
-*文档版本：v3.13（2026-08-20，Sentinel-2 P10 group_map+边界补测）｜ 关联报告：deliverables/software-hexfutures-ai/（40+ 份实验报告）*
+*文档版本：v3.14（2026-08-20，Sentinel-2 P11 引擎B深挖）｜ 关联报告：deliverables/software-hexfutures-ai/（40+ 份实验报告）*
