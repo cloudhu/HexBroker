@@ -83,6 +83,9 @@ class FeatureConfig(BaseModel):
     iterative_params: dict[str, Any] = Field(default_factory=dict)
     cross_params: dict[str, Any] = Field(default_factory=dict)
     weekly_params: dict[str, Any] = Field(default_factory=dict)
+    fundamental_params: dict[str, Any] = Field(
+        default_factory=dict, description="基本面（基差）特征参数：window/min_periods/include_basis"
+    )
     keep_features: list[str] | None = Field(default=None, description="特征级白名单（特征选择裁剪）；None=保留全部")
 
 
@@ -130,6 +133,61 @@ class RiskConfig(BaseModel):
     position_scalar_r4: float = 1.0
 
 
+class EngineAConfig(BaseModel):
+    """引擎 A（按日截面 rank）生产配置（v1.1，P9 固化）。
+
+    引擎 A 对信号缓存 exp_ret 做**每日截面** rank（``groupby(ts).rank(pct=True)``），
+    取 top_k 分位做多（P5 修复版，替代旧版全表 rank）；稀疏日防御采用 S2：
+    当日信号品种数不足 ``min_symbols`` 时整日空仓（P5 终裁选中策略）。
+
+    信号缓存默认指向 **v8 生产缓存**（P8-4 全品种统一截面 QA VERIFIED，
+    8,624 行 / 18 品种）；旧 v2/v4 缓存保留作回归基线，显式传入路径仍可覆盖。
+
+    P9-2 新增 ``group_cap``：单组敞口上限（0,1)，None 表示不启用（默认，向后兼容）。
+    """
+
+    model_config = _MODEL_CFG
+    enabled: bool = True
+    signal_cache: str = "artifacts/signals_cache18_grouped_v8.parquet"  # 生产缓存（v8，P8-4 全品种截面）
+    top_k: float = 0.30       # 每日截面做多分位阈值（top30%）
+    min_symbols: int = 3      # S2 稀疏防御：当日品种数不足则整日空仓
+    notional_frac: float = 0.20  # 名义占权益比例（与引擎 B 一致）
+    group_cap: float | None = None  # P9-2 单组敞口上限（0,1)；None=不启用（向后兼容）
+
+
+class EngineBConfig(BaseModel):
+    """Sentinel-2 引擎 B（基差收敛）生产配置（v1.0，P5 终裁）。
+
+    引擎 B 为 Sentinel-2 组合的基座引擎（OOS Sharpe 1.260 / MaxDD -6.7%）：
+    对 basis_ratio 做品种内滚动 252 日分位，分位 >= thr 时做多。
+    """
+
+    model_config = _MODEL_CFG
+    enabled: bool = True
+    win: int = 252          # basis_ratio 品种内滚动分位窗口
+    thr: float = 0.70       # 做多分位阈值
+    notional_frac: float = 0.20  # 名义占权益比例
+
+
+class ComboConfig(BaseModel):
+    """Sentinel-2 双引擎组合权重（v1.1，P9 组合级验证固化）。
+
+    P9-1 网格（A∈{0.10..0.35} × 波目标 on/off，复利口径）：
+      - vol=N 网格 OOS Sharpe 最优：A10/B90（1.612 vs A15/B85 基线 1.602）
+      - 全部网格 OOS Sharpe 最优：A10/B90 + vol=Y（1.662，复利 +43.8%）
+      - P9 裁决：权重更新为 A10/B90（引擎 A OOS 截面 IC 为负，降低其权重更稳健）；
+        波目标保持 False（P4-1 终裁；vol=Y 提升 OOS 复利但 MaxDD 更深 -8.1% vs -6.1%，
+        是否切换交团队/QA 复核）。
+    """
+
+    model_config = _MODEL_CFG
+    w_engine_a: float = 0.10   # P9 终裁：A10/B90（vol=N 网格最优）
+    w_engine_b: float = 0.90   # B 为基（OOS Sharpe 1.622）
+    vol_target: bool = False   # P4-1 终裁：不叠加组合层波目标（P9 复核保留）
+    vol_target_ann: float = 0.175
+    vol_ewma_halflife: int = 10
+
+
 class BacktestConfig(BaseModel):
     model_config = _MODEL_CFG
     fee_rate_open: float = 0.00005
@@ -145,6 +203,10 @@ class BacktestConfig(BaseModel):
     )
     limit_trade_allowed: bool = False
     initial_capital: float = 1_000_000.0
+    # 新增：Sentinel-2 双引擎生产配置（v1.0，P5/P6-5 终裁）
+    engine_b: EngineBConfig = Field(default_factory=EngineBConfig)  # 引擎 B（基差收敛）
+    combo: ComboConfig = Field(default_factory=ComboConfig)         # 组合权重
+    engine_a: EngineAConfig = Field(default_factory=EngineAConfig)  # 引擎 A（截面 rank，v4 缓存）
 
 
 class RLConfig(BaseModel):

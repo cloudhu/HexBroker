@@ -188,6 +188,154 @@ def _forward_returns(close: pd.Series, horizon: int) -> pd.Series:
     return pd.Series(fwd, index=close.index)
 
 
+# ---------------------------------------------------------------------------
+# 2.1 训练标签截面化（P8-3：让模型学"当日各品种相对强弱"而非"绝对涨跌"）
+#     P8-4：label_pool 升级——截面化范围从"组内"扩展到"全 18 品种统一截面"
+# ---------------------------------------------------------------------------
+# 全 18 品种（标准名，与 scripts/build_signals18.SYMBOLS18 顺序一致）；
+# _ALL18_DIR 为标准名 → data/raw/processed 下本地短名目录（与
+# sentinel_phase4_evo.load_local_bars.dir_map 一致，保证与分组建模同源）。
+_ALL18_STD = [
+    "SHFE.au", "SHFE.ag", "DCE.m", "SHFE.cu", "SHFE.rb", "DCE.i",
+    "SHFE.al", "SHFE.zn", "SHFE.ni", "SHFE.hc", "DCE.y", "DCE.p",
+    "DCE.j", "DCE.jm", "CZCE.sr", "CZCE.cf", "CZCE.ta", "INE.sc",
+]
+_ALL18_DIR = {
+    "SHFE.au": "au0", "SHFE.ag": "ag0", "DCE.m": "m0", "SHFE.cu": "cu0",
+    "SHFE.rb": "rb0", "DCE.i": "i0", "SHFE.al": "al0", "SHFE.zn": "zn0",
+    "SHFE.ni": "ni0", "SHFE.hc": "hc0", "DCE.y": "y0", "DCE.p": "p0",
+    "DCE.j": "j0", "DCE.jm": "jm0", "CZCE.sr": "sr0", "CZCE.cf": "cf0",
+    "CZCE.ta": "ta0", "INE.sc": "sc0",
+}
+
+
+def _load_all18_close_map() -> dict[str, pd.Series]:
+    """加载全 18 品种 close → {标准名: 该品种**自有日期轴** close 序列}。
+
+    P8-4 全品种统一截面专用。关键：每品种 close 必须用**该品种自己的交易日历**，
+    不能做全品种 union 对齐——union 会让不交易日变成 NaN 空洞，而
+    ``_forward_returns`` 按位置取 +horizon 行，空洞会把 horizon 算错、产生
+    错误/NaN 标签（实测 2020-09-24：au 的 +5 落在 2020-10-02 非交易日 → fwd 被
+    污染为 NaN → ``np.isnan(y).any()`` 跳过整折 → 信号数 8624 骤减为 2208）。
+
+    与组内路径（``bars.by_symbol``）同源：读取 data/raw/processed/<短名>/1d/*.parquet，
+    与分组建模完全一致，仅截面统计的品种集合不同（全 18 vs 组内）。
+    """
+    import glob
+
+    out: dict[str, pd.Series] = {}
+    for sym in _ALL18_STD:
+        d = _ALL18_DIR[sym]
+        parts = []
+        for fp in sorted(glob.glob(str(_ROOT / "data" / "raw" / "processed" / d / "1d" / "*.parquet"))):
+            parts.append(pd.read_parquet(fp))
+        if not parts:
+            print(f"[WARN] _load_all18_close_map: {sym} 无本地数据，跳过")
+            continue
+        df = pd.concat(parts, ignore_index=True)
+        df["datetime"] = pd.to_datetime(df["datetime"])
+        df = df.set_index("datetime").sort_index()
+        df = df[~df.index.duplicated(keep="last")]
+        out[sym] = df["close"].astype(float)
+    return out
+
+
+def _load_all18_close() -> pd.DataFrame:
+    """全 18 品种 close 宽表（union 日期轴；仅诊断/对照用）。
+
+    注意：union 轴会让单品种不交易日出现 NaN 空洞，**不可**直接用于
+    ``_forward_returns`` 的逐品种 fwd 计算（见 ``_load_all18_close_map`` 的说明）。
+    """
+    return pd.DataFrame(_load_all18_close_map()).sort_index()
+def _cross_sectionalize(fwd_wide: pd.DataFrame, label_mode: str) -> pd.DataFrame:
+    """当日截面化 fwd 标签（宽表：行=日期，列=品种）。
+
+    无前视证明：任意日期 t 的变换只用**当日（同一行）各品种的 fwd 值**——
+    rank/z/demean 都是截面统计（当日品种间相对化），不涉及时序统计、不使用
+    t 之后任何信息。训练/测试边界不泄漏：标签构造只按日期分组，与 walk-forward
+    折边界无关；且 fwd 本身已按 horizon 前移（标签不窥探测试窗），截面化不改
+    变这一点。
+
+    退化处理（QA 审查点）：
+    - 当日有效品种 < 2（单品种组/节假日缺数）→ 保留原始 fwd：截面信息不足时
+      退化为绝对标签，避免恒定 rank / NaN z / 零 demean 破坏训练。
+    - cross_z 当日截面标准差为 0 → 保留原始 fwd（无法标准化，避免除零）。
+
+    参数
+    ----
+    fwd_wide : DataFrame，index=日期（datetime），columns=组内品种，值为 fwd 收益。
+    label_mode : "absolute" | "cross_rank" | "cross_z" | "cross_demean"。
+    """
+    if label_mode == "absolute":
+        return fwd_wide
+    n_valid = fwd_wide.notna().sum(axis=1)
+    if label_mode == "cross_rank":
+        # rank(pct=True) 每行（当日）独立排名：升序分位 [0,1]，越大越强
+        out = fwd_wide.rank(axis=1, pct=True, na_option="keep")
+    elif label_mode == "cross_demean":
+        # 当日截面去均值（相对收益）：x - mean(当日品种)
+        out = fwd_wide.sub(fwd_wide.mean(axis=1, skipna=True), axis=0)
+    elif label_mode == "cross_z":
+        # 当日截面 z-score：用截面总体标准差 ddof=0（标准化惯例）
+        mu = fwd_wide.mean(axis=1, skipna=True)
+        sd = fwd_wide.std(axis=1, skipna=True, ddof=0)
+        out = fwd_wide.sub(mu, axis=0).div(sd.replace(0.0, np.nan), axis=0)
+    else:
+        raise ValueError(
+            f"未知 label_mode={label_mode!r}（可选 absolute/cross_rank/cross_z/cross_demean）"
+        )
+    # 有效品种 <2 → 保留原始 fwd（退化为绝对标签）
+    keep_raw = n_valid < 2
+    if label_mode == "cross_z":
+        sd = fwd_wide.std(axis=1, skipna=True, ddof=0)
+        keep_raw = keep_raw | sd.isna() | (sd == 0.0)
+    return out.where(~keep_raw, fwd_wide, axis=0)
+
+
+def _build_fwd_cs_panel(features: Any, bars: Any, horizon: int,
+                        label_mode: str, label_pool: str = "group") -> Optional[pd.DataFrame]:
+    """构建当日截面化 fwd 面板（宽表 日期×品种）。
+
+    label_mode='absolute' 返回 None（走原有逐品种 fwd 路径，零开销）。
+    面板覆盖截面范围的完整日期轴：任意日期 t 的截面统计用当日该范围内所有品种的
+    fwd，不依赖 walk-forward 折边界（训练/测试边界不泄漏）。
+
+    P8-4 label_pool 控制**截面统计的品种范围**：
+    - "group"（默认，P8-3 行为）：按组内品种构建面板——各组独立截面，
+      单品种组（m0）退化为绝对标签（跨组尺度错配的根源）。
+    - "all"（P8-4 新增）：全 18 品种统一截面——把所有品种的 fwd 合并成一个大
+      面板再截面化，再按品种取回；单品种组 m0 也参与全品种当日截面统计，
+      根治组规模偏置。无前视保证不变（当日截面统计）。
+    """
+    if label_mode == "absolute":
+        return None
+    if label_pool == "all":
+        # 全 18 品种统一截面：截面统计跨全部品种当日值。
+        # 注意：features.symbols 在本代码库为**短名**（raw parquet symbol 列为
+        # ag0/au0/...，load_local_bars 原样保留），故面板列也用短名，保证
+        # worker 内 fwd_cs_panel[sym] 查列一致（与组内路径同约定）。
+        # 每品种 fwd 必须在其自有日历上计算（_load_all18_close_map），再 union
+        # 对齐到宽表做截面——绝不能用 union 轴 close 算 fwd（见 map 的 docstring）。
+        close_map = _load_all18_close_map()
+        cols: dict[str, pd.Series] = {}
+        for std_sym, close_series in close_map.items():
+            short = _ALL18_DIR.get(std_sym, std_sym)
+            cols[short] = _forward_returns(close_series, horizon)
+        wide = pd.DataFrame(cols).sort_index()
+        return _cross_sectionalize(wide, label_mode)
+    if label_pool != "group":
+        raise ValueError(
+            f"未知 label_pool={label_pool!r}（可选 group/all）"
+        )
+    cols: dict[str, pd.Series] = {}
+    for sym in features.symbols:
+        sym_df = bars.by_symbol(sym)
+        close = sym_df["close"].astype(float).reset_index(level=0, drop=True).sort_index()
+        cols[sym] = _forward_returns(close, horizon)
+    wide = pd.DataFrame(cols).sort_index()
+    return _cross_sectionalize(wide, label_mode)
+
+
 def compute_realized_returns(bars: Any, horizon: int) -> pd.Series:
     parts = []
     for sym in bars.symbols:
@@ -246,12 +394,33 @@ def _lookback(cfg: Any) -> int:
     return min(int(cfg.feature.normalize_window), 30)
 
 
-def _calibrate_and_split(sigs, valid, y_true, cal_method: str, cal_split: Optional[float]):
+def _apply_calibrator_one(s, scaler, cal_method: str) -> None:
+    """用已在前 k 子窗拟合的校准器就地变换单个信号（改 p_up / is_effective）。
+
+    ``calibrate_signals`` 拟合时只变换传入子集；``cal_return_all=True`` 需要把同一
+    校准器应用到剩余信号，此处镜像 calibration.py 的 platt / isotonic 变换逻辑，
+    不重新拟合（保证校准器只在前 k 上拟合、评估窗零泄漏）。
+    """
+    if cal_method == "platt":
+        s.p_up = float(np.clip(scaler.transform([s.p_up])[0], 1e-6, 1 - 1e-6))
+    elif cal_method == "isotonic":
+        p_raw = np.clip(np.asarray([s.p_up], dtype=float), 1e-3, 1 - 1e-3)
+        s.p_up = float(np.clip(scaler.predict(p_raw)[0], 1e-6, 1 - 1e-6))
+    s.is_effective = abs(s.p_up - 0.5) > s.eff_thr if hasattr(s, "eff_thr") else abs(s.p_up - 0.5) > 0.05
+
+
+def _calibrate_and_split(sigs, valid, y_true, cal_method: str, cal_split: Optional[float],
+                         cal_return_all: bool = False):
     """per-fold 校准（可嵌套）：返回评估用信号列表。
 
     - ``cal_split is None``：现口径——用全部测试窗信号拟合校准器，评估全部信号。
-    - ``cal_split`` 为 0~1：嵌套验证——只用测试窗前 ``cal_split`` 比例信号拟合校准器，
-      仅返回剩余（评估子窗）信号。评估与校准数据不重叠，消除「用测试标签挑阈值」的乐观偏差。
+    - ``cal_split`` 为 0~1 且 ``cal_return_all=False``（默认）：嵌套验证——只用测试窗前
+      ``cal_split`` 比例信号拟合校准器，仅返回剩余（评估子窗）信号。评估与校准数据不重叠，
+      消除「用测试标签挑阈值」的乐观偏差。
+    - ``cal_split`` 为 0~1 且 ``cal_return_all=True``（P6-3 新模式）：仍只用测试窗前
+      ``cal_split`` 比例信号拟合校准器（嵌套零泄漏），但把同一校准器应用到**全部**信号
+      并返回全部（不截断 ``sigs[k:]``），覆盖率翻倍。校准只改 p_up / is_effective，
+      不改 exp_ret，因此对引擎 A 的 exp_ret.rank 排序零泄漏。
     """
     if cal_split is None:
         if valid.sum() >= 20:
@@ -264,8 +433,21 @@ def _calibrate_and_split(sigs, valid, y_true, cal_method: str, cal_split: Option
     k = int(len(sigs) * cal_split)
     k = max(1, min(k, len(sigs) - 1))  # 保证校准/评估子窗均非空
     cal_valid = [i for i in range(k) if valid[i]]
+    scaler = None
     if len(cal_valid) >= 20:
-        calibrate_signals([sigs[i] for i in cal_valid], y_true[cal_valid], method=cal_method)
+        scaler = calibrate_signals([sigs[i] for i in cal_valid], y_true[cal_valid], method=cal_method)
+    if cal_return_all:
+        # 前 k 有效信号已就地校准；把同一校准器应用到其余信号（含前 k 中无效信号）
+        if scaler is not None and cal_method != "none":
+            cal_set = set(cal_valid)
+            for i, s in enumerate(sigs):
+                if i not in cal_set:
+                    _apply_calibrator_one(s, scaler, cal_method)
+        elif cal_method == "none":
+            # none 模式不改变 p_up，只需为全部信号重算 is_effective
+            for s in sigs:
+                s.is_effective = abs(s.p_up - 0.5) > s.eff_thr if hasattr(s, "eff_thr") else abs(s.p_up - 0.5) > 0.05
+        return sigs
     return sigs[k:]
 
 
@@ -276,7 +458,8 @@ def _train_eval_fold(task):
     返回 ``(sym, fold_idx, records, importance_or_None)``。
     """
     (sym, fi, train_max_pos, test_start, test_end,
-     feat, close, cfg_dict, params, collect_models, cal_method, model_cls, cal_split) = task
+     feat, close, cfg_dict, params, collect_models, cal_method, model_cls, cal_split,
+     cal_return_all, label_mode, fwd_cs_panel) = task
     from omegaconf import OmegaConf
 
     cfg = OmegaConf.create(cfg_dict)
@@ -299,7 +482,11 @@ def _train_eval_fold(task):
     windows, valid_idx = build_windows(train_feat, lookback)
     if windows.shape[0] == 0:
         return sym, fi, records, importance
-    y = fwd.loc[valid_idx.get_level_values(1).to_numpy()].to_numpy(dtype=float)
+    if label_mode == "absolute":
+        y = fwd.loc[valid_idx.get_level_values(1).to_numpy()].to_numpy(dtype=float)
+    else:
+        # 截面化标签：y 取当日截面变换后的值（fwd_cs_panel 已按当日品种相对化）
+        y = fwd_cs_panel[sym].loc[valid_idx.get_level_values(1).to_numpy()].to_numpy(dtype=float)
     if np.isnan(y).any() or y.shape[0] < 20:
         return sym, fi, records, importance
 
@@ -312,7 +499,7 @@ def _train_eval_fold(task):
     realized = fwd.loc[test_ts].to_numpy(dtype=float)
     y_true = (realized > 0).astype(float)
     valid = ~np.isnan(realized)
-    sigs = _calibrate_and_split(sigs, valid, y_true, str(cal_method), cal_split)
+    sigs = _calibrate_and_split(sigs, valid, y_true, str(cal_method), cal_split, cal_return_all)
     for s in sigs:
         records.append(dict(
             symbol=sym, ts=s.ts, p_up=s.p_up,
@@ -334,6 +521,9 @@ def walk_forward_lightgbm(
     n_jobs_folds: int = 1,
     model_cls: Any = None,
     cal_split: Optional[float] = None,
+    cal_return_all: bool = False,
+    label_mode: str = "absolute",
+    label_pool: str = "group",
 ) -> WFResult:
     """对 au/ag/m 逐标的 walk-forward 训练 LightGBM，产出 OOS 信号（可选收集重要性）。
 
@@ -342,6 +532,14 @@ def walk_forward_lightgbm(
     - 测试窗预测为 OOS；n_mc=30 采样得到连续 p_up（与 R7 一致）。
     model_cls：模型类（默认 LightGBMForecast；可传 EnsembleForecast 等）。
     cal_split：嵌套验证分割（None=现口径；0~1=用测试窗前比例校准、剩余评估，防乐观偏差）。
+    cal_return_all：True 时（需配合 cal_split 0~1）用前 cal_split 比例拟合校准器、
+      对全部信号应用校准并返回全部（覆盖率翻倍；校准只改 p_up/is_effective 不改 exp_ret）。
+    label_mode（P8-3）：训练标签口径——"absolute"（默认，回归绝对 fwd 收益，现行为）；
+      "cross_rank"/"cross_z"/"cross_demean"（当日截面化标签，见 ``_cross_sectionalize``）。
+      截面化只在训练标签上生效：在完整面板按 datetime 分组、当日品种间相对化，无前视；
+      预测输出 exp_ret 仍为模型原始预测（引擎 A 的 exp_ret.rank 排序不受标签口径影响）。
+    label_pool（P8-4）：截面化**范围**——"group"（默认，P8-3 行为：组内截面）；
+      "all"（全 18 品种统一截面，根治组规模偏置，见 ``_build_fwd_cs_panel``）。
     """
     if model_cls is None:
         from hexbroker.forecast.baselines import LightGBMForecast as model_cls
@@ -356,6 +554,11 @@ def walk_forward_lightgbm(
         purge=int(cfg.data.purge), embargo=int(cfg.data.embargo), mode=str(cfg.data.mode),
     )
     splitter = WalkForwardSplitter(**sp)
+
+    # P8-3/P8-4：截面化训练标签面板（absolute 时为 None，零开销）
+    # label_pool 只影响面板构建（组内 vs 全 18 品种），worker 内 y 提取逻辑不变，
+    # 故任务元组无需携带 label_pool（保持 16 字段，与 QA 静态审查一致）。
+    fwd_cs_panel = _build_fwd_cs_panel(features, bars, horizon, label_mode, label_pool)
 
     records: list = []
     importances: list = []
@@ -391,7 +594,8 @@ def walk_forward_lightgbm(
                 feat_names = list(feat.columns)
             for fi, fold in enumerate(folds):
                 tasks.append((sym, fi, fold.train_max_pos, fold.test_start, fold.test_end,
-                              feat, close, cfg_dict, params, collect_models, cal_method, model_cls, cal_split))
+                              feat, close, cfg_dict, params, collect_models, cal_method, model_cls, cal_split,
+                              cal_return_all, label_mode, fwd_cs_panel))
         with _cf.ProcessPoolExecutor(max_workers=int(n_jobs_folds)) as ex:
             for sym_r, fi, recs, imp in ex.map(_train_eval_fold, tasks):
                 records.extend(recs)
@@ -423,7 +627,10 @@ def walk_forward_lightgbm(
             windows, valid_idx = build_windows(train_feat, lookback)
             if windows.shape[0] == 0:
                 continue
-            y = fwd.loc[valid_idx.get_level_values(1).to_numpy()].to_numpy(dtype=float)
+            if label_mode == "absolute":
+                y = fwd.loc[valid_idx.get_level_values(1).to_numpy()].to_numpy(dtype=float)
+            else:
+                y = fwd_cs_panel[sym].loc[valid_idx.get_level_values(1).to_numpy()].to_numpy(dtype=float)
             if np.isnan(y).any() or y.shape[0] < 20:
                 continue
 
@@ -437,7 +644,7 @@ def walk_forward_lightgbm(
             realized = fwd.loc[test_ts].to_numpy(dtype=float)
             y_true = (realized > 0).astype(float)
             valid = ~np.isnan(realized)
-            sigs = _calibrate_and_split(sigs, valid, y_true, cal_method, cal_split)
+            sigs = _calibrate_and_split(sigs, valid, y_true, cal_method, cal_split, cal_return_all)
             for s in sigs:
                 records.append(dict(
                     symbol=sym, ts=s.ts, p_up=s.p_up,

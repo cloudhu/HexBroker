@@ -20,6 +20,7 @@ import pandas as pd
 
 from ..constants import Freq
 from .cross import _is_inner_ratio, _norm_sym, _panel_close_wide, add_cross_global, add_internal_ratios
+from .fundamental import add_fundamental
 from .iterative import add_iterative
 from .microstructure import add_microstructure
 from .normalize import RollingNormalizer
@@ -64,9 +65,15 @@ class FeatureFrame:
 class FeaturePipeline:
     """可组合的特征流水线。"""
 
-    def __init__(self, cfg: Any, global_close: dict[str, pd.Series] | None = None) -> None:
+    def __init__(
+        self,
+        cfg: Any,
+        global_close: dict[str, pd.Series] | None = None,
+        fundamental_data: dict[str, pd.DataFrame | pd.Series] | None = None,
+    ) -> None:
         self.cfg = cfg
         self.global_close = global_close or {}
+        self.fundamental_data = fundamental_data or {}  # {品种短名: 基差 DataFrame/Series}
         self.close_panel: pd.DataFrame | None = None  # datetime × sym_short 宽表
         fc = getattr(cfg, "feature", None)
         self.transformers = list(getattr(fc, "transformers", ["technical", "microstructure", "normalize"]))
@@ -75,6 +82,7 @@ class FeaturePipeline:
         self.iterative_params = dict(getattr(fc, "iterative_params", {}) or {})
         self.cross_params = dict(getattr(fc, "cross_params", {}) or {})
         self.weekly_params = dict(getattr(fc, "weekly_params", {}) or {})
+        self.fundamental_params = dict(getattr(fc, "fundamental_params", {}) or {})
         # fail-fast：配置了外盘组但未提供外盘数据 → 显式报错（防特征静默缺失）
         # 只校验 global_codes（内盘比值 f_xr_{a}_{b} 无需外盘数据，不宜在此区分）
         need_global = bool(self.cross_params.get("global_codes"))
@@ -83,6 +91,12 @@ class FeaturePipeline:
                 "feature.cross_params 配置了外盘 global 特征（global_codes），"
                 "但未传入 global_close 数据。请先 load_global_close + align_global_to_inner "
                 "（见 hexbroker/feature/global_ref.py）。"
+            )
+        # fail-fast：配置了 fundamental 但未提供基本面数据 → 显式报错（防特征静默缺失）
+        if "fundamental" in self.transformers and not self.fundamental_data:
+            raise ValueError(
+                "feature.transformers 包含 'fundamental'，但未传入 fundamental_data "
+                "（dict[str, pd.DataFrame/Series]，键=品种短名如 'au'）。"
             )
         # 特征级白名单（特征选择裁剪）：None=保留全部；否则只保留列出的 f_ 特征
         keep = getattr(fc, "keep_features", None)
@@ -115,12 +129,20 @@ class FeaturePipeline:
                 df = add_internal_ratios(df, self.close_panel, sym_label, self.cross_params)
             if self.global_close:
                 df = add_cross_global(df, self.global_close, sym_label, self.cross_params)
+        if "fundamental" in self.transformers:
+            # 基本面（基差）：按品种短名注入，ffill 对齐 + 品种内滚动分位/z（严格因果）
+            fdata = self.fundamental_data.get(sym_label)
+            df = add_fundamental(df, fdata, sym_label, self.fundamental_params)
         feat_cols = technical_columns(df)
         if "normalize" in self.transformers and feat_cols:
-            sub = df[feat_cols]
-            normed = self._normalizer.fit_transform(sub)
-            df = df.drop(columns=feat_cols)
-            df = pd.concat([df, normed], axis=1)
+            # 基差特征不参与滚动 z-score 标准化：rank/z 已是无量纲形态（引擎 B 定案），
+            # 原始 ratio/basis 的量纲差异由树模型按特征分裂自适应（分组建模组内品种数少）。
+            norm_cols = [c for c in feat_cols if not c.startswith("f_basis")]
+            if norm_cols:
+                sub = df[norm_cols]
+                normed = self._normalizer.fit_transform(sub)
+                df = df.drop(columns=norm_cols)
+                df = pd.concat([df, normed], axis=1)
         # 最终只保留特征列（可选：特征级白名单裁剪）
         df = df[[c for c in df.columns if c.startswith("f_")]]
         if self.keep_features:
@@ -151,6 +173,13 @@ class FeaturePipeline:
         return ff
 
 
-def build_features(barframe: Any, cfg: Any, global_close: dict[str, pd.Series] | None = None) -> FeatureFrame:
-    """便捷函数：构造并执行默认流水线（可选注入已对齐的外盘收盘序列）。"""
-    return FeaturePipeline(cfg, global_close=global_close).run(barframe)
+def build_features(
+    barframe: Any,
+    cfg: Any,
+    global_close: dict[str, pd.Series] | None = None,
+    fundamental_data: dict[str, pd.DataFrame | pd.Series] | None = None,
+) -> FeatureFrame:
+    """便捷函数：构造并执行默认流水线（可选注入已对齐的外盘收盘序列/基本面数据）。"""
+    return FeaturePipeline(
+        cfg, global_close=global_close, fundamental_data=fundamental_data
+    ).run(barframe)
