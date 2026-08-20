@@ -521,5 +521,22 @@ v2.1 单引擎（趋势）OOS 年化仅 0.64%、信号 regime 反转（分位桶
 
 **主理人终裁**：① A10/B90 固化（先验一致 + B 主导低风险，标注"与 A15/B85 等价因先验选 A10"）；② vol=Y 维持候选不翻转 P4-1（需专项验证）；③ **group_cap 保留为杠杆**——缺 group_map 配置（默认 GROUPS_V2 分两组无法实现"合并黑色系≤50%"），下轮加 group_map 后 yaml 显式启用；④ 遗留：git 提交、group_map 落地、A10 边界补测（A5/A0）。
 
+### 9.18 P10 group_map 落地 + A10 边界补测（2026-08-20）
+
+**group_map 配置落地（QA 阻塞项闭环）**：
+- `EngineAConfig.group_map: dict[str,str] | None = None`（yaml 可覆盖）；`_resolve_group_map/_resolve_group_cap` 解析优先级：显式传入 → 读 config → 兜底 GROUPS_V2/不启用
+- `configs/base.yaml` 启用：`group_cap: 0.5` + `group_map` 18 键（**i0/j0/jm0/rb0/hc0 → ferrous_all 合并黑色系**）
+- pytest 208 passed；QA 静态审查 + 复跑全 VERIFIED
+
+**A10 边界补测（QA 要求）**：A0/B100 OOS 1.622（纯 B，下界最优）> A5/B95 1.618 > A10/B90 1.612（生产）> A15/B85 1.602——OOS 随 w_a 单调改善但**全样本反向**（A0 0.972 < A10 1.023）、OOS MaxDD 略深 → **QA 裁决 ComboConfig 维持 A10/B90 不更新**（增量小 + 全样本代价 + A0 边界 overfit 嫌疑）。
+
+**⚠️ 部署接线标准（DISCREPANCY-1 处置）**：无参 `load_config()` 不加载 base.yaml（向后兼容）→ **生产部署必须显式加载 + 显式传参**：
+```python
+cfg = load_config("configs/base.yaml")                     # 显式加载部署配置
+engine_a_targets_cs(prices,
+    group_cap=cfg.backtest.engine_a.group_cap,  # 0.5
+    group_map=cfg.backtest.engine_a.group_map)  # 18 键 ferrous_all
+```
+
 ---
-*文档版本：v3.12（2026-08-20，Sentinel-2 P9 组合固化）｜ 关联报告：deliverables/software-hexfutures-ai/（40+ 份实验报告）*
+*文档版本：v3.13（2026-08-20，Sentinel-2 P10 group_map+边界补测）｜ 关联报告：deliverables/software-hexfutures-ai/（40+ 份实验报告）*
