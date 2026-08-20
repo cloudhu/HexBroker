@@ -134,7 +134,7 @@ class RiskConfig(BaseModel):
 
 
 class EngineAConfig(BaseModel):
-    """引擎 A（按日截面 rank）生产配置（v1.1，P9 固化）。
+    """引擎 A（按日截面 rank）生产配置（v1.2，P10-1 新增 group_map）。
 
     引擎 A 对信号缓存 exp_ret 做**每日截面** rank（``groupby(ts).rank(pct=True)``），
     取 top_k 分位做多（P5 修复版，替代旧版全表 rank）；稀疏日防御采用 S2：
@@ -144,6 +144,11 @@ class EngineAConfig(BaseModel):
     8,624 行 / 18 品种）；旧 v2/v4 缓存保留作回归基线，显式传入路径仍可覆盖。
 
     P9-2 新增 ``group_cap``：单组敞口上限（0,1)，None 表示不启用（默认，向后兼容）。
+    P10-1 新增 ``group_map``：symbol→group 映射；None 用 GROUPS_V2 默认 8 组
+    （向后兼容）。部署 yaml（``configs/base.yaml``）显式启用：
+    ``group_cap=0.5`` + ``group_map``（黑色系 5 品种 i/j/jm/rb/hc 合并为
+    ``ferrous_all`` 组）→ 真正实现"合并黑色系敞口 ≤50%"（默认 GROUPS_V2
+    将黑色系拆 ferrous_raw/ferrous_steel 两组，无法实现该目标）。
     """
 
     model_config = _MODEL_CFG
@@ -153,6 +158,7 @@ class EngineAConfig(BaseModel):
     min_symbols: int = 3      # S2 稀疏防御：当日品种数不足则整日空仓
     notional_frac: float = 0.20  # 名义占权益比例（与引擎 B 一致）
     group_cap: float | None = None  # P9-2 单组敞口上限（0,1)；None=不启用（向后兼容）
+    group_map: dict[str, str] | None = None  # P10-1 symbol→group 映射；None=GROUPS_V2 默认（向后兼容）
 
 
 class EngineBConfig(BaseModel):

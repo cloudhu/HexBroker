@@ -107,6 +107,39 @@ def _default_group_map() -> dict[str, str]:
     return m
 
 
+def _resolve_group_map(group_map: dict[str, str] | None) -> dict[str, str]:
+    """解析分组映射：显式传入优先；None 时读生产配置（P10-1 新增 group_map 字段）。
+
+    向后兼容：显式传入的自定义映射（如 P9 的 ferrous 合并组）原样使用；
+    配置未启用（``cfg.backtest.engine_a.group_map`` 为 None）时回退
+    :func:`_default_group_map`（GROUPS_V2 默认 8 组）；配置读取异常同样回退。
+    """
+    if group_map is not None:
+        return group_map
+    try:
+        raw = load_config().backtest.engine_a.group_map
+    except Exception:
+        raw = None
+    if raw:
+        return dict(raw)
+    return _default_group_map()
+
+
+def _resolve_group_cap(group_cap: float | None) -> float | None:
+    """解析单组敞口上限：显式传入优先；None 时读生产配置（P10-1）。
+
+    配置也未启用（``cfg.backtest.engine_a.group_cap`` 为 None）→ 返回 None
+    （不启用，向后兼容）；配置读取异常同样返回 None。
+    """
+    if group_cap is not None:
+        return group_cap
+    try:
+        raw = load_config().backtest.engine_a.group_cap
+    except Exception:
+        raw = None
+    return raw
+
+
 def _capped_selection(
     ranked: list[str],
     target_count: int,
@@ -179,8 +212,10 @@ def engine_a_selection(
     top_k : 每日截面做多分位阈值（默认 0.30）。
     min_symbols : 当日信号品种数不足该值时整日空仓；None 无限制。
     cache_path : 信号缓存 parquet 路径；None 读生产配置。
-    group_cap : 单组敞口上限（0,1)；None 表示不启用（P9-2 默认向后兼容）。
-    group_map : symbol→group 映射；None 用 GROUPS_V2 默认 8 组。
+    group_cap : 单组敞口上限（0,1)；None 读生产配置（P10-1），配置未启用则不限制
+                （P9-2 默认向后兼容）。
+    group_map : symbol→group 映射；None 读生产配置（P10-1），配置未启用则用
+                GROUPS_V2 默认 8 组。
                 控制实验可传自定义映射（如把 ferrous_raw+ferrous_steel
                 合并为单一 'ferrous' 组，实现"黑色系敞口上限"）。
 
@@ -190,8 +225,10 @@ def engine_a_selection(
     """
     sig = pd.read_parquet(_resolve_cache_path(cache_path))
     sig["ts"] = pd.to_datetime(sig["ts"])
-    if group_map is None:
-        group_map = _default_group_map()
+    # P10-1：group_map / group_cap 未显式传入时读生产配置（configs/base.yaml 启用
+    # group_cap=0.5 + ferrous_all 合并映射）；配置 None → 回退 GROUPS_V2 / 不启用。
+    group_map = _resolve_group_map(group_map)
+    group_cap = _resolve_group_cap(group_cap)
 
     # 每日截面 rank：rank(pct=True, ascending=True) 返回 [0,1] 分位，越大越强
     sig["rank_pct"] = sig.groupby("ts")["exp_ret"].rank(pct=True, ascending=True)
@@ -257,6 +294,11 @@ def engine_a_targets_cs(
     启用后按日剔除超限组最低 exp_ret 成员并以次优品种替补（见
     :func:`_capped_selection`）。
 
+    P10-1 新增：``group_cap`` / ``group_map`` 未显式传入时读生产配置
+    （``cfg.backtest.engine_a.group_cap/group_map``，见 :func:`_resolve_group_cap`
+    与 :func:`_resolve_group_map`）；配置未启用时保持 P9-2 默认行为
+    （group_cap 不启用 / group_map 用 GROUPS_V2）。
+
     参数
     ----
     prices : MultiIndex(symbol, datetime) + close 列（同 p3 load_prices）。
@@ -264,8 +306,10 @@ def engine_a_targets_cs(
     min_symbols : 当日有信号的品种数不足该值时整日空仓；None 表示无限制（策略 S1）。
     cache_path : 信号缓存 parquet 路径；None 时读生产配置（P8-4：v8）；
                  显式传入则覆盖（向后兼容：显式 v2/v3 路径仍可用）。
-    group_cap : 单组敞口上限（0,1）；None 表示不启用（P9-2 默认，向后兼容）。
-    group_map : symbol→group 映射；None 用 GROUPS_V2 默认 8 组。
+    group_cap : 单组敞口上限（0,1）；None 读生产配置（P10-1），配置未启用则不限制
+                （P9-2 默认，向后兼容）。
+    group_map : symbol→group 映射；None 读生产配置（P10-1），配置未启用则用
+                GROUPS_V2 默认 8 组。
 
     返回
     ----

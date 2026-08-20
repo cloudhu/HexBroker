@@ -2,3 +2,32 @@
 seed: 42
 experiment: e01_cu_daily
 joint_training: false
+
+# P10-1：引擎 A 生产风控——合并黑色系敞口上限 50%（QA 阻塞项落地）
+# group_map 将黑色系 5 品种（i/j/jm/rb/hc）合并为单一 ferrous_all 组，
+# 使 group_cap=0.5 真正实现"黑色系敞口 ≤50%"（GROUPS_V2 默认把黑色系拆成
+# ferrous_raw / ferrous_steel 两组，单组 cap 无法约束合并后敞口）。
+# 其余品种沿用 GROUPS_V2 组名；engine_b / combo 未在此声明 → 取代码默认
+# （win252/thr0.7、A10/B90、vol_target=False）。
+backtest:
+  engine_a:
+    group_cap: 0.5
+    group_map:
+      i0: ferrous_all
+      j0: ferrous_all
+      jm0: ferrous_all
+      rb0: ferrous_all
+      hc0: ferrous_all
+      cu0: industrial
+      al0: industrial
+      zn0: industrial
+      ni0: industrial
+      au0: precious
+      ag0: precious
+      y0: agri_oil
+      p0: agri_oil
+      m0: agri_protein
+      sr0: agri_soft
+      cf0: agri_soft
+      ta0: chem_energy
+      sc0: chem_energy
