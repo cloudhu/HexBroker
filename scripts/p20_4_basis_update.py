@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import argparse
 import json
 import shutil
 import sys
@@ -27,8 +28,10 @@ APPLIED_PATH = ART_DIR / "p20_4_basis_applied.json"
 
 SYMBOLS18 = ["AU", "AG", "M", "CU", "RB", "I", "AL", "ZN", "NI", "HC",
              "Y", "P", "J", "JM", "SR", "CF", "TA", "SC"]
-SEG = "20260818_20260820"
-SRC_FILE = RAW_DIR / "seg_20260820_basis.json"
+# 默认段（P20-4 既有）：2026-08-18 ~ 2026-08-20；P23-1 用 --seg 20260821 补拉 08-21
+SEG_DEFAULT = "20260818_20260820"
+SRC_FILE_DEFAULT = "seg_20260820_basis.json"
+TARGET_DATE_DEFAULT = "2026-08-20"
 
 REQUIRED_COLS = ["date", "basis_ratio", "basis", "spot_price"]
 
@@ -94,12 +97,17 @@ def coerce_schema(df: pd.DataFrame) -> pd.DataFrame:
     return df[REQUIRED_COLS]
 
 
-def main() -> int:
-    if not SRC_FILE.exists():
-        print(f"[FAIL] 持久化文件不存在: {SRC_FILE}")
+def main(seg: str | None = None, src_file: str | None = None,
+         target_date: str | None = None) -> int:
+    seg = seg or SEG_DEFAULT
+    src_file = src_file or SRC_FILE_DEFAULT
+    target_date = target_date or TARGET_DATE_DEFAULT
+    src_path = RAW_DIR / src_file
+    if not src_path.exists():
+        print(f"[FAIL] 持久化文件不存在: {src_path}")
         return 1
-    df = load_result_rows(SRC_FILE)
-    print(f"[LOAD] {SRC_FILE.name}: {len(df)} 行，品种 {sorted(df['underlying_symbol'].unique())}")
+    df = load_result_rows(src_path)
+    print(f"[LOAD] {src_path.name}: {len(df)} 行，品种 {sorted(df['underlying_symbol'].unique())}")
 
     applied = load_applied()
     records: list[dict] = []
@@ -110,12 +118,12 @@ def main() -> int:
         new_rows = normalize_new(df, sym)
         if new_rows.empty:
             summary[sym] = "NO_NEW_DATA"
-            print(f"[SKIP] {sym}: 无 08-18~20 基差数据（保持既有最新）")
+            print(f"[SKIP] {sym}: 无 {seg} 基差数据（保持既有最新）")
             continue
 
         # 幂等：同 (sym, seg) 已应用则跳过（--force 无，本脚本幂等按日期去重天然安全）
-        if any(a.get("sym") == sym and a.get("seg") == SEG for a in applied):
-            print(f"[SKIP] {sym} {SEG} 已应用")
+        if any(a.get("sym") == sym and a.get("seg") == seg for a in applied):
+            print(f"[SKIP] {sym} {seg} 已应用")
             summary[sym] = "ALREADY_APPLIED"
             continue
 
@@ -140,8 +148,8 @@ def main() -> int:
         rows_before = int(len(old))
         rows_added = int(len(merged) - len(old.drop_duplicates(subset="date", keep="last")))
         records.append({
-            "sym": sym, "seg": SEG,
-            "persisted_file": str(SRC_FILE),
+            "sym": sym, "seg": seg,
+            "persisted_file": str(src_path),
             "backup": str(bkp) if bkp else None,
             "rows_before": rows_before,
             "rows_after": int(len(merged)),
@@ -158,7 +166,8 @@ def main() -> int:
     save_applied(applied)
 
     # 验证：18 品种基差最新日期
-    print("\n[VERIFY] 18 品种基差最新日期：")
+    tgt = pd.Timestamp(target_date)
+    print(f"\n[VERIFY] 18 品种基差最新日期（目标 {tgt.date()}）：")
     for sym in SYMBOLS18:
         fpath = FUND_DIR / f"basis_{sym}.parquet"
         if not fpath.exists():
@@ -166,7 +175,7 @@ def main() -> int:
             continue
         cur = coerce_schema(pd.read_parquet(fpath))
         last = cur["date"].max().date()
-        flag = "OK" if last == pd.Timestamp("2026-08-20").date() else f"!! (止于 {last})"
+        flag = "OK" if last == tgt.date() else f"!! (止于 {last})"
         print(f"  {sym}: {last} {flag}")
 
     print(f"\n[DONE] 合并 {len(records)} 个品种 → {APPLIED_PATH}")
@@ -174,4 +183,12 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    ap = argparse.ArgumentParser(description="P20-4/P23-1 基差增量补齐（PandaData get_future_basis 持久化 JSON → 合并写回）")
+    ap.add_argument("--seg", type=str, default=None,
+                    help=f"分段标识（幂等登记键，默认 {SEG_DEFAULT}；P23-1 用 20260821）")
+    ap.add_argument("--src-file", type=str, default=None,
+                    help=f"持久化 JSON 文件名（位于 artifacts/p20_4_raw/，默认 {SRC_FILE_DEFAULT}）")
+    ap.add_argument("--target-date", type=str, default=None,
+                    help=f"验证目标日期 YYYY-MM-DD（默认 {TARGET_DATE_DEFAULT}）")
+    args = ap.parse_args()
+    sys.exit(main(seg=args.seg, src_file=args.src_file, target_date=args.target_date))
