@@ -55,6 +55,30 @@ P16 逐日生成计划 ~5.8s/日 × 502 日 ≈ 48min，不可接受。P17 采�
   python scripts/p17_shadow_account.py --ferrous-mode none      # 对照：不干预
   python scripts/p17_shadow_account.py --slippage 0             # 对照：无滑点
   python scripts/p17_shadow_account.py --reuse-plans            # 复用计划缓存
+  python scripts/p17_shadow_account.py --apply-date 2026-08-20  # P22-2 增量入账模式（单日计划 T+1 开盘入账）
+
+P22-2 --apply-date 增量入账模式（2026-08-21 新增）
+------------------------------------------------
+背景：OOS_END 硬编码 08-17 使 08-17 后的计划无法进入全量回放；--apply-date
+模式用于把**单日生产计划**增量入账到模拟盘，不动全量回放基线（--replay 向后
+兼容不变）。
+
+约定（文档化）：
+  1. **锚点状态**：从 ``artifacts/shadow_account/p17_shadow_account.json``
+     （全量回放最终状态）续接；如 ``p17_shadow_account_apply.json``（前次
+     apply 状态）存在则从其续接（支持多次 apply 链式推进）。
+  2. **交易日历推进**：从锚点状态日期之后到 ``--apply-date``（含）逐日收盘
+     mark-to-market（仅估值，不成交）。
+  3. **单日计划 T+1 开盘成交**：读取 ``artifacts/trade_plans/{date}_sentinel2_plan.json``
+     （回退 ``trade_plans/`` 根目录）→ 在 ``--apply-date`` 之后第一个交易日
+     开盘按 T+1 约定成交（滑点 1 tick、费 0.005%，与全量回放一致）。
+  4. **无次日 → pending**：``--apply-date`` = 最新数据日（无次日开盘）时该计划
+     不入账并标注 pending（与全量回放约定一致，不污染账户）。
+  5. **基于当前日期而非 OOS_END**：MTM/成交推进只依赖 ``--apply-date`` 与
+     数据实际日历，不受 ``OOS_END`` 硬编码约束。
+  6. **结果落盘**：日志 ``artifacts/p22_apply_date_test.log`` + 状态快照
+     ``artifacts/shadow_account/p17_shadow_account_apply_{date}.json``；
+     不覆盖全量回放基线状态。
 """
 from __future__ import annotations
 
@@ -896,12 +920,218 @@ def print_summary(equity_df: pd.DataFrame, stats: dict, consistency_summary: dic
           f"缩量 {stats['scaled_plans']} | pending {stats['pending_plans']}")
     print(f"  纯 B 日    : {stats['pure_b_days']}（有持仓日 {stats['days_with_positions']}）")
     print(f"  无价未成交 : {stats['no_fill_symbols']}")
+    if not consistency_summary:
+        print("  [跳过] 一致性验证（--skip-consistency）")
+        return
     print("\n[一致性验证]（模拟盘 vs BacktestEngine）")
     for path, p in consistency_summary["paths"].items():
         print(f"  {path:<12} 期末 {p['final_equity']:>12,.0f} | 总收益 {p['total_return']*100:>7.2f}% | "
               f"年化 {p['annual_return']*100:>7.2f}% | MaxDD {p['max_drawdown']*100:>7.2f}%")
     for pair, c in consistency_summary["daily_return_corr"].items():
         print(f"  日收益相关 {pair}: {c:.4f}")
+
+
+# ---------------------------------------------------------------------------
+# 4.5 P22-2：--apply-date 增量入账模式（单日计划 T+1 开盘入账，向后兼容）
+# ---------------------------------------------------------------------------
+APPLY_LOG = Path("artifacts/p22_apply_date_test.log")
+
+
+def _apply_log(msg: str) -> None:
+    """打印 + 追加写入 P22-2 验证日志（UTF-8）。"""
+    print(msg)
+    APPLY_LOG.parent.mkdir(parents=True, exist_ok=True)
+    with APPLY_LOG.open("a", encoding="utf-8") as fh:
+        fh.write(msg + "\n")
+
+
+def _load_account_state(state_path: Path, anchor: str = "auto") -> tuple[dict, Path]:
+    """加载账户状态 JSON → (state_dict, 实际路径)。
+
+    anchor="auto"：优先续接 apply 状态（存在时），否则基线；
+    anchor="base"：强制从基线 p17_shadow_account.json 续接（验证/对照用）。
+    """
+    apply_state = ART_DIR / "p17_shadow_account_apply.json"
+    if anchor == "auto" and apply_state.exists():
+        return json.loads(apply_state.read_text(encoding="utf-8")), apply_state
+    if state_path.exists():
+        return json.loads(state_path.read_text(encoding="utf-8")), state_path
+    raise SystemExit(f"[FAIL] 账户状态不存在: {state_path}（请先运行全量回放）")
+
+
+def _rebuild_account(state: dict) -> ShadowAccount:
+    """从持久化状态重建 ShadowAccount（持仓/均价/现金/已实现盈亏/来源标注）。"""
+    fs = state.get("final_state", state)
+    account = ShadowAccount(
+        initial_capital=INITIAL_CAPITAL, fee_rate=FEE_RATE,
+        slippage_ticks=SLIPPAGE_TICKS, contracts=CONTRACTS18,
+    )
+    account.cash = float(fs.get("cash", INITIAL_CAPITAL))
+    account.realized_pnl = float(fs.get("realized_pnl", 0.0))
+    for sym, pos in (fs.get("positions") or {}).items():
+        account.positions[sym] = int(pos["lots"])
+        account.avg_entry[sym] = float(pos["avg_entry"])
+        account.last_plan_src[sym] = dict(pos.get("source") or {})
+    return account
+
+
+def _apply_state_snapshot(
+    account: ShadowAccount, state_date: str, plan_date: str,
+    fills: list[dict], stats: dict, pending: bool, anchor: str,
+) -> dict:
+    """构造 apply 状态快照（与基线 state JSON 同构，供续接/审计）。"""
+    return {
+        "schema_version": "1.1",
+        "mode": "apply_date",
+        "anchor_state": anchor,
+        "generated_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+        "plan_date": plan_date,
+        "account_date": state_date,
+        "final_state": {
+            "date": state_date,
+            "cash": round(account.cash, 2),
+            "realized_pnl": round(account.realized_pnl, 2),
+            "positions": {
+                sym: {
+                    "lots": lots,
+                    "avg_entry": round(account.avg_entry.get(sym, 0.0), 4),
+                    "source": account.last_plan_src.get(sym, {}),
+                }
+                for sym, lots in sorted(account.positions.items()) if lots != 0
+            },
+        },
+        "fills": fills,
+        "stats": {k: int(v) for k, v in stats.items()},
+        "pending": pending,
+        "no_fill_notes": account.no_fill_notes[:20],
+    }
+
+
+def run_apply_date(args) -> None:
+    """--apply-date 增量入账：锚点状态 + MTM 推进 + 单日计划 T+1 开盘入账。"""
+    _apply_log("=" * 88)
+    _apply_log(f"P22-2 --apply-date 增量入账：plan={args.apply_date} "
+               f"| ferrous={args.ferrous_mode} | slippage={args.slippage} tick "
+               f"| anchor={args.apply_anchor}")
+    _apply_log("=" * 88)
+
+    # [1] 配置 + 价格
+    cfg = load_config("configs/base.yaml")
+    cfg.backtest.contracts = CONTRACTS18
+    prices = load_prices_ohlc()
+    all_dates = sorted(pd.to_datetime(prices.index.get_level_values(1)).unique())
+    date_strs = [d.strftime("%Y-%m-%d") for d in all_dates]
+    _apply_log(f"  数据日历: {date_strs[0]} ~ {date_strs[-1]}（{len(date_strs)} 交易日）")
+
+    # [2] 锚点状态
+    base_state_path = ART_DIR / "p17_shadow_account.json"
+    state, anchor_path = _load_account_state(base_state_path, args.apply_anchor)
+    last_date = str(state.get("final_state", state).get("date"))
+    _apply_log(f"  锚点状态: {anchor_path.name}（账目日期 {last_date}）")
+    account = _rebuild_account(state)
+    _apply_log(f"  锚点持仓: { {s: account.positions[s] for s in sorted(account.positions) if account.positions[s] != 0} }")
+    _apply_log(f"  锚点现金: {account.cash:,.2f} | 已实现盈亏: {account.realized_pnl:,.2f}")
+
+    # [3] MTM 推进：last_date 之后 → apply_date（含）
+    mkt_rows: list[dict] = []
+    for ds in date_strs:
+        if ds > last_date and ds <= args.apply_date:
+            mkt_rows.append(account.mark(ds, prices))
+    _apply_log(f"  MTM 推进（{last_date} 之后 → {args.apply_date}）: {len(mkt_rows)} 日")
+    for r in mkt_rows:
+        _apply_log(f"    {r['date']}: equity={r['equity']:,.2f} cash={r['cash']:,.2f} "
+                   f"pos={r['pos_value']:,.2f} unreal={r['unrealized_pnl']:+,.2f}")
+
+    # [4] 计划 + T+1 开盘成交
+    plan_path = ROOT / "artifacts" / "trade_plans" / f"{args.apply_date}_sentinel2_plan.json"
+    if not plan_path.exists():
+        plan_path = ROOT / "trade_plans" / f"{args.apply_date}_sentinel2_plan.json"
+    if not plan_path.exists():
+        raise SystemExit(f"[FAIL] 计划不存在: {plan_path}")
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    positions = plan["combo"]["positions"]
+    _apply_log(f"  计划 {args.apply_date}: {[(p['symbol'], p['lots']) for p in positions]} "
+               f"（共 {sum(p['lots'] for p in positions)} 手 / {len(positions)} 个品种）")
+
+    t1: str | None = None
+    for ds in date_strs:
+        if ds > args.apply_date:
+            t1 = ds
+            break
+    stats: dict[str, int] = {
+        "executed_plans": 0, "blocked_plans": 0, "scaled_plans": 0,
+        "pending_plans": 0, "fill_count": 0, "buy_lots": 0, "sell_lots": 0,
+        "no_fill_symbols": 0,
+    }
+    pending = t1 is None
+    n_trades_before = len(account.trades)
+    fills: list[dict] = []
+    state_date = args.apply_date
+    if pending:
+        _apply_log("  T+1 开盘成交: 无次日交易日 → **pending**（计划不入账，不污染账户）")
+        stats["pending_plans"] = 1
+    else:
+        _apply_log(f"  T+1 开盘成交: exec_date={t1}（open 价 + 滑点 {args.slippage} tick）")
+        blocked, scaled = account.execute_plan(
+            plan, exec_date=t1, prices=prices,
+            ferrous_mode=args.ferrous_mode, stats=stats, price_col="open",
+        )
+        for t in account.trades[n_trades_before:]:
+            fills.append({
+                "plan_date": t.plan_date, "exec_date": t.exec_date, "symbol": t.symbol,
+                "delta_lots": t.delta_lots, "fill_price": round(t.fill_price, 4),
+                "fee": round(t.fee, 4), "is_open": t.is_open,
+            })
+        _apply_log(f"  成交 {len(fills)} 笔（买 {stats['buy_lots']} 手 / 卖 {stats['sell_lots']} 手）"
+                   f"{' [黑色系阻断]' if blocked else ''}{' [缩量]' if scaled else ''}")
+        for f in fills:
+            _apply_log(f"    {f['exec_date']} {f['symbol']} {'买' if f['delta_lots'] > 0 else '卖'} "
+                       f"{abs(f['delta_lots'])} 手 @ {f['fill_price']:,.2f} fee={f['fee']:,.2f}")
+        if account.no_fill_notes:
+            _apply_log(f"  无价未成交 {len(account.no_fill_notes)} 条（首条: {account.no_fill_notes[0]}）")
+        # T+1 收盘 MTM（最新账户摘要）
+        snap = account.mark(t1, prices)
+        mkt_rows.append(snap)
+        state_date = t1
+        _apply_log(f"  T+1 收盘 MTM {t1}: equity={snap['equity']:,.2f} cash={snap['cash']:,.2f} "
+                   f"pos={snap['pos_value']:,.2f} unreal={snap['unrealized_pnl']:+,.2f}")
+
+    # [5] 最新账户摘要
+    last_snap = account.mark(state_date, prices)
+    _apply_log("\n  --- 最新账户摘要 ---")
+    _apply_log(f"  账目日期   : {state_date}")
+    _apply_log(f"  现金       : {account.cash:,.2f} CNY")
+    _apply_log(f"  持仓市值   : {last_snap['pos_value']:,.2f} CNY")
+    _apply_log(f"  权益(复利) : {last_snap['equity']:,.2f} CNY")
+    _apply_log(f"  已实现盈亏 : {account.realized_pnl:,.2f} CNY")
+    _apply_log(f"  未实现盈亏 : {last_snap['unrealized_pnl']:,.2f} CNY")
+    _apply_log(f"  持仓       : { {s: account.positions[s] for s in sorted(account.positions) if account.positions[s] != 0} }")
+    _apply_log(f"  成交笔数   : {len(fills)} | pending={pending} | no_fill={stats['no_fill_symbols']}")
+
+    # [6] 落盘：apply 状态快照（供续接/审计；不覆盖基线）
+    ART_DIR.mkdir(parents=True, exist_ok=True)
+    snapshot = _apply_state_snapshot(account, state_date, args.apply_date, fills, stats, pending, str(anchor_path))
+    apply_out = ART_DIR / f"p17_shadow_account_apply_{args.apply_date}.json"
+    apply_out.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
+    latest_out = ART_DIR / "p17_shadow_account_apply.json"
+    latest_out.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
+    _apply_log(f"  [OK] apply 状态快照 → {apply_out}")
+    _apply_log(f"  [OK] 最新 apply 状态（续接锚点）→ {latest_out}")
+
+    # [7] 参考对照：fresh 账户（空仓）应用同计划 → 验证'成交 3 笔'预期来源
+    ref = ShadowAccount(
+        initial_capital=INITIAL_CAPITAL, fee_rate=FEE_RATE,
+        slippage_ticks=args.slippage, contracts=CONTRACTS18,
+    )
+    ref_stats: dict[str, int] = dict.fromkeys(stats, 0)
+    if not pending:
+        ref.execute_plan(plan, exec_date=t1, prices=prices,
+                         ferrous_mode=args.ferrous_mode, stats=ref_stats, price_col="open")
+        _apply_log(f"  [参考] fresh 账户（空仓）同计划 → 成交 {ref_stats['fill_count']} 笔"
+                   f"（买 {ref_stats['buy_lots']} 手 / 卖 {ref_stats['sell_lots']} 手）"
+                   f"—— 与持久化状态续接的 {len(fills)} 笔差异来自锚点已持有 al0 2/ta0 3")
+
+    _apply_log(f"\n[P22-2 DONE] apply-date={args.apply_date} 增量入账完成。日志 → {APPLY_LOG}")
 
 
 def main() -> None:
@@ -915,7 +1145,17 @@ def main() -> None:
     ap.add_argument("--reuse-plans", action="store_true",
                     help="复用 artifacts/shadow_account/plans_cache 计划缓存（存在则跳过生成）")
     ap.add_argument("--skip-consistency", action="store_true", help="跳过一致性验证（仅回放）")
+    ap.add_argument("--apply-date", type=str, default=None, metavar="YYYY-MM-DD",
+                    help="P22-2 增量入账模式：对指定日期交易计划做 T+1 开盘入账（基于当前日期，"
+                         "不受 OOS_END 约束；默认走全量回放）")
+    ap.add_argument("--apply-anchor", choices=["auto", "base"], default="auto",
+                    help="apply 锚点：auto=优先续接前次 apply 状态（存在时）否则基线（默认）；"
+                         "base=强制从基线 p17_shadow_account.json 续接")
     args = ap.parse_args()
+
+    if args.apply_date is not None:
+        run_apply_date(args)
+        return
 
     print("=" * 88)
     print("P17 内部簿记模拟盘：Sentinel-2 生产计划 → 本地 shadow account 回放")
