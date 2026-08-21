@@ -556,5 +556,15 @@ engine_a_targets_cs(prices,
 - **影子状态=待数据刷新**：K 线至 2026-08-17，无 fresh-OOS（2026-08-18 后）；数据刷新后运行 `--monitor` 复核，缓存重建后先 `--baseline` 更新基线
 - QA Round 2 VERIFIED（D1 CLI 参数透传修复 + D2 单测 7 项，路由 NoOne）；文档级 D3/D4/D5 登记（连续 7 窗为对齐轴连续含空窗、对比盲区至 v2 末值 06-10、DRIFT_WATCH 带被绝对告警覆盖——如实标注，不阻塞）
 
+### 9.21 P13 引擎 A 多模型融合（2026-08-20）
+
+**结论：不采纳，维持 v8 生产**（QA Round 2 VERIFIED，逐位一致）。LightGBM + XGBoost + HistGradientBoosting 同口径（label_pool=all+cross_z）训练，F1 等权/F2 IS-IC 加权/F3 两模型融合对比：
+
+- ⚠️ **口径缺陷教训**：Round 1 工程师用无 path `load_config()` → base.yaml 未加载 → 评估在无 cap 口径（F2 0.679"改善"是伪影）；修正后**真实生产口径（cap=0.5+ferrous_all）F2 0.597 < v8 0.646（反转）**、组合 1.612 < 1.614——F2 增量收益来自黑色系敞口、恰被 cap 约束
+- 规则（三项同改善才采纳）：cap 口径下 F1/F2/F3 截面 IC 全改善（-0.064→-0.039~-0.061）但 Sharpe 全未超基线 → is_pass=false
+- **诚实结论**：模型多样性对截面排序有效（IC 改善）但非收益瓶颈；收益瓶颈在黑色系敞口/截面选择机制（且被 cap 约束）——标签/任务错配更深层修复为后续方向
+- F2 登记入 S4 影子跟踪候选池（fresh-OOS 数据刷新后复核）；工程资产保留（p13_models.py/p13_multimodel.py/v9_* 缓存，可复用）
+- 方法论沉淀：评估必须用生产口径（显式 base.yaml + 显式传参），无 cap 对照仅作 sensitivity
+
 ---
-*文档版本：v3.15（2026-08-20，Sentinel-2 P12 S4影子跟踪）｜ 关联报告：deliverables/software-hexfutures-ai/（40+ 份实验报告）*
+*文档版本：v3.16（2026-08-20，Sentinel-2 P13 多模型融合）｜ 关联报告：deliverables/software-hexfutures-ai/（40+ 份实验报告）*
