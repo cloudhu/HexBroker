@@ -65,7 +65,7 @@ from scripts.p3_combo_backtest import engine_b_targets
 from scripts.p5_engineA_cross_section import engine_a_selection, engine_a_targets_cs
 
 OOS_START = "2024-07-18"  # 口径铁律：OOS 起始（仅上下文标注，不参与信号生成）
-STALE_DAYS = 5            # 数据完整性：目标日往前 N 个自然日内必须存在数据
+STALE_DAYS = 5            # [D1 修复后不再参与判定] 原容差口径（latest < target_date 即 WARN，见 check_data_integrity）
 
 
 # ---------------------------------------------------------------------------
@@ -102,21 +102,21 @@ def check_data_integrity(
         warnings.append(f"[基差缺失] 无任何基差数据品种: {missing_bs}")
 
     for sym in SYMBOLS18:
-        # K 线新鲜度
-        if sym in px_latest:
+        # K 线新鲜度（D1 修复：严格口径——latest < target_date 即 WARN，
+        # 原 STALE_DAYS=5 容差会掩盖滞后；例如基差止 08-17 而目标日 08-20 时不再静默）
+        if sym in px_latest and px_latest[sym] < target_date:
             gap = (target_date - px_latest[sym]).days
-            if gap > STALE_DAYS:
-                warnings.append(
-                    f"[K线过期] {sym} 最新 {px_latest[sym].date()}，距目标日 {gap} 天"
-                )
-        # 基差新鲜度
-        if sym in bs_latest:
+            warnings.append(
+                f"[K线过期] {sym} 最新 {px_latest[sym].date()}，早于目标日 "
+                f"{target_date.date()} {gap} 天（引擎 A/B 无法对齐该品种价格）"
+            )
+        # 基差新鲜度（D1 修复：严格口径）
+        if sym in bs_latest and bs_latest[sym] < target_date:
             gap = (target_date - bs_latest[sym]).days
-            if gap > STALE_DAYS:
-                warnings.append(
-                    f"[基差过期] {sym} 最新 {bs_latest[sym].date()}，距目标日 {gap} 天"
-                    f"（引擎 B 无法对该品种出信号）"
-                )
+            warnings.append(
+                f"[基差过期] {sym} 最新 {bs_latest[sym].date()}，早于目标日 "
+                f"{target_date.date()} {gap} 天（引擎 B 无法对该品种出信号）"
+            )
         # 基差明显早于 K 线（spot 数据断层）
         if sym in px_latest and sym in bs_latest:
             if bs_latest[sym] < px_latest[sym] - pd.Timedelta(days=30):
@@ -423,6 +423,39 @@ def combo_plan(
 # ---------------------------------------------------------------------------
 # 4. 落盘
 # ---------------------------------------------------------------------------
+def empty_plan_note(integrity: dict, engine_a: dict, engine_b: dict, combo: dict) -> str:
+    """空计划（无 positions）时标注原因：数据不完整 vs 真实空仓（D4-附语义标注）。
+
+    区分三类：
+      - 数据不完整：引擎 B 基差最新日早于目标日（sc0 历史无基差除外）→ 无法出信号；
+      - 真实无信号：基差完整但两引擎均无选中；
+      - 结构性 0 手：有选中但加权名义 floor 后 0 手（非数据问题）。
+    """
+    if combo["positions"]:
+        return ""
+    bs_latest = integrity.get("basis_latest", {})
+    target = integrity.get("target_date", "")
+    missing_bs = [s for s, d in bs_latest.items()
+                  if d < target and s != "sc0"]  # sc0 历史无基差，不算数据缺失
+    a_status = engine_a.get("a_status", "cache_gap")
+    b_sel = len(engine_b.get("selected", []))
+    if missing_bs and b_sel == 0:
+        return (
+            f"数据不完整：引擎B基差止于 {max(bs_latest.values())}（缺失 "
+            f"{len(missing_bs)} 品种），早于目标日 {target} → 引擎B无法出信号，"
+            f"非真实空仓判断"
+        )
+    if b_sel == 0:
+        return (
+            f"真实无信号：基差数据完整至 {target}，引擎A({a_status})与引擎B"
+            f"(br_rank<thr) 均无选中 → 空仓"
+        )
+    return (
+        f"真实无信号（结构性0手）：引擎选中 {b_sel} 品种但加权名义 floor 后 "
+        f"0 手 → 空仓（非数据问题）"
+    )
+
+
 def _to_plan_json(cfg, date: pd.Timestamp, integrity: dict, engine_a: dict,
                   engine_b: dict, combo: dict, prices, basis) -> dict:
     capital = float(cfg.backtest.initial_capital)
@@ -451,6 +484,7 @@ def _to_plan_json(cfg, date: pd.Timestamp, integrity: dict, engine_a: dict,
         "date": date.strftime("%Y-%m-%d"),
         "generated_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
         "oos_context": f"OOS 起始 {OOS_START}（口径铁律，仅上下文标注）",
+        "plan_note": empty_plan_note(integrity, engine_a, engine_b, combo),
         "config": {
             "initial_capital": capital,
             "notional_frac_engine_a": nf_a,
@@ -600,6 +634,8 @@ def print_plan_summary(cfg, date: pd.Timestamp, integrity: dict, engine_a: dict,
           f"名义加权 → floor 手数 → 合并")
     if combo["degraded_to_pure_b"]:
         print("  ⚠️ 退化为纯引擎 B（引擎 A 无信号）")
+    if not combo["positions"]:
+        print(f"  ⚠️ 空计划：{empty_plan_note(integrity, engine_a, engine_b, combo)}")
     for r in combo["positions"]:
         print(f"  {r['symbol']:<5} 来源={r['engine_source']:<4} 手数={r['lots']:>3} "
               f"名义={r['notional']:>12,.0f} CNY 组={r['group']}")
