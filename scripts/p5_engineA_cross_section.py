@@ -200,6 +200,7 @@ def engine_a_selection(
     cache_path: Path | str | None = None,
     group_cap: float | None = None,
     group_map: dict[str, str] | None = None,
+    score_col: str = "exp_ret",
 ) -> pd.DataFrame:
     """引擎 A 每日选中明细（rank / 价格 / 分组 / 选中标志）。
 
@@ -218,6 +219,10 @@ def engine_a_selection(
                 GROUPS_V2 默认 8 组。
                 控制实验可传自定义映射（如把 ferrous_raw+ferrous_steel
                 合并为单一 'ferrous' 组，实现"黑色系敞口上限"）。
+    score_col（P14-1/2 新增）：截面 rank / 排序所依据的打分列，默认 "exp_ret"
+                （回归模型收益预测 / 分类缓存中 exp_ret=p_buy）；传 "p_up" 可
+                用校准后上涨概率排序选择（P14-2 v10_cal 对照）。默认值保持
+                既有行为逐字节不变。
 
     返回
     ----
@@ -225,13 +230,17 @@ def engine_a_selection(
     """
     sig = pd.read_parquet(_resolve_cache_path(cache_path))
     sig["ts"] = pd.to_datetime(sig["ts"])
+    if score_col not in sig.columns:
+        raise ValueError(
+            f"score_col={score_col!r} 不在信号缓存列中：{list(sig.columns)}"
+        )
     # P10-1：group_map / group_cap 未显式传入时读生产配置（configs/base.yaml 启用
     # group_cap=0.5 + ferrous_all 合并映射）；配置 None → 回退 GROUPS_V2 / 不启用。
     group_map = _resolve_group_map(group_map)
     group_cap = _resolve_group_cap(group_cap)
 
     # 每日截面 rank：rank(pct=True, ascending=True) 返回 [0,1] 分位，越大越强
-    sig["rank_pct"] = sig.groupby("ts")["exp_ret"].rank(pct=True, ascending=True)
+    sig["rank_pct"] = sig.groupby("ts")[score_col].rank(pct=True, ascending=True)
     sig["_day_cnt"] = sig.groupby("ts")["symbol"].transform("count")
 
     # 价格对齐（同 p3 实现）
@@ -260,7 +269,7 @@ def engine_a_selection(
             elig_mask = elig_mask & (sig["_day_cnt"] >= min_symbols)
         elig = sig[elig_mask]
         for _ts, g in elig.groupby("ts"):
-            g = g.sort_values("exp_ret", ascending=False)
+            g = g.sort_values(score_col, ascending=False)
             target_count = int((g["rank_pct"] >= 1.0 - top_k).sum())
             if target_count <= 0:
                 continue
@@ -279,6 +288,7 @@ def engine_a_targets_cs(
     cache_path: Path | str | None = None,
     group_cap: float | None = None,
     group_map: dict[str, str] | None = None,
+    score_col: str = "exp_ret",
 ) -> pd.DataFrame:
     """引擎 A（修复版）：按日横截面 rank top_k 做多，支持稀疏日最小品种数过滤。
 
@@ -310,13 +320,16 @@ def engine_a_targets_cs(
                 （P9-2 默认，向后兼容）。
     group_map : symbol→group 映射；None 读生产配置（P10-1），配置未启用则用
                 GROUPS_V2 默认 8 组。
+    score_col（P14-1/2 新增）：截面 rank / 排序所依据的打分列，默认 "exp_ret"
+                （回归收益预测 / 分类缓存 exp_ret=p_buy）；传 "p_up" 可做
+                校准后上涨概率排序选择（P14-2 对照）。默认保持既有行为不变。
 
     返回
     ----
     MultiIndex(symbol, ts) + target 列，与 p3 旧版格式一致，可直接喂 BacktestEngine。
     """
     sig = engine_a_selection(
-        prices, top_k, min_symbols, cache_path, group_cap, group_map
+        prices, top_k, min_symbols, cache_path, group_cap, group_map, score_col
     )
     notional = INITIAL_CAPITAL * NOTIONAL_FRAC
     with np.errstate(invalid="ignore", divide="ignore"):

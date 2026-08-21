@@ -292,6 +292,30 @@ def _cross_sectionalize(fwd_wide: pd.DataFrame, label_mode: str) -> pd.DataFrame
     return out.where(~keep_raw, fwd_wide, axis=0)
 
 
+def _cross_top30_binarize(fwd_wide: pd.DataFrame, top_k_frac: float = 0.30) -> pd.DataFrame:
+    """当日截面 top_k 二元标签（0/1）：fwd 是否位于当日截面 top_k 分位内。
+
+    P14-1 分类目标实验专用。与 ``_cross_sectionalize`` 相同的无前视保证：任意日期
+    t 的标签只用当日（同一行）各品种的 fwd——``rank(pct=True)`` 是当日品种间
+    相对化（升序分位 [0,1]，>= 1-top_k_frac 即 top_k），不使用 t 之后任何信息；
+    训练/测试折边界与标签构造解耦（按日期分组），不泄漏。
+
+    退化处理（与 ``_cross_sectionalize`` 对齐）：
+    - 无 fwd 的品种（当日未交易）→ NaN（该品种当日不参与截面；因其训练窗口
+      日期均为自身交易日，worker 内 y 提取不会取到 NaN）。
+    - 当日有效品种 < 2 → 截面信息不足，退化为方向标签（fwd>0 → 1），保持
+      0/1 二元、无 NaN（避免训练折因 NaN 被整折跳过）。
+    """
+    ranks = fwd_wide.rank(axis=1, pct=True, na_option="keep")
+    out = (ranks >= 1.0 - top_k_frac).astype(float)
+    out = out.where(fwd_wide.notna(), np.nan)
+    n_valid = fwd_wide.notna().sum(axis=1)
+    keep_raw = n_valid < 2
+    if bool(keep_raw.any()):
+        out = out.where(~keep_raw, (fwd_wide > 0).astype(float), axis=0)
+    return out
+
+
 def _build_fwd_cs_panel(features: Any, bars: Any, horizon: int,
                         label_mode: str, label_pool: str = "group") -> Optional[pd.DataFrame]:
     """构建当日截面化 fwd 面板（宽表 日期×品种）。
@@ -306,6 +330,10 @@ def _build_fwd_cs_panel(features: Any, bars: Any, horizon: int,
     - "all"（P8-4 新增）：全 18 品种统一截面——把所有品种的 fwd 合并成一个大
       面板再截面化，再按品种取回；单品种组 m0 也参与全品种当日截面统计，
       根治组规模偏置。无前视保证不变（当日截面统计）。
+
+    P14-1 新增 label_mode="cross_top30"：返回**二元分类标签**（当日截面
+    top30% → 1，否则 0，见 ``_cross_top30_binarize``）；与引擎 A 推理侧的
+    ``top_k=0.30`` 选择目标同构（训练=推理）。
     """
     if label_mode == "absolute":
         return None
@@ -322,17 +350,19 @@ def _build_fwd_cs_panel(features: Any, bars: Any, horizon: int,
             short = _ALL18_DIR.get(std_sym, std_sym)
             cols[short] = _forward_returns(close_series, horizon)
         wide = pd.DataFrame(cols).sort_index()
-        return _cross_sectionalize(wide, label_mode)
-    if label_pool != "group":
+    elif label_pool == "group":
+        cols: dict[str, pd.Series] = {}
+        for sym in features.symbols:
+            sym_df = bars.by_symbol(sym)
+            close = sym_df["close"].astype(float).reset_index(level=0, drop=True).sort_index()
+            cols[sym] = _forward_returns(close, horizon)
+        wide = pd.DataFrame(cols).sort_index()
+    else:
         raise ValueError(
             f"未知 label_pool={label_pool!r}（可选 group/all）"
         )
-    cols: dict[str, pd.Series] = {}
-    for sym in features.symbols:
-        sym_df = bars.by_symbol(sym)
-        close = sym_df["close"].astype(float).reset_index(level=0, drop=True).sort_index()
-        cols[sym] = _forward_returns(close, horizon)
-    wide = pd.DataFrame(cols).sort_index()
+    if label_mode == "cross_top30":
+        return _cross_top30_binarize(wide, top_k_frac=0.30)
     return _cross_sectionalize(wide, label_mode)
 
 
@@ -410,20 +440,26 @@ def _apply_calibrator_one(s, scaler, cal_method: str) -> None:
 
 
 def _calibrate_and_split(sigs, valid, y_true, cal_method: str, cal_split: Optional[float],
-                         cal_return_all: bool = False):
+                         cal_return_all: bool = False, cal_min_samples: int = 20):
     """per-fold 校准（可嵌套）：返回评估用信号列表。
 
     - ``cal_split is None``：现口径——用全部测试窗信号拟合校准器，评估全部信号。
     - ``cal_split`` 为 0~1 且 ``cal_return_all=False``（默认）：嵌套验证——只用测试窗前
       ``cal_split`` 比例信号拟合校准器，仅返回剩余（评估子窗）信号。评估与校准数据不重叠，
-      消除「用测试标签挑阈值」的乐观偏差。
+      消除「用测试标签挑阈值」的乐观偏差。P14-2 修复：若校准器成功拟合
+      （有效样本 >= ``cal_min_samples``），把同一校准器应用到评估子窗，使输出 p_up
+      为真校准值（历史口径 cal_min_samples=20 且 k≈15 从不满足阈值 → 行为不变）。
     - ``cal_split`` 为 0~1 且 ``cal_return_all=True``（P6-3 新模式）：仍只用测试窗前
       ``cal_split`` 比例信号拟合校准器（嵌套零泄漏），但把同一校准器应用到**全部**信号
       并返回全部（不截断 ``sigs[k:]``），覆盖率翻倍。校准只改 p_up / is_effective，
       不改 exp_ret，因此对引擎 A 的 exp_ret.rank 排序零泄漏。
+
+    ``cal_min_samples``（P14-2）：拟合校准器所需最小有效样本数。P6-3 附带发现——
+    60 日测试窗 → lookback 30 → 仅 ~31 条信号 → k=15 < 20 默认阈值 → scaler=None
+    （p_up 从未真正校准）。调低（如 10）后 k=15 可触发，p_up 在校准窗内真正生效。
     """
     if cal_split is None:
-        if valid.sum() >= 20:
+        if valid.sum() >= cal_min_samples:
             calibrate_signals(
                 [s for i, s in enumerate(sigs) if valid[i]],
                 y_true[valid],
@@ -434,7 +470,7 @@ def _calibrate_and_split(sigs, valid, y_true, cal_method: str, cal_split: Option
     k = max(1, min(k, len(sigs) - 1))  # 保证校准/评估子窗均非空
     cal_valid = [i for i in range(k) if valid[i]]
     scaler = None
-    if len(cal_valid) >= 20:
+    if len(cal_valid) >= cal_min_samples:
         scaler = calibrate_signals([sigs[i] for i in cal_valid], y_true[cal_valid], method=cal_method)
     if cal_return_all:
         # 前 k 有效信号已就地校准；把同一校准器应用到其余信号（含前 k 中无效信号）
@@ -448,6 +484,11 @@ def _calibrate_and_split(sigs, valid, y_true, cal_method: str, cal_split: Option
             for s in sigs:
                 s.is_effective = abs(s.p_up - 0.5) > s.eff_thr if hasattr(s, "eff_thr") else abs(s.p_up - 0.5) > 0.05
         return sigs
+    # 默认（cal_return_all=False）：仅返回评估子窗；校准器已拟合时应用到评估子窗，
+    # 使输出 p_up 为真校准值（P14-2 修复；对既有缓存零影响，见 docstring）。
+    if scaler is not None and cal_method != "none":
+        for s in sigs[k:]:
+            _apply_calibrator_one(s, scaler, cal_method)
     return sigs[k:]
 
 
@@ -459,7 +500,7 @@ def _train_eval_fold(task):
     """
     (sym, fi, train_max_pos, test_start, test_end,
      feat, close, cfg_dict, params, collect_models, cal_method, model_cls, cal_split,
-     cal_return_all, label_mode, fwd_cs_panel) = task
+     cal_return_all, label_mode, fwd_cs_panel, cal_min_samples) = task
     from omegaconf import OmegaConf
 
     cfg = OmegaConf.create(cfg_dict)
@@ -499,7 +540,7 @@ def _train_eval_fold(task):
     realized = fwd.loc[test_ts].to_numpy(dtype=float)
     y_true = (realized > 0).astype(float)
     valid = ~np.isnan(realized)
-    sigs = _calibrate_and_split(sigs, valid, y_true, str(cal_method), cal_split, cal_return_all)
+    sigs = _calibrate_and_split(sigs, valid, y_true, str(cal_method), cal_split, cal_return_all, cal_min_samples)
     for s in sigs:
         records.append(dict(
             symbol=sym, ts=s.ts, p_up=s.p_up,
@@ -524,6 +565,7 @@ def walk_forward_lightgbm(
     cal_return_all: bool = False,
     label_mode: str = "absolute",
     label_pool: str = "group",
+    cal_min_samples: int = 20,
 ) -> WFResult:
     """对 au/ag/m 逐标的 walk-forward 训练 LightGBM，产出 OOS 信号（可选收集重要性）。
 
@@ -534,12 +576,16 @@ def walk_forward_lightgbm(
     cal_split：嵌套验证分割（None=现口径；0~1=用测试窗前比例校准、剩余评估，防乐观偏差）。
     cal_return_all：True 时（需配合 cal_split 0~1）用前 cal_split 比例拟合校准器、
       对全部信号应用校准并返回全部（覆盖率翻倍；校准只改 p_up/is_effective 不改 exp_ret）。
-    label_mode（P8-3）：训练标签口径——"absolute"（默认，回归绝对 fwd 收益，现行为）；
-      "cross_rank"/"cross_z"/"cross_demean"（当日截面化标签，见 ``_cross_sectionalize``）。
+    label_mode（P8-3/P14-1）：训练标签口径——"absolute"（默认，回归绝对 fwd 收益，现行为）；
+      "cross_rank"/"cross_z"/"cross_demean"（当日截面化标签，见 ``_cross_sectionalize``）；
+      "cross_top30"（P14-1 新增，当日截面 top30% 二元分类标签，见 ``_cross_top30_binarize``，
+      需配合分类模型 model_cls 如 scripts.p14_models.LGBMClassifyForecast）。
       截面化只在训练标签上生效：在完整面板按 datetime 分组、当日品种间相对化，无前视；
       预测输出 exp_ret 仍为模型原始预测（引擎 A 的 exp_ret.rank 排序不受标签口径影响）。
     label_pool（P8-4）：截面化**范围**——"group"（默认，P8-3 行为：组内截面）；
       "all"（全 18 品种统一截面，根治组规模偏置，见 ``_build_fwd_cs_panel``）。
+    cal_min_samples（P14-2）：拟合 per-fold 校准器所需最小有效样本数（默认 20 与
+      历史一致；调低如 10 后 60 日测试窗的 k≈15 可触发校准，p_up 真正生效）。
     """
     if model_cls is None:
         from hexbroker.forecast.baselines import LightGBMForecast as model_cls
@@ -557,7 +603,8 @@ def walk_forward_lightgbm(
 
     # P8-3/P8-4：截面化训练标签面板（absolute 时为 None，零开销）
     # label_pool 只影响面板构建（组内 vs 全 18 品种），worker 内 y 提取逻辑不变，
-    # 故任务元组无需携带 label_pool（保持 16 字段，与 QA 静态审查一致）。
+    # 故任务元组无需携带 label_pool；P14-2 新增 cal_min_samples（17 字段，
+    # 构造与解包同文件同步更新，见 _train_eval_fold）。
     fwd_cs_panel = _build_fwd_cs_panel(features, bars, horizon, label_mode, label_pool)
 
     records: list = []
@@ -595,7 +642,7 @@ def walk_forward_lightgbm(
             for fi, fold in enumerate(folds):
                 tasks.append((sym, fi, fold.train_max_pos, fold.test_start, fold.test_end,
                               feat, close, cfg_dict, params, collect_models, cal_method, model_cls, cal_split,
-                              cal_return_all, label_mode, fwd_cs_panel))
+                              cal_return_all, label_mode, fwd_cs_panel, cal_min_samples))
         with _cf.ProcessPoolExecutor(max_workers=int(n_jobs_folds)) as ex:
             for sym_r, fi, recs, imp in ex.map(_train_eval_fold, tasks):
                 records.extend(recs)
@@ -644,7 +691,7 @@ def walk_forward_lightgbm(
             realized = fwd.loc[test_ts].to_numpy(dtype=float)
             y_true = (realized > 0).astype(float)
             valid = ~np.isnan(realized)
-            sigs = _calibrate_and_split(sigs, valid, y_true, cal_method, cal_split, cal_return_all)
+            sigs = _calibrate_and_split(sigs, valid, y_true, cal_method, cal_split, cal_return_all, cal_min_samples)
             for s in sigs:
                 records.append(dict(
                     symbol=sym, ts=s.ts, p_up=s.p_up,
