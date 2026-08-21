@@ -566,5 +566,14 @@ engine_a_targets_cs(prices,
 - F2 登记入 S4 影子跟踪候选池（fresh-OOS 数据刷新后复核）；工程资产保留（p13_models.py/p13_multimodel.py/v9_* 缓存，可复用）
 - 方法论沉淀：评估必须用生产口径（显式 base.yaml + 显式传参），无 cap 对照仅作 sensitivity
 
+### 9.22 P14 引擎 A 任务对齐修复（2026-08-21）
+
+**结论**：分类目标（cross_top30）与 p_up 选择均未提升生产 cap 口径；完成两项关键定位（QA VERIFIED + D-1 修正）：
+
+- **v10_cls（分类目标）否决**：OOS Sharpe -0.028 崩塌、IC 未改善
+- **v10_cal（p_up 选择）候选降级**：⚠️ QA D-1 揭示 OOS 截面 IC +0.1395 是**校准噪声伪影**——per-fold Platt 在 ~15 样本拟合、斜率符号近似抛硬币（336 正/210 负块）、p_up 与 exp_ret rank corr 仅 0.088、IS(-0.035)↔OOS(+0.1395) 不稳定 → 非真信号；**per-fold 小样本校准排序不可信（方法论沉淀）**
+- **整数手排除根因成立（引擎层真实瓶颈）**：NOTIONAL_FRAC=0.20×1e6=200k 名义 → au0/cu0/i0/j0/sc0 高价合约 OOS 全程 0 手；引擎仅转化信号层 edge 的 ~11-13%；另致 cf0/p0/ta0 系统性欠投（34%/16%/13% 名义）→ **P15 方向：合约层修复**（可交易合约集/非整数手/调高名义）
+- **P15 前置条件（QA 建议采纳）**：先用稳定校准（池化/更大校准窗/斜率符号交叉验证）复验 p_up edge 稳健性，避免在 15 样本校准噪声上立项
+
 ---
-*文档版本：v3.16（2026-08-20，Sentinel-2 P13 多模型融合）｜ 关联报告：deliverables/software-hexfutures-ai/（40+ 份实验报告）*
+*文档版本：v3.17（2026-08-21，Sentinel-2 P14 任务对齐）｜ 关联报告：deliverables/software-hexfutures-ai/（40+ 份实验报告）*
