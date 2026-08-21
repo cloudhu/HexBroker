@@ -24,8 +24,11 @@ P16（生产信号流水线）与 P17（内部簿记模拟盘）已就绪，但�
   - 基差合并：p20_4_basis_update 以 (sym, seg) 登记 applied，天然幂等。
   - 计划生成：覆盖写盘，天然幂等。
   - 增量入账：以 artifacts/daily_runs/apply_registry.json 登记
-    {plan_date: {plan_md5, applied_at, state, note}}；同 plan_md5 重复运行
-    跳过入账（防重入）；计划内容变化（如基差刷新使空→非空）→ 重新入账。
+    {plan_date: {plan_md5, applied_at, state, note}}；**仅 state=applied
+    且同 plan_md5 跳过**（幂等防重入）；state=pending（T+1 无次日）**允许
+    重试**——数据到达后重跑同 date 应把 pending 计划执行入账并转 applied
+    （P24-1 QA L2 修正：旧逻辑 fp 一致即跳过、不区分状态，导致 pending
+    计划在数据到达后无法自动入账）。计划内容变化（fp 变化）→ 重新入账。
     --force-apply 可强制重入（对照/审计用）。
 
 --update-data（可选）
@@ -209,6 +212,52 @@ def plan_fingerprint(plan_path: Path) -> str:
     return hashlib.md5(canonical.encode("utf-8")).hexdigest()
 
 
+def _legacy_state(record: dict) -> str:
+    """向后兼容：旧 registry 记录可能无 ``state`` 字段。
+
+    P24-1 迁移规则：缺失 state 的记录按 ``applied`` 处理（保守——保持旧版
+    "fp 一致即跳过"语义，避免对可能已入账的计划重复入账污染账户）；带
+    ``state`` 的记录（含 08-21 pending 记录）按实际状态处理。
+    """
+    return record.get("state", "applied")
+
+
+def _should_skip_apply(prev: dict | None, fp: str, force: bool) -> tuple[bool, str]:
+    """防重入判定：仅 ``state == applied`` 且计划指纹一致时跳过；pending 允许重试。
+
+    P24-1 增强（QA L2）：旧逻辑按 fp 一致即跳过（不区分 applied/pending），
+    导致 08-21 pending 计划（fp 一致）在数据到达后无法自动入账。现改为：
+      - force=True                    → 不跳过（强制重入）
+      - prev 为空                      → 不跳过（首次）
+      - fp 不一致                      → 不跳过（计划内容变化，重新入账）
+      - state == applied 且 fp 一致    → 跳过（幂等）
+      - state == pending 且 fp 一致    → 不跳过（数据到达后允许重试入账）
+      - 无 state（legacy）            → 按 applied 处理（保守迁移，见 _legacy_state）
+
+    返回 (skip, reason)。
+    """
+    if force:
+        return False, "force 强制重入"
+    if not prev:
+        return False, "首次入账"
+    state = _legacy_state(prev)
+    if prev.get("plan_fp") != fp:
+        return False, (
+            f"计划内容变化（fp {str(prev.get('plan_fp'))[:12]}… → {fp[:12]}…）→ 重新入账"
+        )
+    if state == "applied":
+        return True, (
+            f"防重入：{prev.get('applied_at')} 已入账（state=applied）且计划内容一致"
+            f"（fp={fp[:12]}…）→ 跳过"
+        )
+    if state == "pending":
+        return False, (
+            f"pending 重试：{prev.get('applied_at')} 曾登记 pending（无 T+1 数据）"
+            f"，数据到达后允许重试入账"
+        )
+    return False, f"未知 state={state!r} → 允许重试"
+
+
 def apply_plan(date_str: str, force: bool = False) -> dict:
     """对 {date} 计划做增量入账（防重入）。
 
@@ -223,13 +272,11 @@ def apply_plan(date_str: str, force: bool = False) -> dict:
         plan_json = PLAN_ROOT_DIR / f"{date_str}_sentinel2_plan.json"
     fp = plan_fingerprint(plan_json)
 
-    if not force and prev and prev.get("plan_fp") == fp:
+    skip, reason = _should_skip_apply(prev, fp, force)
+    if skip:
         return {
             "applied": False,
-            "reason": (
-                f"防重入：{date_str} 计划内容（fp={fp[:12]}…）与已登记一致"
-                f"（state={prev.get('state')}，applied_at={prev.get('applied_at')}）→ 跳过"
-            ),
+            "reason": reason,
             "snapshot": None,
         }
 
