@@ -7,7 +7,7 @@ P0-P15 定案（QA VERIFIED）的 Sentinel-2 生产基线：
     （label_pool=all+cross_z，8,624 行/18 品种）+ 按日截面 rank top30%
     （top_k=0.30）+ S2 min_symbols=3 + group_cap=0.5（ferrous_all 合并黑色系）。
   - 引擎 B：basis_ratio 品种内滚动 252 日分位 >= 0.7 做多（win=252/thr=0.70）。
-  - 组合：A10/B90（w_engine_a=0.10 / w_engine_b=0.90）、vol_target=False
+  - 组合：A30/B70（w_engine_a=0.30 / w_engine_b=0.70，P19 终裁）、vol_target=False
     → 组合 OOS 1.614（volN）。
 
 P16 目标：把"研究框架"变成"可执行生产流水线"脚手架：
@@ -15,7 +15,7 @@ P16 目标：把"研究框架"变成"可执行生产流水线"脚手架：
   2. 数据完整性检查（18 品种 K 线最新日期 + 基差最新日期，缺失/不一致 WARN）
   3. 引擎 A targets（复用 ``engine_a_targets_cs``，显式传参 group_cap/group_map/score_col）
   4. 引擎 B targets（复用 ``engine_b_targets``，win/thr 取自配置）
-  5. 组合 A10/B90 名义加权：
+  5. 组合 A30/B70 名义加权：
        NOTIONAL_engine = initial_capital × notional_frac × weight
        → 手数 floor(notional / (px × multiplier)) → 合并同日多合约（两引擎同选相加）
   6. 交易计划落盘 ``artifacts/trade_plans/{date}_sentinel2_plan.json`` + ``.csv``
@@ -272,7 +272,7 @@ def engine_b_signal(prices: pd.DataFrame, basis: pd.DataFrame, cfg, date: pd.Tim
 
 
 # ---------------------------------------------------------------------------
-# 3. 组合 A10/B90 名义加权 → 手数 → 合并
+# 3. 组合 A/B 名义加权 → 手数 → 合并
 # ---------------------------------------------------------------------------
 def combo_plan(
     cfg,
@@ -281,7 +281,7 @@ def combo_plan(
     engine_b: dict,
     date: pd.Timestamp,
 ) -> dict:
-    """A10/B90 名义加权 → 手数 floor → 合并同日多合约。
+    """A/B 名义加权（权重取自配置，P19 终裁 A30/B70）→ 手数 floor → 合并同日多合约。
 
     名义口径（任务定稿）：
       NOTIONAL_engine = initial_capital × notional_frac × weight
@@ -551,7 +551,7 @@ def write_plan(cfg, date: pd.Timestamp, integrity: dict, engine_a: dict,
 # ---------------------------------------------------------------------------
 # 5. 主流程
 # ---------------------------------------------------------------------------
-def print_plan_summary(date: pd.Timestamp, integrity: dict, engine_a: dict,
+def print_plan_summary(cfg, date: pd.Timestamp, integrity: dict, engine_a: dict,
                        engine_b: dict, combo: dict) -> None:
     print(f"\n{'=' * 88}")
     print(f"Sentinel-2 生产信号流水线 — 交易计划摘要  {date.strftime('%Y-%m-%d')}")
@@ -596,7 +596,8 @@ def print_plan_summary(date: pd.Timestamp, integrity: dict, engine_a: dict,
                 print(f"  选中 {r['symbol']:<5} br_rank={r['br_rank']:.4f} "
                       f"px={r['price']:.2f} (独立口径 {r['standalone_target']} 手)")
 
-    print("\n[组合 A10/B90] 名义加权 → floor 手数 → 合并")
+    print(f"\n[组合 A{cfg.backtest.combo.w_engine_a*100:.0f}/B{cfg.backtest.combo.w_engine_b*100:.0f}] "
+          f"名义加权 → floor 手数 → 合并")
     if combo["degraded_to_pure_b"]:
         print("  ⚠️ 退化为纯引擎 B（引擎 A 无信号）")
     for r in combo["positions"]:
@@ -681,8 +682,9 @@ def main() -> None:
     engine_b = engine_b_signal(prices, basis, cfg, target_date)
     print(f"  选中 {len(engine_b['selected'])} 品种: {engine_b['selected']}")
 
-    # ---- [5/7] 组合 A10/B90 ----
-    print("\n[5/7] 组合 A10/B90 名义加权 → 手数 floor → 合并 ...")
+    # ---- [5/7] 组合 A/B 名义加权 ----
+    print(f"\n[5/7] 组合 A{cfg.backtest.combo.w_engine_a*100:.0f}/B{cfg.backtest.combo.w_engine_b*100:.0f} "
+          f"名义加权 → 手数 floor → 合并 ...")
     combo = combo_plan(cfg, prices, engine_a, engine_b, target_date)
     print(f"  交易计划 {len(combo['positions'])} 条 | 合计 {combo['total_lots']} 手 | "
           f"名义 {combo['total_notional']:,.0f} CNY")
@@ -706,7 +708,7 @@ def main() -> None:
     print(f"  总名义/权益 {rk['total_notional_ratio']*100:.1f}% "
           f"({'PASS' if rk['total_notional_pass'] else 'FAIL'})")
 
-    print_plan_summary(target_date, integrity, engine_a, engine_b, combo)
+    print_plan_summary(cfg, target_date, integrity, engine_a, engine_b, combo)
     print("\n[DONE] P16 流水线完成。模拟盘对接 → P17（本脚本不含任何下单/外部调用）")
 
 

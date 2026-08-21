@@ -162,34 +162,39 @@ class EngineAConfig(BaseModel):
 
 
 class EngineBConfig(BaseModel):
-    """Sentinel-2 引擎 B（基差收敛）生产配置（v1.0，P5 终裁）。
+    """Sentinel-2 引擎 B（基差收敛）生产配置（v1.1，P19 生产配置固化）。
 
-    引擎 B 为 Sentinel-2 组合的基座引擎（OOS Sharpe 1.260 / MaxDD -6.7%）：
-    对 basis_ratio 做品种内滚动 252 日分位，分位 >= thr 时做多。
+    引擎 B 为 Sentinel-2 组合的基座引擎：对 basis_ratio 做品种内滚动分位，
+    分位 >= thr 时做多。
+
+    P19（broker multiplier bug 修复后，生产口径 3b 复验，QA Round2 VERIFIED）：
+    采纳保守方案——``notional_frac`` 0.20 → 0.30（生产有效名义 = 1e6×nf_b×w_b，
+    B 需 ≥170k 存活；w_b=0.70 时 0.30 → 210k）；win/thr 保持 252/0.70 不动。
     """
 
     model_config = _MODEL_CFG
     enabled: bool = True
     win: int = 252          # basis_ratio 品种内滚动分位窗口
     thr: float = 0.70       # 做多分位阈值
-    notional_frac: float = 0.20  # 名义占权益比例
+    notional_frac: float = 0.30  # 名义占权益比例（P19 固化：0.20→0.30）
 
 
 class ComboConfig(BaseModel):
-    """Sentinel-2 双引擎组合权重（v1.1，P9 组合级验证固化）。
+    """Sentinel-2 双引擎组合权重（v1.2，P19 生产配置固化）。
 
-    P9-1 网格（A∈{0.10..0.35} × 波目标 on/off，复利口径）：
-      - vol=N 网格 OOS Sharpe 最优：A10/B90（1.612 vs A15/B85 基线 1.602）
-      - 全部网格 OOS Sharpe 最优：A10/B90 + vol=Y（1.662，复利 +43.8%）
-      - P9 裁决：权重更新为 A10/B90（引擎 A OOS 截面 IC 为负，降低其权重更稳健）；
-        波目标保持 False（P4-1 终裁；vol=Y 提升 OOS 复利但 MaxDD 更深 -8.1% vs -6.1%，
-        是否切换交团队/QA 复核）。
+    P9-1 网格（复利口径）：vol=N 网格 OOS Sharpe 最优 A10/B90；P16 固化 A10/B90。
+    P18（broker 修复后）重估：修复后 A(0.99) > B(0.49)，网格偏好更高 A 权重，
+    但生产口径（notional=capital×nf×w 直入 targets）下 A 权重上调需搭配
+    B 名义上调才稳健（B 有效名义 ≥170k 存活）。
+    P19 终裁（QA Round2 VERIFIED）：采纳保守方案——``w_engine_a`` 0.10 → 0.30、
+    ``w_engine_b`` 0.90 → 0.70（A30/B70 + EngineBConfig.notional_frac 0.30，
+    生产口径 M1 0.641 / M5 0.633 > 现生产 0.552）；vol_target 保持 False。
     """
 
     model_config = _MODEL_CFG
-    w_engine_a: float = 0.10   # P9 终裁：A10/B90（vol=N 网格最优）
-    w_engine_b: float = 0.90   # B 为基（OOS Sharpe 1.622）
-    vol_target: bool = False   # P4-1 终裁：不叠加组合层波目标（P9 复核保留）
+    w_engine_a: float = 0.30   # P19 终裁：A30/B70（生产口径保守方案）
+    w_engine_b: float = 0.70   # B 为基（P19 保持 B 为主）
+    vol_target: bool = False   # P4-1 终裁：不叠加组合层波目标（P9/P19 复核保留）
     vol_target_ann: float = 0.175
     vol_ewma_halflife: int = 10
 

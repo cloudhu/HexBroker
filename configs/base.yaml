@@ -7,8 +7,10 @@ joint_training: false
 # group_map 将黑色系 5 品种（i/j/jm/rb/hc）合并为单一 ferrous_all 组，
 # 使 group_cap=0.5 真正实现"黑色系敞口 ≤50%"（GROUPS_V2 默认把黑色系拆成
 # ferrous_raw / ferrous_steel 两组，单组 cap 无法约束合并后敞口）。
-# 其余品种沿用 GROUPS_V2 组名；engine_b / combo 未在此声明 → 取代码默认
-# （win252/thr0.7、A10/B90、vol_target=False）。
+# 其余品种沿用 GROUPS_V2 组名。
+# P19（生产配置固化，QA Round2 VERIFIED）：显式声明 engine_b（notional_frac 0.30，
+# win/thr 保持 252/0.70）与 combo（A30/B70）——与 hexbroker/config.py 代码默认一致，
+# 部署以本 yaml 为准。
 backtest:
   engine_a:
     group_cap: 0.5
@@ -31,3 +33,14 @@ backtest:
       cf0: agri_soft
       ta0: chem_energy
       sc0: chem_energy
+  engine_b:
+    enabled: true
+    win: 252
+    thr: 0.70
+    notional_frac: 0.30   # P19 固化：0.20→0.30（B 有效名义 = 1e6×0.30×w_b ≥170k 存活）
+  combo:
+    w_engine_a: 0.30      # P19 终裁：A30/B70（生产口径保守方案，QA Round2 VERIFIED）
+    w_engine_b: 0.70
+    vol_target: false
+    vol_target_ann: 0.175
+    vol_ewma_halflife: 10

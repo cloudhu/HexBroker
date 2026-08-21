@@ -1,13 +1,17 @@
-"""P6-5：生产配置固化验证（引擎 A → v8 缓存 + A10/B90 + 引擎 B win252/thr0.7）。
+"""P6-5：生产配置固化验证（引擎 A → v8 缓存 + A30/B70 + 引擎 B win252/thr0.7 + nf_b 0.30）。
 
-说明（P8-4 / P9 / P10-1 更新）
------------------------------
+说明（P8-4 / P9 / P10-1 / P19 更新）
+-------------------------------------
 P8-4 将生产缓存从 v4 切换为 v8（全品种统一截面，QA VERIFIED），本脚本随之更新；
 P9-1 组合网格（复利口径）裁决权重 A15/B85 → A10/B90；P9-2 新增
 ``EngineAConfig.group_cap``（默认 None，向后兼容）；P10-1 新增
 ``EngineAConfig.group_map``（默认 None，向后兼容），并在部署 yaml
 ``configs/base.yaml`` 显式启用 ``group_cap=0.5`` + ``group_map``
 （黑色系 5 品种合并为 ferrous_all 组）——QA 阻塞项落地。
+P19（broker multiplier bug 修复后，生产口径 3b 复验，QA Round2 VERIFIED）：
+终裁采纳保守方案——ComboConfig A10/B90 → **A30/B70**、EngineBConfig.notional_frac
+0.20 → **0.30**（win/thr 保持 252/0.70），并在 ``configs/base.yaml`` 显式声明
+engine_b / combo 段（部署以 base.yaml 为准）。
 
 验证内容
 --------
@@ -15,9 +19,10 @@ P9-1 组合网格（复利口径）裁决权重 A15/B85 → A10/B90；P9-2 新�
    "artifacts/signals_cache18_grouped_v8.parquet"``（v8 生产缓存）；
    engine_a 其余字段（top_k=0.30 / min_symbols=3 / notional_frac=0.20 /
    group_cap=None / group_map=None）与 P5/P8-4/P9 裁决一致（代码默认向后兼容）；
-   engine_b / combo 保持固化值。
+   engine_b / combo 保持 P19 固化值（nf_b=0.30、A30/B70）。
 2. 部署 yaml ``configs/base.yaml`` → engine_a.group_cap=0.5 + group_map
-   （ferrous_all 合并映射）生效（P10-1 QA 阻塞项）。
+   （ferrous_all 合并映射）生效（P10-1 QA 阻塞项）；engine_b/combo 显式声明
+   （nf_b=0.30、A30/B70，P19 固化）。
 3. 旧 yaml（无 ``engine_a`` / ``combo`` 字段）向后兼容：可加载、旧字段保留、
    新字段取默认。
 4. yaml 覆盖 ``engine_a.min_symbols/top_k/notional_frac/signal_cache/group_cap/
@@ -48,7 +53,7 @@ import pandas as pd  # noqa: E402
 
 from hexbroker.config import load_config  # noqa: E402
 
-# 生产基准（口径铁律：引擎 A → v8 缓存，S2 min=3；P9 权重 A10/B90）
+# 生产基准（口径铁律：引擎 A → v8 缓存，S2 min=3；P19 权重 A30/B70 + nf_b 0.30）
 V8_CACHE = "artifacts/signals_cache18_grouped_v8.parquet"
 V2_CACHE = "artifacts/signals_cache18_grouped_v2.parquet"
 BASE_YAML = "configs/base.yaml"
@@ -64,17 +69,17 @@ EXPECT_ENGINE_A = {
 # 部署 yaml（configs/base.yaml）显式启用值（P10-1 QA 阻塞项）
 EXPECT_BASE_YAML_GROUP_CAP = 0.5
 EXPECT_BASE_YAML_GROUP_MAP_FERROUS = {"i0", "j0", "jm0", "rb0", "hc0"}
-# P5/P6-1 固化基准（回归确认未破坏）
+# P5/P6-1 固化基准 + P19 名义上调（win/thr 不动，nf_b 0.20→0.30）
 EXPECT_ENGINE_B = {
     "enabled": True,
     "win": 252,
     "thr": 0.70,
-    "notional_frac": 0.20,
+    "notional_frac": 0.30,  # P19 终裁：0.20→0.30（B 有效名义 ≥170k 存活）
 }
-# P9 终裁基准（P8-4 基线 A15/B85 → 组合网格最优 A10/B90）
+# P19 终裁基准（A10/B90 → A30/B70，生产口径保守方案）
 EXPECT_COMBO = {
-    "w_engine_a": 0.10,
-    "w_engine_b": 0.90,
+    "w_engine_a": 0.30,
+    "w_engine_b": 0.70,
     "vol_target": False,
     "vol_target_ann": 0.175,
     "vol_ewma_halflife": 10,
@@ -128,7 +133,7 @@ def _fake_cache_frame() -> pd.DataFrame:
 
 def main() -> int:
     print("=" * 72)
-    print("P6-5：生产配置固化验证（引擎 A → v8 缓存 + A10/B90 + B win252/thr0.7 + P10-1 group_map）")
+    print("P6-5：生产配置固化验证（引擎 A → v8 缓存 + A30/B70 + B win252/thr0.7 + nf_b 0.30 + P10-1 group_map）")
     print("=" * 72)
 
     # ---- 1. 默认配置：engine_a 存在 + 字段默认值 ----
@@ -180,9 +185,11 @@ def main() -> int:
         f"cu0={gm_base.get('cu0')!r} au0={gm_base.get('au0')!r}",
     )
     check(
-        "base.yaml engine_b/combo 未覆盖 → 仍取默认（win252/thr0.7、A10/B90）",
+        "base.yaml engine_b/combo 显式声明生效（nf_b 0.30、A30/B70，P19 固化）",
         cfg_base.backtest.engine_b.win == 252 and cfg_base.backtest.engine_b.thr == 0.70
-        and cfg_base.backtest.combo.w_engine_a == 0.10,
+        and cfg_base.backtest.engine_b.notional_frac == 0.30
+        and cfg_base.backtest.combo.w_engine_a == 0.30
+        and cfg_base.backtest.combo.w_engine_b == 0.70,
     )
 
     # ---- 2. 旧 yaml（无 engine_a 字段）向后兼容 ----
@@ -228,8 +235,8 @@ def main() -> int:
         cfg2.backtest.engine_b.win == 252 and cfg2.backtest.engine_b.thr == 0.70,
     )
     check(
-        "无 combo 字段 → combo 取默认 A10/B90（P9 组合网格裁决）",
-        cfg2.backtest.combo.w_engine_a == 0.10 and cfg2.backtest.combo.w_engine_b == 0.90,
+        "无 combo 字段 → combo 取默认 A30/B70（P19 组合网格裁决）",
+        cfg2.backtest.combo.w_engine_a == 0.30 and cfg2.backtest.combo.w_engine_b == 0.70,
     )
 
     # ---- 3. yaml 覆盖 engine_a 嵌套字段生效（含显式 v2 覆盖 + group_cap + group_map） ----
@@ -275,8 +282,8 @@ def main() -> int:
         cfg3.backtest.engine_b.win == 252 and cfg3.backtest.engine_b.thr == 0.70,
     )
     check(
-        "覆盖后 combo 仍取默认 A10/B90",
-        cfg3.backtest.combo.w_engine_a == 0.10 and cfg3.backtest.combo.w_engine_b == 0.90,
+        "覆盖后 combo 仍取默认 A30/B70",
+        cfg3.backtest.combo.w_engine_a == 0.30 and cfg3.backtest.combo.w_engine_b == 0.70,
     )
 
     # ---- 4. engine_a_targets_cs() 无参调用默认读 v8（mock 捕获读取路径） ----
@@ -357,7 +364,7 @@ def main() -> int:
     if _FAILURES:
         print(f"[FAIL] {len(_FAILURES)} 项失败：{_FAILURES}")
         return 1
-    print("[PASS] 全部检查通过：生产配置已固化（引擎A→v8缓存 + A10/B90 + B win252/thr0.7）")
+    print("[PASS] 全部检查通过：生产配置已固化（引擎A→v8缓存 + A30/B70 + B win252/thr0.7 + nf_b 0.30）")
     print("      向后兼容：旧 yaml 无 engine_a/combo 字段取默认；显式 cache_path/v2 路径不受影响")
     print("      P9-2：EngineAConfig.group_cap 默认 None（不启用），yaml 覆盖 0.5 生效")
     print("      P10-1：EngineAConfig.group_map 默认 None（GROUPS_V2 兜底），部署 yaml")
