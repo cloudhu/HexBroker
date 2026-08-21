@@ -594,5 +594,32 @@ engine_a_targets_cs(prices,
 
 **生产现状**：组合 OOS 1.614（volN）/1.664（volY）；纯 B OOS 1.622；引擎 A 在组合加权层贡献 0 手（信号层已验证近极限 P15 定论）。模拟盘对接=P17。
 
+### 9.25 P17 内部簿记模拟盘 + 上游 broker.py multiplier bug（2026-08-21）
+
+**模拟盘 VERIFIED**：外部模拟盘 API（westock/mx-moni）均仅支持 A 股 → 内部簿记 ShadowAccount（品种级 multiplier 准确记账，T+1 开盘成交，费 0.005%，FAIL 三模式 block/scale/none）。OOS 回放 502 日：block 期末 1,090,232（+9.02%/Sharpe 0.572）、阻断 33、**引擎 A 全 0 手（生产 100% 纯 B）**。
+
+**⚠️ 上游 broker.py multiplier bug（CONFIRMED，待修复）**：`hexbroker/backtest/broker.py` L75/L92 平仓/浮盈用**全局 multiplier=10** 而非品种级（fee 却用品种级，口径不一致）→ 历史回测绩效指标**全部偏高失真**（纯 B OOS：buggy Sharpe 1.797/+90.62% vs fixed 0.568/+9.42%，-68.4%）。**不受影响**：计划生成/手数/名义、手续费、信号/模型/校准、P17 记账。
+- **修复方案（P18-P0）**：L75/L92 `self.cost.multiplier` → `self.cost._multiplier(symbol)` + 回归测试（ni0×1/jm0×60）
+- **重估优先级（P18）**：P16 组合 OOS > P11 引擎 B > P9 组合网格 > P5 引擎基线；P13/P14/P15 引用绩效数字同步更新
+- **修复前**：所有 BacktestEngine 绩效数字视为偏高失真，不得直接对外宣称
+
+### 9.26 P18 broker.py multiplier 修复（2026-08-21）
+
+**修复完成（QA Round2 VERIFIED，git `d3ec0a6`）**：broker.py L75/L92 平仓/浮盈 `self.cost.multiplier`（全局 10）→ `_multiplier(symbol)`（品种级）；无 contracts 回退全局（向后兼容）；回归测试 4 例 + 全量 pytest 219 passed；QA 交叉验证 15/15（含加仓-部分平仓/空头）。
+
+**修复后真实口径（纯 B OOS）**：期末 1,094,051 / +9.42% / Sharpe **0.568** / MaxDD -8.93%（vs 修复前 1,905,743 / +90.62% / 1.797——**历史回测绩效全部修正，Sharpe 系统性 -68% 量级**）。修复后与 shadow account 准确记账相关 0.9998。
+
+**⚠️ 生产决策重估**：引擎 B 1.622、组合 1.614/1.664、P9 网格等全部旧数字作废，重估进行中（P18-2：P16 组合 OOS > P11 引擎 B > P9 组合网格 > P5 引擎基线）；修复前数字不得对外宣称。计划生成/手续费/信号/模型/校准不受影响。
+
+### 9.27 P18 终裁：重估结果 + 引擎 A 归因修正（2026-08-21）
+
+**修复后真实口径（QA 三轮复核逐位复现）**：
+- P16 组合 A10/B90 OOS 1.612→**0.566**（volY 0.567）；P11 引擎 B win252/thr0.70 1.622→**0.490**（最优变 win126/thr0.60 0.641，thr 0.60 普遍更优）；P9 网格最优变 **A0.35/B0.65（0.731）**；P5 引擎 A S2 -0.337→**+0.990**（cap0.5 +1.049）
+- ⚠️ **引擎 A "转正"归因修正（隔离矩阵）**：符号翻转主因是 **P8-4 缓存升级（v2→v8）**——v8+buggy 已 +0.63，broker 修复边际 +0.36（v2 上反而更差）；历史 -0.337 为 v2 缓存时代口径
+- **P15 信号层结论不受 broker 影响**（IC/校准与记账无关）
+
+**生产决策更新（P19 立项候选）**：① 引擎 B thr 0.70→0.60（需成本/容量复核）② 引擎 A 名义上调恢复可交易（v8+fixed +0.99，需保证金/容量确认）③ A0.35/B0.65 待引擎 A 可交易后以 cap0.5 复验
+**方法论沉淀**：绩效对比必须控制缓存版本（v2/v8 隔离矩阵）；报告数字标注修复前/后口径。
+
 ---
-*文档版本：v3.19（2026-08-21，Sentinel-2 P16 生产流水线）｜ 关联报告：deliverables/software-hexfutures-ai/（40+ 份实验报告）*
+*文档版本：v3.22（2026-08-21，Sentinel-2 P18 终裁重估）｜ 关联报告：deliverables/software-hexfutures-ai/（40+ 份实验报告）*
