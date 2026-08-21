@@ -651,5 +651,11 @@ engine_a_targets_cs(prices,
 - **P23 待办**：① v13 自然跨边界缓存（~20-24 交易日后与 tail_ext 对比稳定性）② tail_ext 与 S4 对齐 ③ 基差 08-21 源端发布后补拉 ④ 生产节奏自动化一键脚本
 - **方法论**：尾折扩展可提前评估信号恢复，但升级生产须自然口径（v13）+ 同窗口对比 + 稳定性证据
 
+**§9.32 P23 基差补拉 + 生产自动化（2026-08-21，QA VERIFIED）**
+- **基差 08-21 补拉**：源端 20:12 发布 → 17 品种到 08-21（SC 源端缺失保留 04-30）→ **08-21 计划由空转非空**（ta0 3 手/176,958 CNY 纯 B，WARN 18→2）；增量入账 pending（T+1=08-24，无数据不入账不污染账户）
+- **生产自动化就绪**：`p23_daily_run.py` 一键化（数据新鲜度检查 → p16 出计划 → p17 增量入账 → 摘要 daily_runs/{date}_daily_summary.md）+ **防重入**（计划 md5 指纹登记 apply_registry.json）+ `--update-data`（基差增量；K 线走 p6_4 独立流程）——**每日生产节奏：`p23_daily_run.py --date <最新日> --update-data`**
+- **tail_ext/S4 对齐**：共享窗口 corr=1.0000 无漂移；追加窗口 IC +0.083/命中率 0.677（质量良好）→ 纳入轻量监测（不参与 rt30-vs-v2 升级触发）
+- **P24 待办**：① apply_plan 防重入增强（pending 允许重试，否则 08-21 pending 计划 08-24 无法自动入账）② rt30 UPGRADE_TRIGGER 正式升级评估（P12 规则闭环，P20 暂缓裁决仍成立不做匆忙升级）
+
 ---
-*文档版本：v3.26（2026-08-21，Sentinel-2 P22 尾折扩展+增量入账）｜ 关联报告：deliverables/software-hexfutures-ai/（40+ 份实验报告）*
+*文档版本：v3.27（2026-08-21，Sentinel-2 P23 基差补拉+生产自动化）｜ 关联报告：deliverables/software-hexfutures-ai/（40+ 份实验报告）*
