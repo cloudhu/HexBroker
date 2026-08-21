@@ -67,12 +67,12 @@ class SimBroker:
                     self.avg_entry[symbol] * abs_cur + fp * abs_del
                 ) / (abs_cur + abs_del)
         else:
-            # 平仓/减仓：结算已实现盈亏
+            # 平仓/减仓：结算已实现盈亏（P18-P0：按品种级 multiplier 记账，修复全局 ×10 bug）
             closed = min(abs(delta), abs_cur := abs(current))
             direction = np.sign(current)
             self.realized[symbol] = (
                 self.realized.get(symbol, 0.0)
-                + direction * (fp - self.avg_entry[symbol]) * closed * self.cost.multiplier
+                + direction * (fp - self.avg_entry[symbol]) * closed * self.cost._multiplier(symbol)
                 - fee
             )
             if abs(current + delta) < 1e-9:
@@ -89,7 +89,8 @@ class SimBroker:
         for sym, pos in self.positions.items():
             if abs(pos) < 1e-12 or sym not in marks:
                 continue
-            total += pos * (marks[sym] - self.avg_entry[sym]) * self.cost.multiplier
+            # P18-P0：按品种级 multiplier 记账（修复全局 ×10 bug）
+            total += pos * (marks[sym] - self.avg_entry[sym]) * self.cost._multiplier(sym)
         return float(total)
 
     def equity(self, marks: dict[str, float]) -> float:
