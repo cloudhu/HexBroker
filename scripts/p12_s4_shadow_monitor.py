@@ -1,28 +1,48 @@
-"""P12-2 S4 影子跟踪框架：rt30（候选）vs v2（基线）信号缓存影子监控。
+"""P12-2 S4 影子跟踪框架：rt30（候选）vs 基线（v8 生产基线）信号缓存影子监控。
 
 背景
 ----
 P7 终裁（sentinel2-p7-engineA-signal-fix-2026-08-19.md）：S4（更频繁重训
 test_len=30，缓存 ``signals_cache18_grouped_v2_rt30.parquet``）仅影子验证候选
-不投产；生产维持 v2 缓存 + A15/B85（P8-4/P9 后升级为 v8 + A10/B90，但 S4
-影子跟踪对象仍是 P7 当时的对比基线 v2——v8 不在 S4 对比范围，S4 未在 v8 口径
-下重训过，如实说明）。
+不投产；生产维持 v2 缓存 + A15/B85（P8-4/P9 后升级为 v8 + A10/B90）。
 
-本脚本对 rt30（候选）与 v2（基线）两缓存实现影子监控（只读分析，不重训、
+P25-1（2026-08-22）：影子基线从 v2 升级为 **v8（signals_cache18_grouped_v8.parquet，
+生产基线，P19 固化）**。P24 教训：rt30 评估不通过（当前口径 0.544<1.064）；
+p12 UPGRADE_TRIGGER 对照弱基线 v2 → 影子基线需升级 v2→v8，使对照对象与
+生产口径一致（P21/P22 均以 v8 为基线重估）。
+
+⚠️ 基线切换影响（如实说明）：
+  - 覆盖率不同：v2 止 2026-06-11（976 信号日，日均 8.15 品种）；v8 止 2026-06-29
+    （662 信号日，日均 13.03 品种）；rt30 止 2026-07-27（837 信号日，日均 7.25）。
+  - v8 信号日更少（662 < 976）、但日均品种更多、末信号日更晚（06-29 > 06-11）。
+  - 对齐日（两缓存同时有 >= min_symbols 重合品种的 OOS 日）以实际重叠为准：
+    本实现实测输出 corr_n_days / n_common_dates 为准，切换前后对比见
+    artifacts/p25_1_baseline_switch_impact.csv。
+
+向后兼容：
+  - CLI ``--baseline-a PATH``（默认 v8）/ ``--baseline-b PATH``（默认 rt30）可切换
+    两对比缓存（如 ``--baseline-a artifacts/signals_cache18_grouped_v2.parquet``
+    复现旧 v2-vs-rt30 对比）；
+  - 环境变量 P12_BASELINE_A / P12_BASELINE_B 同样生效（CLI 优先）；
+  - ``--baseline-csv PATH`` 指定基线快照落盘路径（默认
+    artifacts/p12_s4_shadow_baseline_v8.csv，标注 v8 基线；旧 v2 基线快照
+    artifacts/p12_s4_shadow_baseline.csv 保留不动）。
+
+本脚本对候选（rt30）与基线（v8）两缓存实现影子监控（只读分析，不重训、
 不改缓存/数据/hexbroker 包）：
 
   1) 滚动窗口指标（默认 63 交易日滚动）：
        - 滚动 OOS 截面 IC：每日截面 Spearman(exp_ret, fwd5)，仅 OOS
          （>= 2024-07-18）且当日品种数 >= min_symbols(3)，再 63 窗滚动均值
        - 滚动命中率：每日 exp_ret 截面 top30% 品种的 fwd5>0 占比，63 窗滚动均值
-       - 信号相关性（漂移监测核心）：rt30 vs v2 同期信号 Spearman
+       - 信号相关性（漂移监测核心）：候选 vs 基线同期信号 Spearman
            主指标 = 63 窗池化 Spearman（稳健，推荐用于阈值判定）
            辅指标 = 每日截面 Spearman 的 63 窗滚动均值（n=3 时粒度粗糙）
-  2) 基线快照：``--baseline`` 生成 artifacts/p12_s4_shadow_baseline.csv
+  2) 基线快照：``--baseline`` 生成基线快照 CSV（默认 v8 基线）
   3) 复核触发：``--monitor`` 重算对比（数据刷新后运行）
-       - 主触发：新数据出现（K 线刷新 / 缓存重建）后，rt30 滚动 OOS IC 连续
-         N 窗（默认 5 窗）> v2 且 |IC| > 0.03，或滚动命中率持续优于 v2
-         （连续 N 窗 rt30 > v2 且 rt30 > 0.50）→ 触发升级评估
+       - 主触发：新数据出现（K 线刷新 / 缓存重建）后，候选滚动 OOS IC 连续
+         N 窗（默认 5 窗）> 基线且 |IC| > 0.03，或滚动命中率持续优于基线
+         （连续 N 窗候选 > 基线且候选 > 0.50）→ 触发升级评估
        - 漂移监测：池化信号相关性跌破阈值（默认绝对 < 0.50 告警，
          相对基线回落 > 0.15 预警）→ 两引擎分化，需人工确认
          （注：P7 登记阈值 0.8 经基线标定发现会即刻误报——当前池化相关性
@@ -37,9 +57,12 @@ test_len=30，缓存 ``signals_cache18_grouped_v2_rt30.parquet``）仅影子验�
 
 用法
 ----
-  python scripts/p12_s4_shadow_monitor.py --baseline    # 生成基线快照
+  python scripts/p12_s4_shadow_monitor.py --baseline    # 生成基线快照（v8 基线）
   python scripts/p12_s4_shadow_monitor.py --monitor     # 重算对比（数据刷新后）
   python scripts/p12_s4_shadow_monitor.py               # 默认 = monitor（无基线时自动生成）
+  # 向后兼容 v2 对比（旧口径）：
+  python scripts/p12_s4_shadow_monitor.py --baseline-a artifacts/signals_cache18_grouped_v2.parquet \
+      --baseline-csv artifacts/p12_s4_shadow_baseline.csv --baseline
 """
 from __future__ import annotations
 
@@ -60,9 +83,16 @@ from scipy.stats import spearmanr
 
 ART = ROOT / "artifacts"
 KLINE_DIR = ROOT / "data" / "raw" / "processed"
+# P25-1：基线从 v2 升级为 v8（生产基线）；rt30 候选不变；v2 路径保留向后兼容
 V2_PATH = ART / "signals_cache18_grouped_v2.parquet"
+V8_PATH = ART / "signals_cache18_grouped_v8.parquet"
 RT30_PATH = ART / "signals_cache18_grouped_v2_rt30.parquet"
-BASELINE_CSV = ART / "p12_s4_shadow_baseline.csv"
+DEFAULT_BASELINE_PATH = V8_PATH          # 默认基线 = v8（生产基线）
+DEFAULT_CANDIDATE_PATH = RT30_PATH       # 默认候选 = rt30（P7 登记 S4 候选）
+DEFAULT_BASELINE_LABEL = "v8"            # 基线标签（旧 v2 对比时传 "v2"）
+DEFAULT_CANDIDATE_LABEL = "rt30"         # 候选标签
+BASELINE_CSV = ART / "p12_s4_shadow_baseline.csv"        # 旧基线快照（v2 基线，保留）
+BASELINE_CSV_V8 = ART / "p12_s4_shadow_baseline_v8.csv"  # 新基线快照（v8 基线，默认）
 
 # 口径常量（与 p3/p5/p7 一致）
 OOS_START = pd.Timestamp("2024-07-18")   # PandaData 独立采集起点
@@ -298,25 +328,32 @@ def kline_max_date(close_panel: pd.DataFrame) -> pd.Timestamp:
 # ---------------------------------------------------------------------------
 # 基线快照
 # ---------------------------------------------------------------------------
-def build_baseline(close_panel: pd.DataFrame, baseline_csv: Path = BASELINE_CSV,
+def build_baseline(close_panel: pd.DataFrame, baseline_csv: Path = BASELINE_CSV_V8,
+                   baseline_path: Path = DEFAULT_BASELINE_PATH,
+                   candidate_path: Path = DEFAULT_CANDIDATE_PATH,
+                   baseline_label: str = DEFAULT_BASELINE_LABEL,
+                   candidate_label: str = DEFAULT_CANDIDATE_LABEL,
                    window: int | None = None) -> pd.DataFrame:
     """生成基线快照 CSV（两缓存各一行 + 共享相关性/环境列）。
 
-    ``window`` 为 None 时取模块常量 ROLL_WINDOW（调用时读取，避免定义期绑定）。
+    P25-1：默认基线 = v8（生产基线）、候选 = rt30；``--baseline-a v2 路径``
+    可复现旧 v2-vs-rt30 对比。``window`` 为 None 时取模块常量 ROLL_WINDOW
+    （调用时读取，避免定义期绑定）。
     """
     window = ROLL_WINDOW if window is None else window
-    sig_v2 = load_signals(V2_PATH)
-    sig_rt = load_signals(RT30_PATH)
-    m_v2 = cache_metrics(sig_v2, close_panel, "v2", window=window)
-    m_rt = cache_metrics(sig_rt, close_panel, "rt30", window=window)
-    cm = corr_metrics(sig_rt, sig_v2, window=window)
+    sig_base = load_signals(baseline_path)
+    sig_cand = load_signals(candidate_path)
+    m_base = cache_metrics(sig_base, close_panel, baseline_label, window=window)
+    m_cand = cache_metrics(sig_cand, close_panel, candidate_label, window=window)
+    cm = corr_metrics(sig_cand, sig_base, window=window)
+    label_to_path = {baseline_label: baseline_path, candidate_label: candidate_path}
 
     rows = []
-    for m in (m_v2, m_rt):
+    for m in (m_base, m_cand):
         row = {
             "baseline_date": pd.Timestamp.now().normalize().date(),
             "cache": m["label"],
-            "cache_path": str(V2_PATH if m["label"] == "v2" else RT30_PATH),
+            "cache_path": str(label_to_path[m["label"]]),
             "n_rows": m["n_rows"],
             "n_dates": m["n_dates"],
             "coverage_start": m["coverage_start"],
@@ -350,7 +387,7 @@ def build_baseline(close_panel: pd.DataFrame, baseline_csv: Path = BASELINE_CSV,
     return df
 
 
-def load_baseline(baseline_csv: Path = BASELINE_CSV) -> pd.DataFrame:
+def load_baseline(baseline_csv: Path = BASELINE_CSV_V8) -> pd.DataFrame:
     if not baseline_csv.exists():
         raise FileNotFoundError(f"基线快照不存在：{baseline_csv}（先运行 --baseline）")
     return pd.read_csv(baseline_csv)
@@ -414,16 +451,20 @@ def evaluate_drift(corr_now: float, corr_baseline: float,
     return "DRIFT_OK"
 
 
-def run_monitor(close_panel: pd.DataFrame, baseline_csv: Path = BASELINE_CSV,
+def run_monitor(close_panel: pd.DataFrame, baseline_csv: Path = BASELINE_CSV_V8,
+                baseline_path: Path = DEFAULT_BASELINE_PATH,
+                candidate_path: Path = DEFAULT_CANDIDATE_PATH,
+                baseline_label: str = DEFAULT_BASELINE_LABEL,
+                candidate_label: str = DEFAULT_CANDIDATE_LABEL,
                 verbose: bool = True, window: int | None = None,
                 consec: int | None = None, ic_threshold: float | None = None,
                 corr_alert: float | None = None,
                 corr_watch_delta: float | None = None) -> dict:
     """重算当前指标并与基线对比（数据刷新后调用）。
 
-    所有可调参数为 None 时取模块常量（调用时读取，避免定义期绑定）——
-    保证 CLI 覆盖（--window/--consec/--ic-threshold/--corr-alert/
-    --corr-watch-delta）真实生效。
+    P25-1：默认基线 = v8（生产基线）、候选 = rt30；所有可调参数为 None 时取
+    模块常量（调用时读取，避免定义期绑定）——保证 CLI 覆盖（--window/--consec/
+    --ic-threshold/--corr-alert/--corr-watch-delta）真实生效。
     """
     window = ROLL_WINDOW if window is None else window
     consec = TRIGGER_CONSEC if consec is None else consec
@@ -431,11 +472,11 @@ def run_monitor(close_panel: pd.DataFrame, baseline_csv: Path = BASELINE_CSV,
     corr_alert = CORR_ALERT if corr_alert is None else corr_alert
     corr_watch_delta = CORR_WATCH_DELTA if corr_watch_delta is None else corr_watch_delta
 
-    sig_v2 = load_signals(V2_PATH)
-    sig_rt = load_signals(RT30_PATH)
-    m_v2 = cache_metrics(sig_v2, close_panel, "v2", window=window)
-    m_rt = cache_metrics(sig_rt, close_panel, "rt30", window=window)
-    cm = corr_metrics(sig_rt, sig_v2, window=window)
+    sig_base = load_signals(baseline_path)
+    sig_cand = load_signals(candidate_path)
+    m_base = cache_metrics(sig_base, close_panel, baseline_label, window=window)
+    m_cand = cache_metrics(sig_cand, close_panel, candidate_label, window=window)
+    cm = corr_metrics(sig_cand, sig_base, window=window)
     baseline = load_baseline(baseline_csv)
 
     kline_now = kline_max_date(close_panel)
@@ -446,14 +487,14 @@ def run_monitor(close_panel: pd.DataFrame, baseline_csv: Path = BASELINE_CSV,
     fresh_kline = kline_now > kline_base
     fresh_signal = any(
         pd.Timestamp(m["signal_max_date"]) > sig_max_base[m["label"]]
-        for m in (m_v2, m_rt)
+        for m in (m_base, m_cand)
     )
     fresh = fresh_kline or fresh_signal
 
     # 主触发评估：始终在当前数据上计算（回顾性），fresh-OOS 数据出现时
     # 才可作为升级证据（见 trigger['fresh_confirmed'] 标注）。
-    trigger = evaluate_trigger(m_rt["ic_series"], m_v2["ic_series"],
-                               m_rt["hit_series"], m_v2["hit_series"],
+    trigger = evaluate_trigger(m_cand["ic_series"], m_base["ic_series"],
+                               m_cand["hit_series"], m_base["hit_series"],
                                consec=consec, ic_threshold=ic_threshold)
     trigger["fresh_confirmed"] = bool(fresh)
     if not fresh:
@@ -467,14 +508,17 @@ def run_monitor(close_panel: pd.DataFrame, baseline_csv: Path = BASELINE_CSV,
         "monitor_date": pd.Timestamp.now().normalize().date(),
         "params": {"window": window, "consec": consec, "ic_threshold": ic_threshold,
                    "corr_alert": corr_alert, "corr_watch_delta": corr_watch_delta},
+        "baseline_label": baseline_label,
+        "candidate_label": candidate_label,
+        "labels": [baseline_label, candidate_label],
         "fresh_kline": bool(fresh_kline),
         "fresh_signal": bool(fresh_signal),
         "kline_now": kline_now.date(),
         "kline_base": kline_base.date(),
-        "v2": {k: (v.date() if isinstance(v, pd.Timestamp) else v)
-               for k, v in m_v2.items() if k not in ("ic_series", "hit_series")},
-        "rt30": {k: (v.date() if isinstance(v, pd.Timestamp) else v)
-                 for k, v in m_rt.items() if k not in ("ic_series", "hit_series")},
+        baseline_label: {k: (v.date() if isinstance(v, pd.Timestamp) else v)
+                         for k, v in m_base.items() if k not in ("ic_series", "hit_series")},
+        candidate_label: {k: (v.date() if isinstance(v, pd.Timestamp) else v)
+                          for k, v in m_cand.items() if k not in ("ic_series", "hit_series")},
         "corr": cm,
         "trigger": trigger,
         "drift": drift,
@@ -487,13 +531,15 @@ def run_monitor(close_panel: pd.DataFrame, baseline_csv: Path = BASELINE_CSV,
 
 def print_monitor_summary(result: dict, baseline: pd.DataFrame) -> None:
     """monitor 模式 stdout 摘要。"""
+    bl = result["baseline_label"]
+    cl = result["candidate_label"]
     print("=" * 92)
-    print(f"P12-2 S4 影子跟踪 — 复核（{result['monitor_date']}）")
+    print(f"P12-2 S4 影子跟踪 — 复核（{result['monitor_date']}）[{cl}(候选) vs {bl}(基线)]")
     print("=" * 92)
     print(f"K 线最新: {result['kline_now']} (基线 {result['kline_base']}) | "
           f"新 K 线: {'YES' if result['fresh_kline'] else 'NO'} | "
           f"新信号: {'YES' if result['fresh_signal'] else 'NO'}")
-    for label in ("v2", "rt30"):
+    for label in (bl, cl):
         m = result[label]
         print(f"  [{label:<4}] 滚动IC={m['rolling_ic_63d']:+.4f} (末值 {m['ic_last_date']}) | "
               f"滚动命中率={m['rolling_hit_63d']:.3f} (末值 {m['hit_last_date']})")
@@ -523,11 +569,13 @@ def print_monitor_summary(result: dict, baseline: pd.DataFrame) -> None:
 # ---------------------------------------------------------------------------
 def print_baseline_summary(df: pd.DataFrame, close_panel: pd.DataFrame) -> None:
     """baseline 模式 stdout 摘要。"""
+    baseline_label = df["cache"].iloc[0]  # 第一行 = 基线（build_baseline 顺序保证）
     print("=" * 92)
-    print(f"P12-2 S4 影子跟踪 — 基线快照（{df['baseline_date'].iloc[0]}）")
+    print(f"P12-2 S4 影子跟踪 — 基线快照（{df['baseline_date'].iloc[0]}）[基线={baseline_label}]")
     print("=" * 92)
     print(f"K 线最新日期: {df['kline_max_date'].iloc[0]} | OOS 起点: {df['oos_start'].iloc[0]} | "
           f"窗口: {df['window'].iloc[0]} | 前瞻: {df['horizon'].iloc[0]} | min品种: {df['min_symbols'].iloc[0]}")
+    print(f"[基线标注] 基线缓存 = {df['cache_path'].iloc[0]}（P25-1：v8 生产基线）")
     print(f"\n[缓存概览]")
     for _, r in df.iterrows():
         print(f"  {r['cache']:<6}: {r['n_rows']} 行 | {r['n_dates']} 日 | "
@@ -546,10 +594,24 @@ def print_baseline_summary(df: pd.DataFrame, close_panel: pd.DataFrame) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="P12-2 S4 影子跟踪框架（rt30 vs v2）")
+    parser = argparse.ArgumentParser(
+        description="P12-2 S4 影子跟踪框架（候选 vs 基线；P25-1 默认基线=v8 生产基线）")
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--baseline", action="store_true", help="生成基线快照")
     group.add_argument("--monitor", action="store_true", help="重算对比（数据刷新后）")
+    # P25-1：基线/候选路径可显式切换（向后兼容 v2 对比）；环境变量兜底
+    parser.add_argument("--baseline-a", type=str, default=None,
+                        help=f"基线缓存路径（默认 {DEFAULT_BASELINE_PATH.name}；"
+                             f"可用环境变量 P12_BASELINE_A，CLI 优先）")
+    parser.add_argument("--baseline-b", type=str, default=None,
+                        help=f"候选缓存路径（默认 {DEFAULT_CANDIDATE_PATH.name}；"
+                             f"可用环境变量 P12_BASELINE_B，CLI 优先）")
+    parser.add_argument("--baseline-csv", type=str, default=None,
+                        help=f"基线快照 CSV 路径（默认 {BASELINE_CSV_V8.name}，v8 基线）")
+    parser.add_argument("--baseline-label-a", type=str, default=None,
+                        help=f"基线标签（默认 {DEFAULT_BASELINE_LABEL}；旧 v2 对比传 v2）")
+    parser.add_argument("--baseline-label-b", type=str, default=None,
+                        help=f"候选标签（默认 {DEFAULT_CANDIDATE_LABEL}）")
     parser.add_argument("--window", type=int, default=None, help=f"滚动窗口（默认 {ROLL_WINDOW}）")
     parser.add_argument("--consec", type=int, default=None, help=f"触发连续窗口数（默认 {TRIGGER_CONSEC}）")
     parser.add_argument("--ic-threshold", type=float, default=None, help=f"滚动 IC 门槛（默认 {IC_THRESHOLD}）")
@@ -559,22 +621,35 @@ def main() -> None:
     parser.add_argument("--json", action="store_true", help="stdout 末尾输出 JSON 结果块")
     args = parser.parse_args()
 
-    # 显式解析覆盖参数（None → 模块常量）；所有覆盖值通过函数参数显式透传，
-    # 不使用 globals() 修改（默认参数在函数定义期绑定，全局修改会静默失效）。
+    # 显式解析覆盖参数（None → 模块常量/环境变量/默认值）；所有覆盖值通过
+    # 函数参数显式透传，不使用 globals() 修改（默认参数在函数定义期绑定，
+    # 全局修改会静默失效）。
     window = ROLL_WINDOW if args.window is None else args.window
     consec = TRIGGER_CONSEC if args.consec is None else args.consec
     ic_threshold = IC_THRESHOLD if args.ic_threshold is None else args.ic_threshold
     corr_alert = CORR_ALERT if args.corr_alert is None else args.corr_alert
     corr_watch_delta = CORR_WATCH_DELTA if args.corr_watch_delta is None else args.corr_watch_delta
 
+    # P25-1 路径/标签解析：CLI > 环境变量 > 模块默认（v8 基线 / rt30 候选）
+    baseline_path = Path(args.baseline_a) if args.baseline_a else \
+        Path(os.environ.get("P12_BASELINE_A", str(DEFAULT_BASELINE_PATH)))
+    candidate_path = Path(args.baseline_b) if args.baseline_b else \
+        Path(os.environ.get("P12_BASELINE_B", str(DEFAULT_CANDIDATE_PATH)))
+    baseline_csv = Path(args.baseline_csv) if args.baseline_csv else BASELINE_CSV_V8
+    baseline_label = args.baseline_label_a if args.baseline_label_a else DEFAULT_BASELINE_LABEL
+    candidate_label = args.baseline_label_b if args.baseline_label_b else DEFAULT_CANDIDATE_LABEL
+
     t0 = time.time()
     close_panel = load_close_panel()
-    baseline_exists = BASELINE_CSV.exists()
+    baseline_exists = baseline_csv.exists()
 
     if args.baseline or (not args.monitor and not baseline_exists):
-        df = build_baseline(close_panel, window=window)
+        df = build_baseline(close_panel, baseline_csv=baseline_csv,
+                            baseline_path=baseline_path, candidate_path=candidate_path,
+                            baseline_label=baseline_label, candidate_label=candidate_label,
+                            window=window)
         print_baseline_summary(df, close_panel)
-        print(f"\n[OK] 基线快照 → {BASELINE_CSV} | 耗时 {time.time() - t0:.1f}s")
+        print(f"\n[OK] 基线快照（{baseline_label} 基线） → {baseline_csv} | 耗时 {time.time() - t0:.1f}s")
         if args.json:
             print("\n===JSON===")
             print(json.dumps({"mode": "baseline",
@@ -582,7 +657,10 @@ def main() -> None:
                              ensure_ascii=False, default=str))
         return
 
-    result = run_monitor(close_panel, window=window, consec=consec,
+    result = run_monitor(close_panel, baseline_csv=baseline_csv,
+                         baseline_path=baseline_path, candidate_path=candidate_path,
+                         baseline_label=baseline_label, candidate_label=candidate_label,
+                         window=window, consec=consec,
                          ic_threshold=ic_threshold, corr_alert=corr_alert,
                          corr_watch_delta=corr_watch_delta)
     print(f"\n[OK] 复核完成 | 耗时 {time.time() - t0:.1f}s")
