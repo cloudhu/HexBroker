@@ -49,60 +49,75 @@ def _business_days(a: date, b: date) -> int:
 
 
 class SignalEngine:
-    """v8 信号读取 + 新鲜度检测 + 技术指标兜底。"""
+    """多信号源级联读取 + 新鲜度检测 + 技术指标兜底。
+
+    - 信号源（按优先序）：主源（如 tail_ext，覆盖至最新）→ 兜底源（如 v8 生产基线）→ 技术指标。
+    - 新鲜度检测：信号日距当前交易日的距离超过阈值 → 标记过期（有持仓仅风控 / 无持仓禁开+告警，§8.2）。
+    - 技术指标兜底（c0 或全部缓存信号缺失时）：双均线 + ATR 通道（§4.3 决策建议）。
+    """
 
     def __init__(
         self,
-        cache_path: str | Path,
+        cache_path: str | Path | None = None,
+        cache_paths: list[str | Path] | None = None,
         freshness_threshold_days: int = 5,
         fast_ma: int = 5,
         slow_ma: int = 20,
         atr_window: int = 14,
         atr_mult: float = 1.5,
     ) -> None:
-        self._cache_path = Path(cache_path)
+        # 多源级联：cache_path 单参数向后兼容（等价 cache_paths=[cache_path]）；显式 cache_paths 优先
+        if cache_paths:
+            self._paths = [Path(p) for p in cache_paths]
+        elif cache_path:
+            self._paths = [Path(cache_path)]
+        else:
+            raise ValueError("SignalEngine 至少需要一个信号缓存路径")
         self._freshness_threshold = int(freshness_threshold_days)
         self._fast_ma = int(fast_ma)
         self._slow_ma = int(slow_ma)
         self._atr_window = int(atr_window)
         self._atr_mult = float(atr_mult)
-        self._cache: pd.DataFrame = self._load_cache()
+        self._caches: list[pd.DataFrame] = [self._load_cache(p) for p in self._paths]
 
-    def _load_cache(self) -> pd.DataFrame:
-        """读取 v8 信号缓存并规范化列/类型；缺失时抛 FileNotFoundError（启动期致命）。"""
-        if not self._cache_path.exists():
-            raise FileNotFoundError(f"信号缓存缺失：{self._cache_path}")
-        df = pd.read_parquet(self._cache_path)
+    def _load_cache(self, cache_path: Path) -> pd.DataFrame:
+        """读取信号缓存并规范化列/类型；缺失时抛 FileNotFoundError（启动期致命）。"""
+        if not cache_path.exists():
+            raise FileNotFoundError(f"信号缓存缺失：{cache_path}")
+        df = pd.read_parquet(cache_path)
         df["ts"] = pd.to_datetime(df["ts"]).dt.tz_localize(None)
         df = df.sort_values(["symbol", "ts"]).reset_index(drop=True)
         return df
 
     # ------------------------------------------------------------------
-    # 主信号
+    # 主信号（多源级联）
     # ------------------------------------------------------------------
     def latest_signal(self, symbol: str, asof: Any = None) -> Optional[SignalFrame]:
-        """取 ``symbol`` 在 ``asof`` 之前（含）最新的 v8 信号。
+        """按优先序取 ``symbol`` 在 ``asof`` 之前（含）最新的信号。
 
-        - 无信号 → None（调用方走技术兜底 / 禁开新仓）。
+        - 全部源无信号 → None（调用方走技术兜底 / 禁开新仓）。
         - 有信号但过期（freshness_days > 阈值）→ ``is_effective=False`` 且 source 标注。
+        - ``source`` 标注信号源（engine_a=主源 / engine_a_fbN=第 N 兜底源），供审计。
         """
         asof_dt = pd.Timestamp(asof).tz_localize(None) if asof is not None else pd.Timestamp.now()
-        sub = self._cache[self._cache["symbol"] == symbol]
-        sub = sub[sub["ts"] <= asof_dt]
-        if sub.empty:
-            return None
-        row = sub.iloc[-1]
-        fd = self.freshness_days(symbol, asof_dt, row["ts"])
-        effective = bool(row["is_effective"]) and fd <= self._freshness_threshold
-        return SignalFrame(
-            symbol=symbol,
-            ts=pd.Timestamp(row["ts"]).to_pydatetime(),
-            p_up=float(row["p_up"]),
-            exp_ret=float(row["exp_ret"]),
-            is_effective=effective,
-            source="engine_a",
-            freshness_days=fd,
-        )
+        for i, df in enumerate(self._caches):
+            sub = df[df["symbol"] == symbol]
+            sub = sub[sub["ts"] <= asof_dt]
+            if sub.empty:
+                continue
+            row = sub.iloc[-1]
+            fd = self.freshness_days(symbol, asof_dt, row["ts"])
+            effective = bool(row["is_effective"]) and fd <= self._freshness_threshold
+            return SignalFrame(
+                symbol=symbol,
+                ts=pd.Timestamp(row["ts"]).to_pydatetime(),
+                p_up=float(row["p_up"]),
+                exp_ret=float(row["exp_ret"]),
+                is_effective=effective,
+                source="engine_a" if i == 0 else f"engine_a_fb{i}",
+                freshness_days=fd,
+            )
+        return None
 
     def freshness_days(self, symbol: str, asof: Any, sig_ts: Any = None) -> int:
         """信号新鲜度（交易日数）。无信号返回超大值。"""
@@ -115,13 +130,19 @@ class SignalEngine:
         return _business_days(a, b)
 
     def has_symbol(self, symbol: str) -> bool:
-        return symbol in set(self._cache["symbol"].unique())
+        return any(symbol in set(df["symbol"].unique()) for df in self._caches)
 
     def cache_latest_ts(self, symbol: str) -> Optional[datetime]:
-        sub = self._cache[self._cache["symbol"] == symbol]
-        if sub.empty:
-            return None
-        return pd.Timestamp(sub["ts"].max()).to_pydatetime()
+        """跨全部源取最新信号时间戳（取所有源中的最大值）。"""
+        latest: Optional[pd.Timestamp] = None
+        for df in self._caches:
+            sub = df[df["symbol"] == symbol]
+            if sub.empty:
+                continue
+            ts = pd.Timestamp(sub["ts"].max())
+            if latest is None or ts > latest:
+                latest = ts
+        return latest.to_pydatetime() if latest is not None else None
 
     # ------------------------------------------------------------------
     # 技术指标兜底（双均线 + ATR 通道）

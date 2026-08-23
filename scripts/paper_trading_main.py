@@ -47,9 +47,12 @@ def _load_paper_config(config_path: str) -> Any:
 
 def _validate(paper_cfg: Any, symbols: list[str]) -> None:
     """启动期致命校验：信号缓存存在 / 品种配置合法 / 节假日表加载。"""
-    cache = Path(paper_cfg.get("signal_cache", "artifacts/signals_cache18_grouped_v8.parquet"))
-    if not cache.exists():
-        raise FileNotFoundError(f"信号缓存缺失：{cache}（请确认 artifacts/ 完整）")
+    # 多信号源级联（signal_caches 列表优先；兼容旧单键 signal_cache）
+    caches = paper_cfg.get("signal_caches") or [paper_cfg.get("signal_cache", "artifacts/signals_cache18_grouped_v8.parquet")]
+    for cache in caches:
+        cache = Path(cache)
+        if not cache.exists():
+            raise FileNotFoundError(f"信号缓存缺失：{cache}（请确认 artifacts/ 完整）")
     if not symbols:
         raise ValueError("paper.symbols 为空，至少配置一个品种")
     for sym in symbols:
@@ -89,9 +92,9 @@ def build_components(paper_cfg: Any, offline: bool = False) -> dict[str, Any]:
         offline=offline,
     )
 
-    # 信号
+    # 信号（多源级联：tail_ext 新鲜优先 + v8 生产兜底）
     signals = SignalEngine(
-        cache_path=paper_cfg.get("signal_cache"),
+        cache_paths=paper_cfg.get("signal_caches") or [paper_cfg.get("signal_cache")],
         freshness_threshold_days=int(paper_cfg.get("freshness_threshold_days", 5)),
         **dict(paper_cfg.get("technical", {}) or {}),
     )
