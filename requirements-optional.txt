@@ -6,6 +6,8 @@ vnpy_ctp
 mlflow
 pytorch-lightning
 optuna-dashboard
-torch>=2.1,<2.6
+torch>=2.1,<3
 stable-baselines3>=2.3,<2.7
 sb3-contrib>=2.3
+gymnasium>=0.29,<1.1
+

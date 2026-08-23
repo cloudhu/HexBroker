@@ -24,14 +24,15 @@ dependencies = [
     "loguru>=0.7",
     "rich>=13",
     "tqdm>=4.67",
-    "gymnasium>=0.29,<1.1",
     "lightgbm>=4.5,<5",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
-torch = ["torch>=2.1,<2.6"]
-sb3 = ["stable-baselines3>=2.3,<2.7", "sb3-contrib>=2.3"]
+# torch 上限 <3：env 实测 torch 2.11（RTX 5070 底座）跑 Kronos 微调正常，旧 <2.6 上限过时
+torch = ["torch>=2.1,<3"]
+# gymnasium 为 stable-baselines3 传递依赖（RL 环境为自研 futures_env，不直接引用）
+sb3 = ["stable-baselines3>=2.3,<2.7", "sb3-contrib>=2.3", "gymnasium>=0.29,<1.1"]
 optional = ["pyqlib", "rqalpha", "vnpy", "mlflow"]
 
 [tool.setuptools]
