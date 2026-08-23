@@ -434,9 +434,9 @@ def build_summary(date_str: str, freshness: dict, engine_a: dict, combo: dict,
     lines.append("")
     lines.append("## 4. 运行日志")
     lines.append("")
-    lines.append(f"- 基差合并日志: artifacts/p23_basis_update.log（--update-data 时）")
+    lines.append("- 基差合并日志: artifacts/p23_basis_update.log（--update-data 时）")
     lines.append(f"- 计划落盘: {PLAN_OUT_DIR.relative_to(ROOT)}/{date_str}_sentinel2_plan.json/csv")
-    lines.append(f"- 入账日志: artifacts/p22_apply_date_test.log（p17 --apply-date 追加）")
+    lines.append("- 入账日志: artifacts/p22_apply_date_test.log（p17 --apply-date 追加）")
     lines.append("")
     return "\n".join(lines)
 

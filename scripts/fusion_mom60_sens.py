@@ -6,15 +6,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import numpy as np
-import pandas as pd
 
 from hexbroker.backtest.cost import CostModel
-from hexbroker.backtest.engine import BacktestEngine
-from hexbroker.evaluation.metrics import compute_metrics
 from scripts.combo_validation import OOS_START
 from scripts.fusion_signals import build_momentum, run_fusion
-from scripts.monitor_adaptive_exposure import CONTRACTS, NOTIONAL_FRAC, build_rolling_spread, build_signals, scale_for
+from scripts.monitor_adaptive_exposure import CONTRACTS, build_rolling_spread, build_signals, scale_for
 
 COST = CostModel(
     fee_open=0.00005, fee_close=0.00005, fee_close_today=0.00010,

@@ -17,7 +17,6 @@ import numpy as np
 import pandas as pd
 
 from hexbroker.config import load_config
-from hexbroker.data.schema import BarFrame
 from hexbroker.feature import build_features
 from scripts.ablate_features import align_global_to_inner, load_best_params, load_global_close
 from scripts.build_signals18 import SYMBOLS18

@@ -25,7 +25,7 @@ from hexbroker.config import load_config
 from hexbroker.evaluation.metrics import compute_metrics
 from scripts.build_signals18 import CONTRACTS18, SYMBOLS18
 from scripts.combo_validation import OOS_START
-from scripts.eval_signals18 import build_rolling_spread18, load_prices18, load_sig18_sym_close
+from scripts.eval_signals18 import build_rolling_spread18, load_prices18
 
 CACHE = "artifacts/signals_cache18_grouped.parquet"  # v1 等价（18 品种）
 DROP_P0 = [s for s in SYMBOLS18 if s != "p0"]

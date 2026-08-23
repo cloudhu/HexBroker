@@ -593,7 +593,7 @@ def stage_parse(persisted: str, sym_arg: str, seg: str,
             exp = planned[0].get("expected_days")
             print(f"[PARSE] 计划预期 {exp} 天，本次解析 {len(new_df)} 行")
             if len(new_df) < int(exp or 0):
-                print(f"[WARN] 行数 < 预期，可能被网关截断；可重扫 plan 得到剩余子段")
+                print("[WARN] 行数 < 预期，可能被网关截断；可重扫 plan 得到剩余子段")
         else:
             print(f"[WARN] 计划中未找到 {sym0} {seg}（仍按传入区间处理）")
 

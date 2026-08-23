@@ -121,7 +121,7 @@ def main() -> None:
     common = ret_a.index.intersection(ret_b.index)
     ra, rb = ret_a[common], ret_b[common]
     corr = ra.corr(rb)
-    print(f"\n--- 相关性 ---")
+    print("\n--- 相关性 ---")
     print(f"  共同交易日: {len(common)} | 日收益相关性: {corr:.3f}")
 
     # 组合

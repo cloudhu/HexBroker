@@ -16,14 +16,11 @@ import numpy as np
 import pandas as pd
 
 from hexbroker.backtest.cost import CostModel
-from hexbroker.backtest.engine import BacktestEngine
 from hexbroker.config import load_config
-from hexbroker.evaluation.metrics import compute_metrics
-from scripts.build_signals18 import CONTRACTS18, SYMBOLS18
+from scripts.build_signals18 import CONTRACTS18
 from scripts.qa_p19_independent_verify import (
     INITIAL_CAPITAL,
     OOS_START,
-    _seg_sharpe,
     combo_production,
     engine_a_selection_ind,
     engine_a_targets_ind,

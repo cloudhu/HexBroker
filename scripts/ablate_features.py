@@ -27,7 +27,6 @@ import sys
 from pathlib import Path
 from typing import Any, Optional
 
-import numpy as np
 import pandas as pd
 
 _ROOT = Path(__file__).resolve().parent.parent
@@ -45,7 +44,6 @@ from scripts.refine_lightgbm_champion import (  # noqa: E402
     FREQ,
     DATA_START,
     DATA_END,
-    SEARCH_SPLITTER,
     build_source_plan,
     fetch_with_failover,
     compute_realized_returns,
@@ -100,7 +98,6 @@ GLOBAL_CANDIDATES = [
 
 # 外盘加载/对齐逻辑下沉至 hexbroker 供生产复用（见 hexbroker/feature/global_ref.py）
 from hexbroker.feature.global_ref import (  # noqa: E402
-    GLOBAL_DATA_DIR,
     align_global_to_inner,
     load_global_close,
 )

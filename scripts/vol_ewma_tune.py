@@ -19,14 +19,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import numpy as np
 import pandas as pd
 
-from hexbroker.backtest.cost import CostModel
-from hexbroker.backtest.engine import BacktestEngine
-from hexbroker.config import load_config
-from hexbroker.evaluation.metrics import compute_metrics
-from scripts.build_signals18 import CONTRACTS18, SYMBOLS18
-from scripts.combo_validation import OOS_START
+from scripts.build_signals18 import SYMBOLS18
 from scripts.drawdown_control import (
-    COST, DROP_P0, INIT_CAP, base_targets, load_prices18, load_signals, run_bt,
+    DROP_P0, base_targets, load_prices18, load_signals, run_bt,
 )
 
 TARGET_VOL = 0.175

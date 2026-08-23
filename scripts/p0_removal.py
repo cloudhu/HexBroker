@@ -99,7 +99,7 @@ def main() -> None:
     # D 只保留最强正 IC（hc/m/i/j/ta/zn/y 等前 8）
     POS8 = ["hc0", "m0", "i0", "j0", "ta0", "zn0", "y0", "ni0"]
     sig_d = sig[sig["symbol"].isin(POS8)].copy()
-    run(sig_d, prices, scale, f"D 仅正IC top8")
+    run(sig_d, prices, scale, "D 仅正IC top8")
 
     print("\n[报告] 见 deliverables/software-hexfutures-ai/p0-removal-2026-08-18.md")
 

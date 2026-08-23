@@ -31,7 +31,6 @@ R7 验证使用 ``load_config()`` 默认：horizon=5, n_mc_samples=30, LightGBM 
 
 from __future__ import annotations
 
-import gc
 import json
 import math
 import os
@@ -56,7 +55,6 @@ from hexbroker.data.sources.sina_source import SinaSource
 from hexbroker.feature import build_features
 from hexbroker.data.splitter import WalkForwardSplitter
 from hexbroker.forecast.base import build_windows
-from hexbroker.forecast.baselines import LightGBMForecast
 from hexbroker.forecast.calibration import calibrate_signals
 
 # ---------------------------------------------------------------------------
@@ -900,7 +898,7 @@ def main() -> None:
     imp = aggregate_importances(wf_base)
     print(f"[BASE] dir_acc={_fmt_pct(gate_base['direction_accuracy'])} "
           f"rank_ic={gate_base['rank_ic']:.4f} coverage={_fmt_pct(gate_base['coverage'])}")
-    print(f"[IMPORT] top5: " + ", ".join(
+    print("[IMPORT] top5: " + ", ".join(
         f"{r['feature']}({r['importance']*100:.1f}%)" for r in imp.get("ranked_features", [])[:5]
     ))
 

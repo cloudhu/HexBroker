@@ -8,7 +8,6 @@ IEF = iShares 7-10 Year Treasury Bond ETF，久期最贴近 10Y 收益率的价�
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 
 import pandas as pd

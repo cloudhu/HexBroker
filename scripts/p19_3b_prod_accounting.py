@@ -54,18 +54,15 @@ from hexbroker.config import load_config
 from hexbroker.evaluation.metrics import compute_metrics
 from scripts.build_signals18 import CONTRACTS18, SYMBOLS18
 from scripts.p2_basis_backtest import INITIAL_CAPITAL, load_prices, load_basis_panel
-from scripts.p3_combo_backtest import OOS_START, engine_b_targets
+from scripts.p3_combo_backtest import OOS_START
 from scripts.p5_engineA_cross_section import (
     TOP_K,
-    combo_stats_row,
     engine_a_selection,
-    seg_sharpe,
 )
 from scripts.p19_rebuild_config import (
     ART,
     BASE_GROUP_MAP,
     V8_PATH,
-    _align,
     _prod_capacity_row,
 )
 

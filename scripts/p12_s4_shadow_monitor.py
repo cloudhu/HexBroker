@@ -77,7 +77,6 @@ ROOT = Path(__file__).resolve().parents[1]
 os.chdir(ROOT)
 sys.path.insert(0, str(ROOT))
 
-import numpy as np
 import pandas as pd
 from scipy.stats import spearmanr
 
@@ -576,21 +575,21 @@ def print_baseline_summary(df: pd.DataFrame, close_panel: pd.DataFrame) -> None:
     print(f"K 线最新日期: {df['kline_max_date'].iloc[0]} | OOS 起点: {df['oos_start'].iloc[0]} | "
           f"窗口: {df['window'].iloc[0]} | 前瞻: {df['horizon'].iloc[0]} | min品种: {df['min_symbols'].iloc[0]}")
     print(f"[基线标注] 基线缓存 = {df['cache_path'].iloc[0]}（P25-1：v8 生产基线）")
-    print(f"\n[缓存概览]")
+    print("\n[缓存概览]")
     for _, r in df.iterrows():
         print(f"  {r['cache']:<6}: {r['n_rows']} 行 | {r['n_dates']} 日 | "
               f"{r['coverage_start']} ~ {r['coverage_end']} | 日均 {r['avg_symbols_per_day']:.1f} 品种 | "
               f"OOS {r['oos_n_dates']} 日 (IC日 {r['oos_ic_days']})")
-    print(f"\n[滚动指标末值 (63窗滚动均值, OOS)]")
+    print("\n[滚动指标末值 (63窗滚动均值, OOS)]")
     for _, r in df.iterrows():
         print(f"  {r['cache']:<6}: 滚动截面IC={r['rolling_ic_63d']:+.4f} (末值 {r['ic_last_date']}) | "
               f"滚动命中率={r['rolling_hit_63d']:.3f} (末值 {r['hit_last_date']})")
-    print(f"\n[信号相关性 (漂移监测核心)]")
+    print("\n[信号相关性 (漂移监测核心)]")
     r = df.iloc[0]
     print(f"  池化63窗 Spearman = {r['corr_pooled_63d']:.4f} (n_pairs={r['corr_pooled_n_pairs']}) | "
           f"日截面滚动均值 = {r['corr_daily_rolling_63d']:.4f} | 末值 {r['corr_last_date']}")
-    print(f"\n[如实说明] 当前无 fresh-OOS（2026-08-18 后）数据：基线快照 = 现有数据最近滚动窗口表现；"
-          f"复核触发待数据刷新（K 线刷新 / 缓存重建）")
+    print("\n[如实说明] 当前无 fresh-OOS（2026-08-18 后）数据：基线快照 = 现有数据最近滚动窗口表现；"
+          "复核触发待数据刷新（K 线刷新 / 缓存重建）")
 
 
 def main() -> None:

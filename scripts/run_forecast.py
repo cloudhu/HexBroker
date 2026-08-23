@@ -67,7 +67,7 @@ def main() -> None:
     result = trainer.run(bars, features)
 
     print("=" * 60)
-    print(f"预测训练完成")
+    print("预测训练完成")
     print(f"  模型        : {model_name}")
     print(f"  model_id    : {result.model_id}")
     print(f"  walk-forward: {result.n_folds} 折")

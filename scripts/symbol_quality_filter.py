@@ -20,9 +20,8 @@ import pandas as pd
 
 from scipy import stats
 
-from scripts.build_signals18 import CONTRACTS18, SYMBOLS18
+from scripts.build_signals18 import SYMBOLS18
 from scripts.eval_signals18 import build_rolling_spread18, load_prices18, load_sig18_sym_close, run_cfg
-from scripts.combo_validation import OOS_START
 
 
 def add_realized5(sig: pd.DataFrame) -> pd.DataFrame:

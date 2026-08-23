@@ -117,7 +117,7 @@ def main() -> None:
     eq = pf.equity_curve  # Series: 索引=时间戳, 值=权益
     metrics = compute_metrics(eq, freq="daily")
     print()
-    print(f"== 引擎 B 回测结果（全样本） ==")
+    print("== 引擎 B 回测结果（全样本） ==")
     print(f"  总收益: {metrics.total_return*100:+.2f}%")
     print(f"  年化收益: {metrics.annual_return*100:+.2f}%")
     print(f"  年化波动: {metrics.volatility*100:+.2f}%")

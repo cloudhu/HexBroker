@@ -159,7 +159,7 @@ def main() -> None:
                             "strict_oos_ic": strict_arr.mean() if len(strict_arr) else np.nan})
         mono = monotonicity_ts(oos_seg, factor, 10)
         if not mono.empty:
-            print(f"  OOS h=10 品种内分位单调性 (Q1→Q5 平均未来收益): "
+            print("  OOS h=10 品种内分位单调性 (Q1→Q5 平均未来收益): "
                   + " | ".join(f"Q{q}:{mono.loc[q,'mean']:+.4f}" for q in mono.index))
         print()
 

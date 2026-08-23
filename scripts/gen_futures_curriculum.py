@@ -309,6 +309,6 @@ with open(os.path.join(BASE_DIR, "课程规划.md"), "w", encoding="utf-8") as f
 
 print(f"✅ 课程规划已生成：{len(curriculum)} 期，8 大模块")
 print(f"   目录：{BASE_DIR}")
-print(f"   - curriculum.json（机读）")
-print(f"   - 课程规划.md（人读）")
-print(f"   - progress.json（进度，已初始化 current_issue=1）")
+print("   - curriculum.json（机读）")
+print("   - 课程规划.md（人读）")
+print("   - progress.json（进度，已初始化 current_issue=1）")

@@ -567,7 +567,7 @@ def main() -> None:
         g_delta = g_best["oos_sharpe"] - rows[0]["oos_sharpe"]
         g_verdict = "PASS(优于基线)" if g_delta > 0 else "NEUTRAL(不优于基线)"
         print(f"  [真实修复选择] IS 最优修复: {g_key} | OOS Sharpe 增量 vs 基线 S2: {g_delta:+.3f} → {g_verdict}")
-    print(f"  （注意：方案选择依据 IS 段；OOS 仅终裁，最终推荐需综合组合层表现）")
+    print("  （注意：方案选择依据 IS 段；OOS 仅终裁，最终推荐需综合组合层表现）")
     print(f"\n[DONE] 总耗时 {time.time()-t_start:.1f}s")
 
 

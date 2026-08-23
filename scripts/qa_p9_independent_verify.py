@@ -278,7 +278,7 @@ def main() -> None:
     print(f"  引擎 A cap0.5: 全样本 Sharpe={m_a_cap.sharpe:.3f} | "
           f"OOS Sharpe={m_a_cap_oos.sharpe:.3f} OOS 复利={m_a_cap_oos.total_return*100:+.2f}% "
           f"OOS MaxDD={m_a_cap_oos.max_drawdown*100:.1f}%")
-    print(f"  （工程师声明 0.646 / +9.01%）")
+    print("  （工程师声明 0.646 / +9.01%）")
 
     sig_cap = _load_signals(V8, prices)
     sig_cap["selected"] = _apply_group_cap(sig_cap, CAP)

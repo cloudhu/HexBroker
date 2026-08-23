@@ -50,7 +50,6 @@ import pandas as pd
 
 from hexbroker.backtest.cost import CostModel
 from hexbroker.config import load_config
-from hexbroker.evaluation.metrics import compute_metrics
 from scripts.build_signals18 import CONTRACTS18
 from scripts.p2_basis_backtest import INITIAL_CAPITAL, load_prices
 from scripts.p3_combo_backtest import (

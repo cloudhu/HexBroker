@@ -68,8 +68,8 @@ def merge_segments(metric: str, sym: str) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser(description="解析 DeepView result[] 持久化 → 分品种 parquet")
     ap.add_argument("input", type=Path, nargs="?", help="持久化 JSON 文件")
-    ap.add_argument("--metric", choices=["basis", "warehouse"], required="--merge" not in sys.argv and not "--merge" in sys.argv)
-    ap.add_argument("--seg", choices=["2018_2022", "2022_2026"], required="--merge" not in sys.argv and not "--merge" in sys.argv)
+    ap.add_argument("--metric", choices=["basis", "warehouse"], required="--merge" not in sys.argv and "--merge" not in sys.argv)
+    ap.add_argument("--seg", choices=["2018_2022", "2022_2026"], required="--merge" not in sys.argv and "--merge" not in sys.argv)
     ap.add_argument("--merge", action="store_true", help="合并全部已落盘分段")
     args = ap.parse_args()
 

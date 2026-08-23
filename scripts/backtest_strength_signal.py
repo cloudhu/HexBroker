@@ -28,8 +28,7 @@ from hexbroker.backtest.cost import CostModel  # noqa: E402
 from hexbroker.evaluation.metrics import compute_metrics  # noqa: E402
 from scripts.refine_lightgbm_champion import (  # noqa: E402
     SYMBOLS, FREQ, DATA_START, DATA_END,
-    build_source_plan, fetch_with_failover, compute_realized_returns,
-    walk_forward_lightgbm,
+    build_source_plan, fetch_with_failover, walk_forward_lightgbm,
 )
 from scripts.ablate_features import (  # noqa: E402
     load_best_params, load_global_close, align_global_to_inner,

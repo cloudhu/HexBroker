@@ -54,8 +54,7 @@ from hexbroker.rl.sentinel_env import SentinelTradingEnv  # noqa: E402
 from hexbroker.rl.agent import train_ppo  # noqa: E402
 from hexbroker.evaluation.metrics import compute_metrics  # noqa: E402
 from scripts.refine_lightgbm_champion import (  # noqa: E402
-    FREQ, DATA_START, DATA_END,
-    build_source_plan, fetch_with_failover, walk_forward_lightgbm,
+    FREQ, DATA_START, walk_forward_lightgbm,
 )
 
 # 品种池扩展（2026-08-17）：au/ag/m（sina+PandaData 拼接）+ cu/rb/i（PandaData 全历史）
@@ -246,7 +245,6 @@ def main() -> None:
     env_tr = make_env(tr_sig, prices, cfg0, best["w"])
     policy, _ = train_ppo(env_tr, total_timesteps=30_000, seed=best["seed"])
     env_oos = make_env(oos_sig, prices, cfg0, best["w"])  # OOS = 2024-07-18 起（真新数据，完全未参与选择）
-    from hexbroker.backtest.engine import BacktestEngine
     from hexbroker.backtest.cost import CostModel
     _CONTRACTS = {"au0": {"multiplier": 1000.0, "min_tick": 0.02}, "ag0": {"multiplier": 15.0, "min_tick": 0.01}, "m0": {"multiplier": 10.0, "min_tick": 1.0},
                   "cu0": {"multiplier": 5.0, "min_tick": 10.0}, "rb0": {"multiplier": 10.0, "min_tick": 1.0}, "i0": {"multiplier": 100.0, "min_tick": 0.5}}

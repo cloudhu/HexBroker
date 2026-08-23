@@ -27,7 +27,7 @@ import pandas as pd
 from hexbroker.backtest.cost import CostModel
 from hexbroker.backtest.engine import BacktestEngine
 from hexbroker.evaluation.metrics import compute_metrics
-from scripts.combo_validation import OOS_START, _trend_ok
+from scripts.combo_validation import OOS_START
 from scripts.monitor_adaptive_exposure import CONTRACTS, NOTIONAL_FRAC, build_rolling_spread, build_signals, scale_for
 
 COST = CostModel(

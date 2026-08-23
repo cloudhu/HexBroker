@@ -40,7 +40,7 @@ from hexbroker.backtest.engine import BacktestEngine
 from hexbroker.config import load_config
 from hexbroker.evaluation.metrics import compute_metrics
 from scripts.build_signals18 import CONTRACTS18, SYMBOLS18
-from scripts.p2_basis_backtest import INITIAL_CAPITAL, load_basis_panel, load_prices
+from scripts.p2_basis_backtest import INITIAL_CAPITAL, load_prices
 from scripts.p3_combo_backtest import BASIS_THR, BASIS_WIN, engine_b_targets
 
 ART = ROOT / "artifacts"

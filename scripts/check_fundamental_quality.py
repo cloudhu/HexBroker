@@ -5,15 +5,12 @@
 """
 from __future__ import annotations
 
-import glob
-import os
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import pandas as pd
-import numpy as np
 
 FUND = Path("data/raw/fundamental")
 KLINE = Path("data/raw/processed")
@@ -77,7 +74,7 @@ def main() -> None:
     pd.set_option("display.max_colwidth", 60)
     print(out.to_string(index=False))
     print()
-    print(f"== 汇总 ==")
+    print("== 汇总 ==")
     print(out.groupby("metric")["rows"].sum())
     print(f"平均对齐率: {out[out['align%']>0]['align%'].mean():.1f}%")
 

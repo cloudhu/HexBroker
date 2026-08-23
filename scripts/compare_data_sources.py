@@ -159,7 +159,7 @@ def main() -> None:
 
     out = OUT_DIR / f"data-source-compare-{REPORT_DATE}.md"
     lines = ["# 数据源对比报告（MCP 基准 vs pytdx/sina）", "",
-             f"- 区间：{args.start} ~ {args.end}", f"- 基准：data/raw/processed（MCP 已验证）", ""]
+             f"- 区间：{args.start} ~ {args.end}", "- 基准：data/raw/processed（MCP 已验证）", ""]
     lines += ["| 标的 | 源 | 基准根数 | 源根数 | 共同 | 缺失 | close对齐(<0.1%) | 最大相对误差 | volume相关 | 判定 |", "|---|---|---|---|---|---|---|---|---|---|"]
     for r in rows:
         if r.get("error"):

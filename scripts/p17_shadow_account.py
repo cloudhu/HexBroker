@@ -85,7 +85,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -539,7 +539,7 @@ def generate_plans(cfg, prices: pd.DataFrame, basis: pd.DataFrame,
                    dates: list[pd.Timestamp], cache_dir: Path = PLANS_CACHE_DIR) -> dict:
     """逐日生成交易计划并缓存（首次运行；二次运行用 --reuse-plans 复用）。"""
     cache_dir.mkdir(parents=True, exist_ok=True)
-    print(f"  [预计算] 引擎 A/B 全历史 signals（一次性）...")
+    print("  [预计算] 引擎 A/B 全历史 signals（一次性）...")
     pre = precompute_signals(cfg, prices, basis)
     print(f"  [生成] 逐日构建 {len(dates)} 份交易计划...")
     plans: dict[str, dict] = {}

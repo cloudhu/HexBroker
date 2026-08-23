@@ -13,7 +13,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import numpy as np
 import pandas as pd
 
 CONTRACTS18 = {
@@ -59,7 +58,6 @@ def load_bars18() -> pd.DataFrame:
 
 def main() -> None:
     from hexbroker.config import load_config
-    from hexbroker.data.schema import BarFrame
     from hexbroker.feature import build_features
     from scripts.ablate_features import align_global_to_inner, load_best_params, load_global_close
     from scripts.refine_lightgbm_champion import DATA_START, FREQ, walk_forward_lightgbm

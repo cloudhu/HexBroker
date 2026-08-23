@@ -431,7 +431,7 @@ PandaData 已满足期限结构斜率所需数据，无需强推替代源。
     panel.to_csv(ART / "p11_ts_slope_panel.csv", index=False)
     if psdf is not None and not psdf.empty:
         psdf.to_csv(ART / "p11_ts_ic_detail.csv", index=False)
-    print(f"[OK] 面板 → artifacts/p11_ts_slope_panel.csv | IC 明细 → artifacts/p11_ts_ic_detail.csv")
+    print("[OK] 面板 → artifacts/p11_ts_slope_panel.csv | IC 明细 → artifacts/p11_ts_ic_detail.csv")
     print("=" * 100)
     print(f"[DONE] 总耗时 {time.time()-t0:.0f}s")
     print("=" * 100)

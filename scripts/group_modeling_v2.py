@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import numpy as np
 import pandas as pd
 
-from scripts.group_modeling import LOCAL_MAP, build_group_signals
+from scripts.group_modeling import build_group_signals
 
 GROUPS_V2 = {
     "precious": {"syms": ["au0", "ag0"], "global": ["spx", "uup", "t10y"]},

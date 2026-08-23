@@ -31,11 +31,9 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-import numpy as np
 import pandas as pd
 
 from hexbroker.backtest.cost import CostModel
-from hexbroker.backtest.engine import BacktestEngine
 from hexbroker.config import load_config
 from hexbroker.evaluation.metrics import compute_metrics
 from scripts.build_signals18 import CONTRACTS18, SYMBOLS18
@@ -43,9 +41,6 @@ from scripts.p2_basis_backtest import INITIAL_CAPITAL
 from scripts.p3_combo_backtest import OOS_START
 from scripts.qa_p19_independent_verify import (
     GROUP_CAP,
-    GROUP_MAP,
-    V8_PATH,
-    _capped_selection,
     engine_a_selection_ind,
     engine_a_targets_ind,
     engine_b_targets_ind,
@@ -178,7 +173,7 @@ def main() -> None:
     df = pd.DataFrame(results)
     df.to_csv(ROOT / "artifacts" / "p19_qa_round2_verify.csv", index=False,
               encoding="utf-8-sig")
-    print(f"\n[OK] → artifacts/p19_qa_round2_verify.csv")
+    print("\n[OK] → artifacts/p19_qa_round2_verify.csv")
 
     # ---------------- 3. 关键裁决指标 ----------------
     print("\n--- 3. 主推/保守候选对比（M1/M5 双口径）---")

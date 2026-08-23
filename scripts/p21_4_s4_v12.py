@@ -27,10 +27,6 @@ import pandas as pd
 from scripts.p12_s4_shadow_monitor import (
     ART,
     ROLL_WINDOW,
-    HORIZON,
-    OOS_START,
-    MIN_SYMBOLS,
-    TOP_K,
     IC_THRESHOLD,
     TRIGGER_CONSEC,
     HIT_REF,

@@ -5,11 +5,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-import numpy as np
 import pandas as pd
 
 from hexbroker.backtest.cost import CostModel
-from hexbroker.backtest.engine import BacktestEngine
 from hexbroker.config import load_config
 from hexbroker.evaluation.metrics import compute_metrics
 from scripts.build_signals18 import CONTRACTS18

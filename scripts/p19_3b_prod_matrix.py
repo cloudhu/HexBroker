@@ -27,7 +27,6 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-import numpy as np
 import pandas as pd
 
 from hexbroker.backtest.cost import CostModel
@@ -45,7 +44,6 @@ from scripts.p19_rebuild_config import (
     _prod_capacity_row,
 )
 from scripts.p19_3b_prod_accounting import (
-    NF_A,
     engine_a_targets_prod,
     engine_b_targets_notional,
 )

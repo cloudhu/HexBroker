@@ -79,7 +79,6 @@ import pandas as pd
 from hexbroker.backtest.cost import CostModel
 from hexbroker.config import load_config
 from hexbroker.data.splitter import WalkForwardSplitter
-from hexbroker.evaluation.metrics import compute_metrics
 from hexbroker.feature import build_features
 from hexbroker.forecast.calibration import PlattScaler
 from scripts.ablate_features import align_global_to_inner, load_best_params, load_global_close
@@ -90,7 +89,6 @@ from scripts.p2_basis_backtest import INITIAL_CAPITAL, load_prices
 from scripts.p3_combo_backtest import (
     BASIS_THR,
     BASIS_WIN,
-    NOTIONAL_FRAC,
     OOS_START,
     TOP_K,
     engine_b_targets,
@@ -105,7 +103,7 @@ from scripts.p5_engineA_cross_section import (
     engine_a_targets_cs,
     run_engine_row,
 )
-from scripts.p8_3_label_cross_section import IS_END, cs_ic_summary, realized_returns
+from scripts.p8_3_label_cross_section import cs_ic_summary, realized_returns
 from scripts.refine_lightgbm_champion import (
     DATA_START,
     FREQ,
@@ -113,7 +111,6 @@ from scripts.refine_lightgbm_champion import (
     _forward_returns,
     _train_eval_fold,
     _lookback,
-    walk_forward_lightgbm,
 )
 from scripts.sentinel_phase4_evo import load_local_bars
 
@@ -860,7 +857,7 @@ def make_verdict(cal_verify: pd.DataFrame, sizing: pd.DataFrame,
         best = sub.sort_values("oos_sharpe", ascending=False).iloc[0]
         best_rows[f"{variant}__{sel}"] = best
     # 主推荐：v11 p_up 选择下最优 sizing（若存在）
-    keys = [f"v11__p_up", f"v8__exp_ret", f"v11__exp_ret", f"v8__p_up"]
+    keys = ["v11__p_up", "v8__exp_ret", "v11__exp_ret", "v8__p_up"]
     rec_key = next((k for k in keys if k in best_rows), None)
     rec = best_rows[rec_key]
     base_sh = base_a["oos_sharpe"]
@@ -990,7 +987,7 @@ def run_eval() -> None:
             prices, TOP_K, MIN_SYMBOLS_S2, cache_path=path, group_cap=group_cap,
             group_map=group_map, score_col=select_col, sizing="frac",
         )
-        _r, _e, _m, _m_oos, _lr = run_engine_row(cfg, cost, prices, frac_tgt, f"A-frac")
+        _r, _e, _m, _m_oos, _lr = run_engine_row(cfg, cost, prices, frac_tgt, "A-frac")
         frac_oos_ret = _m_oos.total_return if _m_oos else np.nan
         print(f"  [{variant} sel={select_col:<7}] frac 理想口径 OOS 复利 "
               f"{frac_oos_ret*100:+.2f}%（转化率分母）")
