@@ -10,7 +10,7 @@
 | 项 | 状态 |
 |---|---|
 | 全部模块编译 / 导入 | ✅ 通过（90/90） |
-| pytest 全量 | ✅ **315 项全部通过**（90 模块编译/导入 + 305 既有 + 本轮新增 10 个 L7/E3 回归测试） |
+| pytest 全量 | ✅ **315 项全部通过**（305 既有 + 本轮新增 10 个 L7/E3 回归测试；另 90 模块编译/导入检查通过） |
 | 端到端 demo 管线 | ✅ 跑通并生成报告（`artifacts/reports/report_demo_20260823_*.md`） |
 | 依赖安装位置 | ⚠️ **环境缺口**：默认 `python`（managed 3.13.12）未装任何核心依赖，依赖实际在 `envs/default`；`pyproject.toml` 未声明运行依赖，新人按官方说明无法直接复现 |
 
@@ -47,7 +47,7 @@
 | L1 | `data/cleaner.py:48-51` | `winsorize` 用**全样本**分位裁剪 OHLC（未来函数 + 抹真实极值） | 改为 `expanding().quantile` 滚动因果分位裁剪（`clip`） | 全量测试通过 |
 | L2 | `feature/tokenizer.py:29-30,41` | `fit` 用全样本 `nanpercentile`（含未来）；`n_bins<=2` 全输出 `MASK_ID` | **transform 逐行用 pandas `expanding` 仅 [0..i] 历史算分位边界**（零未来函数）；`fit` 仅记列名；`n_bins<4` 抛 `ValueError` | 新增 `tests/test_tokenizer.py`：因果性（增删未来极端值前序 token 不变）+ 边界 + 范围裁剪，4/4 通过 |
 
-> 第二轮修复后：全量 pytest **264/264 通过**；forecast/Kronos 路径测试 36/36 通过；`KronosDataIO.to_token_sequences` 集成冒烟产出合法整数 token 矩阵（range∈[2,63]）。
+> 第二轮修复后：全量 pytest **271/271 通过**；forecast/Kronos 路径测试 36/36 通过；`KronosDataIO.to_token_sequences` 集成冒烟产出合法整数 token 矩阵（range∈[2,63]）。
 
 ---
 
@@ -99,7 +99,7 @@
 
 #### 二-E. P2 Batch B 定点修复（本轮，fresh-eyes 复核 + 回归测试）
 
-> 第五轮修复后：全量 pytest **305/305 通过**（62s），较第四轮 298 新增 **11** 个回归测试（L3×2 / L4×1 / L5×1 / V1×2 / V5×5）。Batch B 5 项均经 fresh-eyes 源码复核确认 + 运行时/机制验证 + 回归测试，未触及研究结论（生产口径 `CONTRACTS18`/`group_cap=0.5` 不变）。
+> 第五轮修复后：全量 pytest **309/309 通过**（62s），较第四轮 298 新增 **11** 个回归测试（L3×2 / L4×1 / L5×1 / V1×2 / V5×5）。Batch B 5 项均经 fresh-eyes 源码复核确认 + 运行时/机制验证 + 回归测试，未触及研究结论（生产口径 `CONTRACTS18`/`group_cap=0.5` 不变）。
 
 | 编号 | 根因（源码实证） | 修复 | 验证 |
 |---|---|---|---|
@@ -113,7 +113,7 @@
 
 #### 二-F. P2 Batch B 收官轮 L7/E3 定点修复（第六轮，fresh-eyes 实证 + 回归测试）
 
-> 第六轮修复后：全量 pytest **315/315 通过**（较第五轮 305 新增 **10** 个回归测试：L7×6 / E3-A×2 / E3-B×2）。L7（数据层主力/市场硬编码）、E3（信号质量/RL 口径）均经 **fresh-eyes 直接读 pytdx 库 parser 源码 + 运行时机制验证 + 区分式回归测试** 确认根因并定点修复，遵循「无证据不翻转」铁律——E3-A 仅把 `is_effective` 纳入工作副本、不设默认阈值硬编码，默认阈下数值与旧默认分支完全一致，未翻转研究结论。
+> 第六轮修复后：全量 pytest **315/315 通过**（较第五轮 305 新增 **10** 个回归测试：L7×7 / E3-A×2 / E3-B×1 函数含 3 断言）。L7（数据层主力/市场硬编码）、E3（信号质量/RL 口径）均经 **fresh-eyes 直接读 pytdx 库 parser 源码 + 运行时机制验证 + 区分式回归测试** 确认根因并定点修复，遵循「无证据不翻转」铁律——E3-A 仅把 `is_effective` 纳入工作副本、不设默认阈值硬编码，默认阈下数值与旧默认分支完全一致，未翻转研究结论。
 
 **L7 — pytdx 主力/市场硬编码（fresh-eyes 实证根因）**
 
@@ -241,7 +241,9 @@ tests/test_cost_multiplier_spec.py      +V5 回归（×5：规格回退/显式�
 ```
 hexbroker/data/sources/pytdx_source.py   L7 跨全市场枚举 + 实时 chicang 选主力(返回 code,market) + position→open_interest 兼容 + 跨市场自动发现
 hexbroker/pipeline.py                    E3-A 工作副本纳入 is_effective(不翻转默认)；E3-B _run_rl 跨全品种 loop + scale 透传阈值基线
-tests/test_pytdx_source.py               +L7 回归（×6：position 读入/兼容 / 跨市场选主力 / chicang 最大 / 自动发现 DCE / 常量）
+tests/test_pytdx_source.py               +L7 回归（×7：position 读入/兼容 / 跨市场选主力 / chicang 最大 / 自动发现 DCE / 常量）
 tests/test_signal_metrics_effective.py   +E3-A 回归（×2：含列生效 / 默认阈下数值不变）
-tests/test_pipeline_rl_caliber.py        +E3-B 回归（×2：全品种 loop / scale 透传）
+tests/test_pipeline_rl_caliber.py        +E3-B 回归（×1 函数含 3 断言：全品种 loop / scale 透传）
 ```
+
+> 勘误：本报告各轮全量数字以最终实测 315/315 为准，个别轮次表述已按 QA fresh-eyes 复核校正。
