@@ -6,7 +6,6 @@ import os
 import tempfile
 
 import numpy as np
-import pytest
 
 from hexbroker.evolution.drift import DriftDetector, psi
 from hexbroker.evolution.examm_engine import evolve

@@ -18,7 +18,7 @@ import pandas as pd
 
 from ..utils.registry import register
 from . import ForecastModel, TrainLog, build_windows
-from ._nets import Adam, CausalConv1D, Linear, ReLU, Sequential, collect_params, gaussian_loss, train_gaussian
+from ._nets import Adam, CausalConv1D, Linear, ReLU, Sequential, collect_params, train_gaussian
 
 
 def _cfg_get(cfg, *keys, default=None):

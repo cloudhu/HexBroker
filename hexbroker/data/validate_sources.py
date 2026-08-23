@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import json
 import sys
-import time
 import traceback
 from datetime import datetime as _dt
 from pathlib import Path
@@ -42,7 +41,6 @@ if _SCRIPT_DIR in sys.path:
     sys.path.remove(_SCRIPT_DIR)
 
 
-import pandas as pd  # noqa: E402
 
 from hexbroker.data.sources.pytdx_source import PytdxSource  # noqa: E402
 from hexbroker.data.sources.sina_source import SinaSource  # noqa: E402
@@ -314,7 +312,7 @@ def build_markdown(report: dict, generated_at: str) -> str:
     L.append("")
     L.append("### 4.2 在环校验（tdx MCP，不与主源争抢）")
     L.append("")
-    L.append("- 定位：**在环校验源**，不进入取数主流程；");
+    L.append("- 定位：**在环校验源**，不进入取数主流程；")
     L.append("- 机制：实时快照（NOW/CLOSE）↔ K 线末值比对，监测数据缺失/漂移；")
     L.append("- 关键约定：期货扩展行情 `setcode=\"30\"`，MCP 须 `target=\"1\"`，`tqFlag=\"0\"` 不复权；")
     L.append("  pytdx 无 `target` 参数，用 `market=30` 等价替代。")

@@ -10,7 +10,6 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from ..constants import SignalDirection
 from ..forecast.threshold import SignalThreshold
 
 

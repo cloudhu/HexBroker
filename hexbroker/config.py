@@ -15,7 +15,6 @@ import json
 from pathlib import Path
 from typing import Any, Optional
 
-import omegaconf
 from omegaconf import DictConfig, OmegaConf
 from pydantic import BaseModel, ConfigDict, Field
 

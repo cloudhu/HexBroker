@@ -10,7 +10,7 @@ MVP 采用通用商品期货时段（多数品种）：
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, time
+from datetime import time
 from typing import Optional
 
 import pandas as pd

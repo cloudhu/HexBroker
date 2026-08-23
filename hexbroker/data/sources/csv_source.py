@@ -10,12 +10,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-import numpy as np
 import pandas as pd
 
-from ... import HexConfigError, HexDataError
+from ... import HexDataError
 from ..base import DataSource
-from ..schema import BarFrame, validate_bars
+from ..schema import BarFrame
 
 DEFAULT_SAMPLE_DIR = Path("data/sample")
 

@@ -20,7 +20,6 @@ import pandas as pd
 
 from .. import HexConfigError
 from ..utils.fingerprint import model_id as _model_id
-from ..utils.io import read_json, write_json
 
 
 @dataclass

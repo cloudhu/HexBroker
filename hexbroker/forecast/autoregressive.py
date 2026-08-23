@@ -20,7 +20,6 @@ from ._nets import (
     ReLU,
     Sequential,
     collect_params,
-    gaussian_loss,
     train_gaussian,
 )
 

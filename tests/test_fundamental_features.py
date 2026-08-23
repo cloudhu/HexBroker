@@ -7,8 +7,6 @@ import pandas as pd
 import pytest
 
 from hexbroker.feature.fundamental import (
-    DEFAULT_MIN_PERIODS,
-    DEFAULT_WINDOW,
     _rolling_zscore,
     add_fundamental,
     fundamental_columns,

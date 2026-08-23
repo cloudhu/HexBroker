@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-import pytest
 
 from hexbroker.feature.cross import add_cross_global, add_internal_ratios, cross_columns
 

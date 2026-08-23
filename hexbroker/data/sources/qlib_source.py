@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Optional
 
 from ... import HexConfigError, HexDataError
 from ..base import DataSource

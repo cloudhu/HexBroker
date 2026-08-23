@@ -10,9 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 import numpy as np
-import pandas as pd
 
-from ..constants import Freq
 from ..feature.tokenizer import FeatureTokenizer
 
 
