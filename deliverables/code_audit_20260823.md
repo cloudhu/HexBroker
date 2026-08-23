@@ -148,19 +148,19 @@
 |---|---|---|---|---|
 | P1 | `rl/agent.py:261-263` | PPO 策略梯度 `d_logp` 为每样本标量却被 `[:,None]` 广播到全部 logits → softmax 不变，**actor 代理梯度近乎空操作** | RL 几乎不学习 | ✅ **已修（详见二-C）**：`_ppo_policy_grad_logits` + 有限差分验证 |
 | P2 | `rl/agent.py:256-257` | `d_r` 已含 `ratio` 又乘一次 → `dL/dlogp` 多出 `ratio` 因子 | 策略更新方向/幅度错 | ✅ **已修（详见二-C）**：`d_r=-adv*take; d_logp=d_r*ratio` |
-| P3 | `data/dataset.py:50,77,83` | 尾部 `horizon` 个标签填 `0.0`，`direction` 下 `sign(0)→1` 形成**伪造看涨标签** + `__len__` off-by-one（末样本 y=0.0） | 标签泄漏/样本错误，指标虚高 | 尾部填 `np.nan` 并剔除；`__len__ = n - lookback - horizon` |
+| P3 | `data/dataset.py:50,77,83` | 尾部 `horizon` 个标签填 `0.0`，`direction` 下 `sign(0)→1` 形成**伪造看涨标签** + `__len__` off-by-one（末样本 y=0.0） | 标签泄漏/样本错误，指标虚高 | ✅ **已修（详见二-B）**：尾部填 `np.nan` 剔除（不伪造标签）；`__len__ = n - lookback - horizon` |
 | P4 | `risk/manager.py:81` | 仓位上限 `max(abs(budget), max_position_pct)`，因 `max_position_pct(0.30)≥budget` → **预算从不约束 RL 意图**（违反"预算 > RL 意图"） | 风险预算形同虚设 | ✅ **已修（详见二-D）**：`min(abs(budget), max_position_pct)` |
 | P5 | `risk/stoploss.py:37,65` | `trailing_stop`（唯一"止损只增不减"逻辑）是**死代码从未被调用**；`ATRRatchet.update` 方向反了（索引只增 → 距离只收窄，违反红线"距离只增不减、索引只减不增"） | ATR 红线未实现，波动尖峰无法加宽保护 | ✅ **已修（详见二-C）**：`trailing_stop` 接入 `manager.evaluate`；ratchet 改为更宽才更新 |
 | P6 | `rl/futures_env.py:234` | `step()` 调 `evaluate` 时**未传 `ma_price`/`recent_returns`/`recent_volumes`** → S1/S2/S5 卖出信号在 RL 路径永不触发，S1–S5 退化成仅 S3 | 风控优先级链在 RL 中失效 | ✅ **已修（详见二-C）**：env 向 `evaluate` 透传行情上下文 |
-| P7 | `backtest/engine.py:83` `rl/futures_env.py:242` | `is_today_close` 恒 `False` → 平今双倍手续费（`fee_close_today`）永不生效 | **成本系统性低估（乐观偏差）** | 依开仓日 vs bar 日判定今/昨仓 |
+| P7 | `backtest/engine.py:83` `rl/futures_env.py:242` | `is_today_close` 恒 `False` → 平今双倍手续费（`fee_close_today`）永不生效 | **成本系统性低估（乐观偏差）** | ✅ **已修（详见二-B）**：`broker.py` 增 `open_dates` + `_compute_is_today_close`（依开仓日 vs bar 日重算今/昨仓） |
 | P8 | `config.py:215` | `limit_trade_allowed` 定义后全仓无引用 → 涨跌停 bar 仍按 close 成交 | 乐观成交 | ✅ **已修（详见二-D）**：引擎按 `limit_up/limit_down` 列拦截 |
 
 ### 🟠 防泄漏 / 数据正确性（系统性最高危主题）
 
 | 编号 | 位置 | 问题 |
 |---|---|---|
-| L1 | `data/cleaner.py:48-51` | `winsorize` 用**全样本**分位裁剪 OHLC（未来函数 + 抹真实极值） |
-| L2 | `feature/tokenizer.py:29-30,41` | `fit` 用全样本 `nanpercentile`（含未来）；`n_bins<=2` 全部输出 `MASK_ID` |
+| L1 | `data/cleaner.py:48-51` | `winsorize` 用**全样本**分位裁剪 OHLC（未来函数 + 抹真实极值）→ ✅ **已修（详见二-B）**：改 `expanding().quantile` 滚动因果裁剪（去未来函数） |
+| L2 | `feature/tokenizer.py:29-30,41` | `fit` 用全样本 `nanpercentile`（含未来）；`n_bins<=2` 全部输出 `MASK_ID` → ✅ **已修（详见二-B）**：`transform` 逐行 `expanding` 仅 `[0..i]` 历史算分位边界（零未来函数）；`n_bins<4` 抛 `ValueError` |
 | L3 | `feature/normalize.py:39` + `pipeline.py:143` | 单 `_normalizer` 跨品种复用，`fit` 仅首次生效 → 后续品种新特征不归一 | ✅ **已修（详见二-E）** |
 | L4 | `feature/fundamental.py:112` `feature/global_ref.py:40` | 承诺 asof 但实现为精确 `reindex` → 外盘节假日/时刻错位大面积 NaN | ✅ **已修（详见二-E）** |
 | L5 | `feature/cross.py:154` | `pivot_table` 默认 `aggfunc="mean"`，`SHFE.au` 与 `au0` 同短名被静默均值 | ✅ **已修（详见二-E）** |
@@ -173,7 +173,7 @@
 
 | 编号 | 位置 | 问题 |
 |---|---|---|
-| E1 | `evaluation/metrics.py` `report.py` | **全包无盈亏比(profit_factor)**，只报胜率+回撤 → 违反 README「方向准确率/胜率/盈亏比/最大回撤须同时呈现」；且 `win_rate` 是 bar 收益胜率非成交胜率 |
+| E1 | `evaluation/metrics.py` `report.py` | **全包无盈亏比(profit_factor)**，只报胜率+回撤 → 违反 README「方向准确率/胜率/盈亏比/最大回撤须同时呈现」；且 `win_rate` 是 bar 收益胜率非成交胜率 → ✅ **已修（详见二-B）**：`metrics.py` 增 `profit_factor` 字段+`to_dict`；`report.py` 增「盈亏比(PF)」行 |
 | E2 | `evaluation/stats.py:39,26` | "PBO" 仅是 `test<train` 计数非 CSCV；DSR 忽略 skew/kurt 退化为 `sigmoid(sharpe*sqrt(n))≈1` → 闸门 `dsr>0` 恒真 | ✅ **已修（详见二-C）**：DSR 重写为偏度/峰度感知 Bailey–López de Prado 式 |
 | E3 | `pipeline.py:111,179` `futures_env.py:239` | `is_effective` 分支永不可达；RL 用单品种 `symbols[0]`、基线跨全品种、`scale=1` 写死 → 口径不可比 | ✅ **已修（详见二-F）**：工作副本纳入 `is_effective`（不翻转默认）；RL 跨全品种 loop + `scale` 透传阈值基线 |
 | E4 | `backtest/walkforward.py:65` | 聚合无盈亏比；3~5 bar 短折也做年化，`_std` 用 `ddof=0` | ✅ **已修（详见二-D）**：聚合盈亏比 + 短折跳过年化 + `ddof=1` |
