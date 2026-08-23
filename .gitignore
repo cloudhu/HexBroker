@@ -31,3 +31,4 @@ catboost_info/
 *.h5
 # numpy 二进制（测试残留/缓存）
 *.npy
+data/paper/
