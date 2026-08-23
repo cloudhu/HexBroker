@@ -1,1 +1,2 @@
-﻿
+﻿date,symbol,engine_source,lots,lots_a,lots_b,price,multiplier,notional,weight_source,group
+2026-08-21,ta0,B,3,0,3,5898.595344094954,10.0,176957.86032284866,0.7,chem_energy

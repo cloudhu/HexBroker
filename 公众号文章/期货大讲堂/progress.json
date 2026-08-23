@@ -1,10 +1,10 @@
 {
   "series": "期货大讲堂",
   "total": 100,
-  "current_issue": 5,
-  "published_count": 4,
-  "last_published_issue": 4,
-  "last_published_date": "2026-08-18",
+  "current_issue": 10,
+  "published_count": 9,
+  "last_published_issue": 9,
+  "last_published_date": "2026-08-23",
   "history": [
     {
       "issue": 1,
@@ -28,6 +28,35 @@
       "title": "期货市场为什么存在：价格发现与风险管理",
       "date": "2026-08-18",
       "media_id": "1foS1_C04TIfLfnUcIVl2963x2BG4cNr56FTzXThICv28Al5CuxghAO-3kAFyR36"
+    },
+    {
+      "issue": 5,
+      "title": "期货交易的标的：大宗商品与金融资产的「标准化合约」",
+      "date": "2026-08-19",
+      "media_id": "1foS1_C04TIfLfnUcIVl26JbrNRAMy2QrgU5V529h0UUdwx6apg6h-3QZhIl-ib_"
+    },
+    {
+      "issue": 6,
+      "title": "保证金制度初探：为什么只用 10% 的钱能买卖 100% 的货",
+      "date": "2026-08-20"
+    },
+    {
+      "issue": 7,
+      "title": "多头与空头：涨跌都能赚钱的双面游戏",
+      "date": "2026-08-21",
+      "media_id": "1foS1_C04TIfLfnUcIVl28BcrLH_potp5IrN6dlVbVRcxOONplEMOQnef_jcoTXs"
+    },
+    {
+      "issue": 8,
+      "title": "杠杆的双刃剑：放大收益也放大风险",
+      "date": "2026-08-22",
+      "media_id": "1foS1_C04TIfLfnUcIVl2_fSVzfjyjEP4oa1NVdaHrEuazS38xCr3NhE1nyx1ea7"
+    },
+    {
+      "issue": 9,
+      "title": "期货交易所巡礼：上期所 / 大商所 / 郑商所 / 中金所",
+      "date": "2026-08-23",
+      "media_id": "1foS1_C04TIfLfnUcIVl2-yAHGKYn3DKswkGL1qSJOTlxYLyoo3Abcp1DjkJ08hj"
     }
   ]
 }
