@@ -68,9 +68,40 @@
 
 ---
 
+## 二-D. P2 组定点修复（第四轮，2026-08-23 续）
+
+> 进入 P2 前，先由 Explore 子代理做 fresh-eyes 独立复核实（15 项中 14 项确认、仅 E3 的"is_effective 不可达"子项被证据反驳——信号帧中该列确实存在）。策略：Batch A（安全正确性/泄漏/安全类修复，不翻转研究结论）先行，Batch B（涉及特征/记账口径变更，需 walk-forward QA 后方可翻转）单列待主理人裁决。
+
+### Batch A（本轮已落地的 8 项）
+
+| 编号 | 位置 | 问题 | 修复 | 验证 |
+|---|---|---|---|---|
+| L9 | `forecast/signal_store.py:34` | `put()` 不校验 OOS，样本内信号可写入（依赖调用方） | `put()` 解析 `ts`/`train_end`，丢弃 `ts ≤ train_end` 的样本内信号并 `warnings.warn`，空则返 0 | 新增 `tests/test_signal_contract.py::test_put_drops_in_sample_signals`：1 oos+1 insample → 告警且落盘仅 oos |
+| P4 | `risk/manager.py:82` | 仓位上限 `max(abs(budget), max_position_pct)`，因 `max_position_pct(0.30)≥budget` → 预算从不约束 RL 意图 | 改为 `cap = min(abs(budget), max_position_pct)`，RL 意图先恢复缩放再被「预算与硬上限中的较小者」封顶 | 新增 `tests/test_risk_priority.py::test_budget_is_effective_cap` + 修正 `test_recovery_r1_reduces_position`（意图调小到 0.02 以在预算上限下可见恢复缩放） |
+| V4 | `live/ctp_skeleton.py:71` | 文档称"缺凭证拒绝启动"但实现仅 `print`，误启动真实网关风险 | `start()` 在缺 `AppId`/`AuthCode` 时 `raise CTPGuardError`（穿透式监管红线） | 新增 `tests/test_ctp_guard.py` 3 项：缺凭证拒绝 / 齐备放行 / 风险确认；修正 `tests/test_live_guard.py` 两例旧"print 行为"断言，补 `APP_ID`/`AUTH_CODE` 并拓宽 `_clean_env` 夹具 |
+| L8 | `forecast/kronos_adapter.py:43` `kronos_predictor.py:77` | 直接构造时未调 `validate_kronos_pairing` → 模型/分词器错配红线被绕过 | 两处 `__init__` 在构造后显式 `validate_kronos_pairing(model_name, tokenizer_name)` | 新增 `tests/test_kronos_pairing.py`：adapter/predictor 构造均强制配对校验；合法配对通过 |
+| V2 | `evolution/optuna_engine.py:84` | 配 `HyperbandPruner` 但 objective 从不 `report`/`should_prune` → 剪枝恒失效 | 改 `MedianPruner(n_startup_trials=5, n_warmup_steps=0)`；两 forecast objective 内 `trial.report(value, step=0)` + `trial.should_prune()` → 低于中位数的 trial 被实际剪枝 | 新增 `tests/test_optuna_pruning.py::test_forecast_objective_prunes_below_median`：递减价值 → 至少剪 1 个且最优解保留 |
+| V3 | `evolution/drift.py:39` | PSI 分箱退化 + 空箱概率爆炸 → 虚假漂移（实测 8.39，阈值 0.2） | `psi()`：① finite 掩码；② `np.unique` 分箱去重防退化（退化时退化为单箱比较）；③ 占比钳制 `[floor=5e-3, 1]` 防 `log` 爆炸 | 新增 `tests/test_drift_psi.py` 5 项：相同→0 / 全压单值有界(<5) / 极端比有界(<5) / 轻微漂移不误报(<0.2) / detector 事件有限有界(<8) |
+| E4 | `backtest/walkforward.py:65` `evaluation/metrics.py:54` | 聚合缺盈亏比；3~5 bar 短折也做年化；`_std` 用 `ddof=0` | `WalkForwardBacktester` 聚合增 `profit_factor`；短折(`<20bar`)经 `compute_metrics(annualize=False)` 跳过年化；`_std` 全改 `ddof=1` | 新增 `tests/test_walkforward_aggregate.py` 2 项：聚合含 profit_factor 且 total_return_std 用 ddof=1 / 短折年化指标为 0 |
+| P8 | `backtest/engine.py:81` `config.py:215` | `limit_trade_allowed` 定义后无引用 → 涨跌停 bar 仍按 close 乐观成交 | `BacktestEngine.run` 在 `limit_up`/`limit_down` 且 `limit_trade_allowed=False` 时跳过该 bar 成交（缺流动性不乐观成交） | 新增 `tests/test_engine_limit_trade.py` 2 项：涨停 bar 禁止成交（建仓推迟到非涨停 bar）/ 开启时允许成交 |
+
+> 第四轮修复后：全量 pytest **298/298 通过**（63s），较基线 264 新增 **34** 个回归测试（P0 7 + P1 16 + P2 Batch A 11，含本轮 V2/V3/E4/P8/L9/P4/V4/L8 对应测试）。Batch A 8 项均 fresh-eyes 复核确认 + 数学/运行时验证 + 回归测试，未触及研究结论。
+
+### Batch B（特征/记账口径变更，待 walk-forward QA 后翻转，主理人裁决）
+
+| 编号 | 位置 | 问题 | 状态 |
+|---|---|---|---|
+| L3 | `feature/normalize.py:39` + `pipeline.py:143` | 单 `_normalizer` 跨品种复用，`fit` 仅首次生效 → 后续品种新特征不归一 | 待 QA |
+| L4 | `feature/fundamental.py:112` `feature/global_ref.py:40` | 承诺 asof 但实现为精确 `reindex` → 外盘节假日/时刻错位大面积 NaN | 待 QA |
+| L5 | `feature/cross.py:154` | `pivot_table` 默认 `mean`，`SHFE.au` 与 `au0` 同短名被静默均值 | 待 QA |
+| V1 | `evolution/examm_engine.py:94,267` | LSTM `c` 在循环内重置（无跨步记忆）；选优用训练集 fitness（乐观偏差） | 待 QA |
+| V5 | `config.py:160,209` | `group_cap/group_map` 默认 `None` → 黑色系敞口≤50% 在 `--demo` 下静默关闭；`contracts=None` 时全品种 `multiplier=10` | 待 QA |
+
+---
+
 ## 三、未修复的高优先级缺陷
 
-> ✅ **已修复并移至「二-B / 二-C」的项**：P0 组 `E1` `P3` `P7` `L1` `L2`；P1 组 `P1` `P2` `P5` `P6` `E2` `L6`。剩余（`P4` `P8` `L3` `L4` `L5` `L7` `L8` `L9` `E3` `E4` `V1`–`V5`）仍待 fresh-eyes 复核后定点修复。
+> ✅ **已修复并移至「二-B / 二-C / 二-D」的项**：P0 组 `E1` `P3` `P7` `L1` `L2`；P1 组 `P1` `P2` `P5` `P6` `E2` `L6`；P2 Batch A `L9` `P4` `V4` `L8` `V2` `V3` `E4` `P8`。剩余（`L3` `L4` `L5` `L7` `E3` `V1` `V5`）转入 Batch B，待 fresh-eyes QA 后定点修复。
 
 （建议主理人评审后定点修复）
 
@@ -83,11 +114,11 @@
 | P1 | `rl/agent.py:261-263` | PPO 策略梯度 `d_logp` 为每样本标量却被 `[:,None]` 广播到全部 logits → softmax 不变，**actor 代理梯度近乎空操作** | RL 几乎不学习 | ✅ **已修（详见二-C）**：`_ppo_policy_grad_logits` + 有限差分验证 |
 | P2 | `rl/agent.py:256-257` | `d_r` 已含 `ratio` 又乘一次 → `dL/dlogp` 多出 `ratio` 因子 | 策略更新方向/幅度错 | ✅ **已修（详见二-C）**：`d_r=-adv*take; d_logp=d_r*ratio` |
 | P3 | `data/dataset.py:50,77,83` | 尾部 `horizon` 个标签填 `0.0`，`direction` 下 `sign(0)→1` 形成**伪造看涨标签** + `__len__` off-by-one（末样本 y=0.0） | 标签泄漏/样本错误，指标虚高 | 尾部填 `np.nan` 并剔除；`__len__ = n - lookback - horizon` |
-| P4 | `risk/manager.py:81` | 仓位上限 `max(abs(budget), max_position_pct)`，因 `max_position_pct(0.30)≥budget` → **预算从不约束 RL 意图**（违反"预算 > RL 意图"） | 风险预算形同虚设 | `min(abs(budget), max_position_pct)` |
+| P4 | `risk/manager.py:81` | 仓位上限 `max(abs(budget), max_position_pct)`，因 `max_position_pct(0.30)≥budget` → **预算从不约束 RL 意图**（违反"预算 > RL 意图"） | 风险预算形同虚设 | ✅ **已修（详见二-D）**：`min(abs(budget), max_position_pct)` |
 | P5 | `risk/stoploss.py:37,65` | `trailing_stop`（唯一"止损只增不减"逻辑）是**死代码从未被调用**；`ATRRatchet.update` 方向反了（索引只增 → 距离只收窄，违反红线"距离只增不减、索引只减不增"） | ATR 红线未实现，波动尖峰无法加宽保护 | ✅ **已修（详见二-C）**：`trailing_stop` 接入 `manager.evaluate`；ratchet 改为更宽才更新 |
 | P6 | `rl/futures_env.py:234` | `step()` 调 `evaluate` 时**未传 `ma_price`/`recent_returns`/`recent_volumes`** → S1/S2/S5 卖出信号在 RL 路径永不触发，S1–S5 退化成仅 S3 | 风控优先级链在 RL 中失效 | ✅ **已修（详见二-C）**：env 向 `evaluate` 透传行情上下文 |
 | P7 | `backtest/engine.py:83` `rl/futures_env.py:242` | `is_today_close` 恒 `False` → 平今双倍手续费（`fee_close_today`）永不生效 | **成本系统性低估（乐观偏差）** | 依开仓日 vs bar 日判定今/昨仓 |
-| P8 | `config.py:215` | `limit_trade_allowed` 定义后全仓无引用 → 涨跌停 bar 仍按 close 成交 | 乐观成交 | 引擎按 `limit_up/limit_down` 列拦截 |
+| P8 | `config.py:215` | `limit_trade_allowed` 定义后全仓无引用 → 涨跌停 bar 仍按 close 成交 | 乐观成交 | ✅ **已修（详见二-D）**：引擎按 `limit_up/limit_down` 列拦截 |
 
 ### 🟠 防泄漏 / 数据正确性（系统性最高危主题）
 
@@ -100,8 +131,8 @@
 | L5 | `feature/cross.py:154` | `pivot_table` 默认 `aggfunc="mean"`，`SHFE.au` 与 `au0` 同短名被静默均值 |
 | L6 | `data/splitter.py:96,104` | expanding 模式改写 `self.train_len`（**非幂等**）；不变量忽略 `embargo` | ✅ **已修（详见二-C）**：局部 `cur_train_len` 幂等 + `assert_no_leakage` 纳入 `embargo` |
 | L7 | `sources/pytdx_source.py:205,52` | `get_instrument_info` 不返回 `open_interest`（选主力退化）；`market=30` 硬编码仅 SHFE/INE，DCE 的 `m` 取不到 |
-| L8 | `forecast/kronos_adapter.py:43` `kronos_predictor.py:77` | 直接构造时**未调 `validate_kronos_pairing`** → 模型/分词器错配红线被绕过 |
-| L9 | `forecast/signal_store.py:34` | `put()` 不做 OOS 校验，样本内信号可写入（依赖调用方） |
+| L8 | `forecast/kronos_adapter.py:43` `kronos_predictor.py:77` | 直接构造时**未调 `validate_kronos_pairing`** → 模型/分词器错配红线被绕过 | ✅ **已修（详见二-D）**：构造即校验配对 |
+| L9 | `forecast/signal_store.py:34` | `put()` 不做 OOS 校验，样本内信号可写入（依赖调用方） | ✅ **已修（详见二-D）**：`put()` 丢弃样本内信号 |
 
 ### 🟡 评估/报告口径（违反 README 验收）
 
@@ -110,16 +141,16 @@
 | E1 | `evaluation/metrics.py` `report.py` | **全包无盈亏比(profit_factor)**，只报胜率+回撤 → 违反 README「方向准确率/胜率/盈亏比/最大回撤须同时呈现」；且 `win_rate` 是 bar 收益胜率非成交胜率 |
 | E2 | `evaluation/stats.py:39,26` | "PBO" 仅是 `test<train` 计数非 CSCV；DSR 忽略 skew/kurt 退化为 `sigmoid(sharpe*sqrt(n))≈1` → 闸门 `dsr>0` 恒真 | ✅ **已修（详见二-C）**：DSR 重写为偏度/峰度感知 Bailey–López de Prado 式 |
 | E3 | `pipeline.py:111,179` `futures_env.py:239` | `is_effective` 分支永不可达；RL 用单品种 `symbols[0]`、基线跨全品种、`scale=1` 写死 → 口径不可比 |
-| E4 | `backtest/walkforward.py:65` | 聚合无盈亏比；3~5 bar 短折也做年化，`_std` 用 `ddof=0` |
+| E4 | `backtest/walkforward.py:65` | 聚合无盈亏比；3~5 bar 短折也做年化，`_std` 用 `ddof=0` | ✅ **已修（详见二-D）**：聚合盈亏比 + 短折跳过年化 + `ddof=1` |
 
 ### 🟡 进化 / 实盘守卫
 
 | 编号 | 位置 | 问题 |
 |---|---|---|
 | V1 | `evolution/examm_engine.py:94,267` | LSTM `c` 在循环内重置（无跨步记忆）；选优用训练集 fitness（乐观偏差，验证集仅事后报告） |
-| V2 | `evolution/optuna_engine.py:85` | 配 `HyperbandPruner` 但 objective 从不 `report/should_prune` → 剪枝失效 |
-| V3 | `evolution/drift.py:39` | 分箱退化 + 空箱概率爆炸 → PSI 虚假漂移（实测 8.39，阈值 0.2） |
-| V4 | `live/ctp_skeleton.py:71` | 守卫链有效（无误下单路径），但 docstring 称"缺凭证拒绝启动"实现仅 `print`（文档/实现不一致） |
+| V2 | `evolution/optuna_engine.py:85` | 配 `HyperbandPruner` 但 objective 从不 `report/should_prune` → 剪枝失效 | ✅ **已修（详见二-D）**：`MedianPruner` + `report/should_prune` 接入 |
+| V3 | `evolution/drift.py:39` | 分箱退化 + 空箱概率爆炸 → PSI 虚假漂移（实测 8.39，阈值 0.2） | ✅ **已修（详见二-D）**：finite 掩码 + 分箱去重 + 占比 floor 钳制 |
+| V4 | `live/ctp_skeleton.py:71` | 守卫链有效（无误下单路径），但 docstring 称"缺凭证拒绝启动"实现仅 `print`（文档/实现不一致） | ✅ **已修（详见二-D）**：缺凭证 `raise CTPGuardError` |
 | V5 | `config.py:160,209` | `group_cap/group_map` 默认 `None` → 黑色系敞口≤50% 在 `--demo` 下静默关闭；`contracts=None` 时全品种 `multiplier=10` |
 
 ---
@@ -127,14 +158,15 @@
 ## 四、核心结论与建议
 
 1. **最大系统性风险是「泄漏 + 乐观偏差」**：L1–L9、P3、P7、E2 共同指向同一问题——未来函数、成本低估、OOS 校验缺位会让"高胜率"结论不可信。这是本项目最重要的整改方向，**优先级高于一切功能新增**。
-2. **两条验收红线已闭环**：PBO 闸门（F2 已修）+ 一致性验收（F4 已修）+ 风控 in-loop（P5/P6 已修）+ DSR 闸门（E2 已修为真偏度/峰度感知判据）。当前剩余硬伤已收敛到 P2 组（V1–V5、L3/L4/L5/L7/L8/L9、config 部署接线、E3/E4 口径）。
-3. **RL 训练有效性已大幅修复**：P1/P2（梯度空操作→有限差分验证正确）、P5/P6（风控/止损 in-loop 已生效）。仍建议对 V2（剪枝失效）及 L3/L4（归一/asof）做 fresh-eyes 复核。
-4. **已建立防护**：P0 + P1 两组共 21 处改动均附运行时验证与回归测试（全量 280/280 绿）；建议剩余项按"工程师→QA fresh-eyes→主理人终裁"流程逐条定点修复并补回归测试，遵循项目「无证据不翻转」铁律。
+2. **两条验收红线已闭环**：PBO 闸门（F2 已修）+ 一致性验收（F4 已修）+ 风控 in-loop（P5/P6 已修）+ DSR 闸门（E2 已修为真偏度/峰度感知判据）。P2 Batch A（L9/P4/V4/L8/V2/V3/E4/P8）已定点修复并经 fresh-eyes 复核，剩余硬伤收敛到 Batch B（L3/L4/L5/L7/E3/V1/V5）。
+3. **RL 训练有效性已大幅修复**：P1/P2（梯度空操作→有限差分验证正确）、P5/P6（风控/止损 in-loop 已生效）、V2（剪枝现可实际生效）。剩余 L3/L4（归一/asof）待 Batch B fresh-eyes QA。
+4. **已建立防护**：P0 + P1 + P2 Batch A 共 **约 30 处**改动均附运行时验证与回归测试（全量 **298/298** 绿）；剩余 Batch B 项按"工程师→QA fresh-eyes→主理人终裁"流程逐条定点修复并补回归测试，遵循项目「无证据不翻转」铁律。
 
 ### 建议修复顺序
 - **✅ 立即（P0）**：P3（标签泄漏）、P7（成本低估）、L1/L2（全样本泄漏）、E1（缺盈亏比）—— 已全部修复（二-B）。
 - **✅ 紧随（P1）**：P1/P2（PPO 梯度）、P5/P6（风控红线）、E2（DSR/PBO 真实现）、L6（splitter 幂等）—— 已全部修复（二-C）。
-- **后续（P2）**：V1–V5、L3/L4/L5/L7/L8/L9、P4/P8、E3/E4、config 部署接线。
+- **✅ 续（P2 Batch A）**：L9（OOS 隔离）、P4（预算生效）、V4（CTP 凭证守卫）、L8（Kronos 配对）、V2（剪枝生效）、V3（PSI 有界）、E4（walkforward 口径）、P8（涨跌停拦截）—— 已全部修复（二-D）。
+- **⏳ 待（P2 Batch B）**：V1–V5 中的 V1/V5、L3/L4/L5/L7、E3 —— 待 fresh-eyes QA 后定点修复并补回归测试。
 
 ---
 
