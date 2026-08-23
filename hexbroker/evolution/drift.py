@@ -27,22 +27,43 @@ class DriftEvent:
         return self.psi > self.threshold
 
 
-def psi(actual: np.ndarray, expected: np.ndarray, n_bins: int = 10, eps: float = 1e-6) -> float:
+def psi(
+    actual: np.ndarray,
+    expected: np.ndarray,
+    n_bins: int = 10,
+    floor: float = 5e-3,
+) -> float:
     """计算单特征 PSI。
 
     分箱按 expected 的分位数等宽切分；actual 落入同箱后比较占比。
+    V3 修复：① 过滤非有限值；② 分箱去重防止退化（quantile 输出重复边界）；
+    ③ 占比钳制到 ``[floor, 1]`` 防止空箱导致 ``log`` 爆炸（实测 8.39 → 收敛到合理区间）。
     """
-    a = np.asarray(actual, dtype=float)
-    e = np.asarray(expected, dtype=float)
+    a = np.asarray(actual, dtype=float).ravel()
+    e = np.asarray(expected, dtype=float).ravel()
+    # 两窗长度可能不同（baseline vs 当前窗）；仅比较有效有限值，按各自长度处理
+    a = a[np.isfinite(a)]
+    e = e[np.isfinite(e)]
     if a.size < 2 or e.size < 2:
         return 0.0
-    bins = np.quantile(e, np.linspace(0.0, 1.0, n_bins + 1))
+    bins = np.unique(np.quantile(e, np.linspace(0.0, 1.0, n_bins + 1)))
+    if len(bins) < 3:
+        # 退化：baseline 分位数不足 → 退化为单箱比较（避免空箱爆炸）
+        pe = float((e.size > 0))
+        pa = float((a.size > 0))
+        lo = min(pe, pa, 1.0 - floor)
+        pe = max(lo, floor)
+        pa = max(lo, floor)
+        return float(abs(pa - pe) * np.log(pa / pe)) if pe > 0 and pa > 0 else 0.0
     bins[0] = -np.inf
     bins[-1] = np.inf
     p_e, _ = np.histogram(e, bins=bins)
     p_a, _ = np.histogram(a, bins=bins)
-    p_e = (p_e + eps) / e.size
-    p_a = (p_a + eps) / a.size
+    p_e = p_e / e.size
+    p_a = p_a / a.size
+    # 空箱/极小占比 → 钳制，防 log 爆炸（V3 修复核心）
+    p_e = np.clip(p_e, floor, 1.0)
+    p_a = np.clip(p_a, floor, 1.0)
     return float(np.sum((p_a - p_e) * np.log(p_a / p_e)))
 
 

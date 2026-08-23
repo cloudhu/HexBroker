@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import numpy as np
 import pandas as pd
 
 from ..utils.logging import get_logger
@@ -68,18 +67,33 @@ class BacktestEngine:
         portfolio = Portfolio(self.initial_capital)
         cur_target: dict[str, float] = {s: 0.0 for s in symbols}
 
+        # P8 修复：涨跌停拦截开关（config.backtest.limit_trade_allowed）
+        allow_limit = bool(getattr(getattr(self.cfg, "backtest", None), "limit_trade_allowed", True))
+        has_limit_cols = "limit_up" in prices.columns or "limit_down" in prices.columns
+
         for ts in all_ts:
             marks: dict[str, float] = {}
+            limit_flags: dict[str, bool] = {}
             for sym in symbols:
                 # 当前价格
                 sub_p = prices.xs(sym, level=0)
                 if ts in sub_p.index:
-                    marks[sym] = float(sub_p.loc[ts, "close"])
+                    row = sub_p.loc[ts]
+                    marks[sym] = float(row["close"])
+                    # P8 修复：判定本 bar 是否涨跌停（缺流动性，禁止以该价成交）
+                    if has_limit_cols:
+                        lu = bool(row.get("limit_up", False))
+                        ld = bool(row.get("limit_down", False))
+                        limit_flags[sym] = lu or ld
                 # 更新目标仓位（前向填充）
                 tgt_series = fwd_targets[sym]
                 if len(tgt_series) and ts >= tgt_series.index.min():
                     cur_target[sym] = float(tgt_series.loc[:ts].iloc[-1])
                 if sym in marks:
+                    # P8 修复：涨跌停且未允许 → 跳过成交（不再以 close 乐观成交）
+                    if limit_flags.get(sym, False) and not allow_limit:
+                        _log.debug("bar %s @ %s 触发涨跌停，limit_trade_allowed=False 跳过成交", sym, ts)
+                        continue
                     self.broker.execute(sym, cur_target[sym], marks[sym], timestamp=ts)
             portfolio.record(ts, self.broker.equity(marks))
 

@@ -75,6 +75,10 @@ class KlineKronosOOS:
         self.store = store
         self.model_name = model_name
         self.tokenizer_name = tokenizer_name
+        # L8 修复：直接构造也必须校验模型↔分词器配对（绕过 load_config 时红线不失效）
+        from ..config import validate_kronos_pairing
+
+        validate_kronos_pairing(self.model_name, self.tokenizer_name)
         self.device = device
         self.n_mc = int(n_mc)
         self.horizon = int(getattr(cfg.forecast, "horizon", 5))

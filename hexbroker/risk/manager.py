@@ -77,9 +77,12 @@ class RiskManager:
             s_r4=getattr(cfg, "position_scalar_r4", 1.0),
         )
 
-        # ⑤ RL 意图先经恢复缩放，再被预算封顶
+        # ⑤ RL 意图先经恢复缩放，再被「预算与硬上限中的较小者」封顶（P4 修复）
+        # 预算（vol 目标 + Kelly 上限，≤0.25）须真正约束 RL 意图；max_position_pct
+        # 仅作硬上限——取较小者，使预算成为生效上界而非恒被 0.30 覆盖。
         target = intent_position * scalar
-        target = position_within_limit(target, max(abs(budget), getattr(cfg, "max_position_pct", 0.30)))
+        cap = min(abs(budget), getattr(cfg, "max_position_pct", 0.30))
+        target = position_within_limit(target, cap)
         decision.stage = stage
 
         # ② S1–S5 卖出信号（高于风险预算与 RL 意图）

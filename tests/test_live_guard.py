@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 
 import pytest
 
@@ -12,7 +11,13 @@ from hexbroker.live.ctp_skeleton import CTPGuardError, CTPLiveGateway, CTPCreden
 
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch):
-    for k in ("HEXBROKER_CTP_BROKER_ID", "HEXBROKER_CTP_USER_ID", "HEXBROKER_CTP_PASSWORD"):
+    for k in (
+        "HEXBROKER_CTP_BROKER_ID",
+        "HEXBROKER_CTP_USER_ID",
+        "HEXBROKER_CTP_PASSWORD",
+        "HEXBROKER_CTP_APP_ID",
+        "HEXBROKER_CTP_AUTH_CODE",
+    ):
         monkeypatch.delenv(k, raising=False)
 
 
@@ -32,6 +37,8 @@ def test_accepts_with_credentials_and_flag(monkeypatch):
     monkeypatch.setenv("HEXBROKER_CTP_BROKER_ID", "9999")
     monkeypatch.setenv("HEXBROKER_CTP_USER_ID", "demo")
     monkeypatch.setenv("HEXBROKER_CTP_PASSWORD", "pw")
+    monkeypatch.setenv("HEXBROKER_CTP_APP_ID", "SIMAPP")
+    monkeypatch.setenv("HEXBROKER_CTP_AUTH_CODE", "SIMCODE")
     gw = CTPLiveGateway(load_config(), understand_risk=True)
     gw.start()  # 骨架阶段只校验，不建真实连接
     assert gw._connected is True
@@ -41,6 +48,8 @@ def test_skeleton_refuses_real_order(monkeypatch):
     monkeypatch.setenv("HEXBROKER_CTP_BROKER_ID", "9999")
     monkeypatch.setenv("HEXBROKER_CTP_USER_ID", "demo")
     monkeypatch.setenv("HEXBROKER_CTP_PASSWORD", "pw")
+    monkeypatch.setenv("HEXBROKER_CTP_APP_ID", "SIMAPP")
+    monkeypatch.setenv("HEXBROKER_CTP_AUTH_CODE", "SIMCODE")
     gw = CTPLiveGateway(load_config(), understand_risk=True)
     gw.start()
     with pytest.raises(CTPGuardError, match="真实下单"):

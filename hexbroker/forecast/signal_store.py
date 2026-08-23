@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -32,15 +33,34 @@ class SignalStore:
 
     # ----------------------------- 写入 -----------------------------
     def put(self, signals: Iterable[ForecastSignal]) -> int:
-        """写入信号，按 ``(model_id, train_end)`` 分片。返回写入条数。"""
+        """写入信号，按 ``(model_id, train_end)`` 分片。返回实际落盘（OOS）条数。
+
+        **OOS 隔离红线（L9 修复）**：``SignalStore`` 是 OOS 信号的唯一落盘层，
+        必须拒绝样本内（in-sample）信号。任何 ``ts <= train_end`` 的信号都被
+        视为泄漏，丢弃并告警，绝不落盘——即使调用方误传，物理上也无法让样本内
+        信号进入决策层。
+        """
         sigs = list(signals)
         if not sigs:
             return 0
         df = pd.DataFrame([s.to_record() for s in sigs])
+        df["ts"] = pd.to_datetime(df["ts"])
+        df["train_end"] = pd.to_datetime(df["train_end"])
+        oos_mask = df["ts"] > df["train_end"]
+        n_drop = int((~oos_mask).sum())
+        if n_drop:
+            warnings.warn(
+                f"SignalStore.put 丢弃 {n_drop} 条样本内(in-sample)信号"
+                f"(ts<=train_end)，仅落盘 OOS 信号——样本内信号严禁进入决策层",
+                stacklevel=2,
+            )
+            df = df[oos_mask]
+        if df.empty:
+            return 0
         for (mid, te), grp in df.groupby(["model_id", "train_end"]):
             path = self.root / mid / f"{_ts_file(te)}.parquet"
             write_parquet(grp.reset_index(drop=True), path)
-        return len(sigs)
+        return len(df)
 
     # ----------------------------- 读取 -----------------------------
     def _candidate_files(self, model_id: Optional[str]) -> list[Path]:

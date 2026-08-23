@@ -28,6 +28,7 @@ class MetricsReport:
     calmar: float = 0.0
     volatility: float = 0.0
     win_rate: float = 0.0
+    profit_factor: float = 0.0
     turnover: float = 0.0
     final_equity: float = 0.0
     n_bars: int = 0
@@ -43,6 +44,7 @@ class MetricsReport:
             "calmar": self.calmar,
             "volatility": self.volatility,
             "win_rate": self.win_rate,
+            "profit_factor": self.profit_factor,
             "turnover": self.turnover,
             "final_equity": self.final_equity,
             "n_bars": self.n_bars,
@@ -53,8 +55,13 @@ def compute_metrics(
     equity: pd.Series,
     positions: Optional[pd.DataFrame] = None,
     freq: str = "1d",
+    annualize: bool = True,
 ) -> MetricsReport:
-    """由权益曲线（datetime 索引）计算指标。"""
+    """由权益曲线（datetime 索引）计算指标。
+
+    ``annualize`` 关闭时（如 walk-forward 短折仅 3~5 bar）不输出年化指标，
+    避免极短窗口被年度化因子放大成无意义的大数（E4 修复）。
+    """
     eq = equity.astype(float)
     if len(eq) < 2:
         return MetricsReport(final_equity=float(eq.iloc[-1]) if len(eq) else 0.0)
@@ -63,6 +70,18 @@ def compute_metrics(
     total_return = float(eq.iloc[-1] / eq.iloc[0] - 1.0)
     n = len(rets)
     mean_r = rets.mean()
+    if not annualize:
+        # E4 修复：短折不年化，年化类指标置 0（聚合时只对足够长的折取年化）
+        peak = eq.cummax()
+        dd = (eq / peak - 1.0).clip(upper=0.0)
+        max_dd = float(dd.min())
+        return MetricsReport(
+            total_return=total_return,
+            max_drawdown=max_dd,
+            win_rate=float((rets > 0).mean()) if n > 0 else 0.0,
+            n_bars=int(n),
+            final_equity=float(eq.iloc[-1]),
+        )
     std_r = rets.std(ddof=1) if n > 1 else 0.0
     # 权益归零/亏损超过本金时，(1+total_return)<=0，分数次幂会得复数 → 钳制
     base = 1.0 + total_return
@@ -82,6 +101,16 @@ def compute_metrics(
     calmar = float(annual_return / abs(max_dd)) if abs(max_dd) > 1e-9 else 0.0
     vol = float(std_r * np.sqrt(ann))
     win_rate = float((rets > 0).mean()) if n > 0 else 0.0
+    gains = rets[rets > 0]
+    losses = rets[rets < 0]
+    gross_profit = float(gains.sum())
+    gross_loss = float(-losses.sum())
+    if gross_loss > 1e-12:
+        profit_factor = gross_profit / gross_loss
+    elif gross_profit > 1e-12:
+        profit_factor = 99.0  # 全程盈利：封顶展示，避免 inf
+    else:
+        profit_factor = 0.0
     turnover = 0.0
     if positions is not None and len(positions) > 1:
         turnover = float(positions.diff().abs().sum().sum())
@@ -94,6 +123,7 @@ def compute_metrics(
         calmar=calmar,
         volatility=vol,
         win_rate=win_rate,
+        profit_factor=profit_factor,
         turnover=turnover,
         final_equity=float(eq.iloc[-1]),
         n_bars=int(n),

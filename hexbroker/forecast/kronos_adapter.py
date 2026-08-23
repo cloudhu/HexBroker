@@ -16,10 +16,9 @@ from typing import Any, Optional
 import numpy as np
 import pandas as pd
 
-from .. import HexConfigError
 from ..utils.logging import get_logger
 from ..utils.registry import register
-from . import ForecastModel, build_windows
+from . import ForecastModel
 
 _log = get_logger("FCST")
 
@@ -45,6 +44,10 @@ class KronosAdapter(ForecastModel):
         self.enable_kronos = bool(enable_kronos) and HAS_KRONOS
         self.model_name = getattr(cfg.forecast, "model_name", "NeoQuasar/Kronos-small")
         self.tokenizer_name = getattr(cfg.forecast, "tokenizer_name", "NeoQuasar/Kronos-Tokenizer-base")
+        # L8 修复：直接构造也必须校验模型↔分词器配对（绕过 load_config 时红线不失效）
+        from ..config import validate_kronos_pairing
+
+        validate_kronos_pairing(self.model_name, self.tokenizer_name)
         self._inner: Optional[ForecastModel] = None  # 降级使用的 ARTransformer
 
     def _ensure_inner(self) -> ForecastModel:

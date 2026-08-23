@@ -55,13 +55,15 @@ def test_budget_caps_rl_intent():
 def test_recovery_r1_reduces_position():
     rm = RiskManager(_cfg())
     # R1: 回撤 ≥5% → 仓位缩放 0.5
+    # 注意：P4 修复后预算(budget≈0.05)为生效上限，与回撤档位无关；
+    # 为使恢复缩放可见，intent 取低于预算上限的值，避免被预算封顶掩盖差异。
     state = _state(position=0.0, drawdown=0.06, peak_equity=1_000_000.0, equity=940_000.0)
-    d = rm.evaluate(state, intent_position=0.2, p_up=0.6)
+    d = rm.evaluate(state, intent_position=0.02, p_up=0.6)
     assert d.stage == RecoveryStage.R1_REDUCE
-    assert d.target_position <= 0.2 * 0.5 + 1e-9
+    assert d.target_position <= 0.02 * 0.5 + 1e-9
     # 对照组：无回撤 → 意图完整放行
     state0 = _state(position=0.0, drawdown=0.0, pnl_pct=0.0)
-    d0 = rm.evaluate(state0, intent_position=0.2, p_up=0.6)
+    d0 = rm.evaluate(state0, intent_position=0.02, p_up=0.6)
     assert d0.stage == RecoveryStage.R0_NORMAL
     assert d0.target_position > d.target_position
 
@@ -72,6 +74,21 @@ def test_recovery_r2_halt_blocks_open():
     d = rm.evaluate(state, intent_position=0.5, p_up=0.7)
     assert d.stage == RecoveryStage.R2_HALT
     assert d.target_position == 0.0  # R2 暂停开仓
+
+
+def test_budget_is_effective_cap():
+    """P4 修复：预算(budget)须以 min(budget, max_position_pct) 生效，而非恒被 0.30 覆盖。
+
+    将 max_position_pct 压到 0.05（< 预算≈0.25），RL 意图拉满时生效上限应为 0.05，
+    而非旧实现的 max(budget,0.30)=0.30。
+    """
+    cfg = _cfg()
+    cfg.risk.max_position_pct = 0.05
+    rm = RiskManager(cfg)
+    state = _state(position=0.0, realized_vol=0.02, pnl_pct=0.0)
+    d = rm.evaluate(state, intent_position=1.0, p_up=0.9)
+    assert abs(d.target_position) <= 0.05 + 1e-9
+    assert abs(d.target_position) < 0.20  # 显著小于旧实现的 0.30 上限
 
 
 def test_atr_ratchet_only_widens():

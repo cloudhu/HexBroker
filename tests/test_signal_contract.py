@@ -9,10 +9,9 @@ import pandas as pd
 import pytest
 
 from hexbroker.config import default_demo_config
-from hexbroker.constants import SignalDirection
 from hexbroker.data.sources.synthetic_source import SyntheticSource
 from hexbroker.feature import build_features
-from hexbroker.forecast.base import ForecastSignal, build_windows
+from hexbroker.forecast.base import ForecastSignal
 from hexbroker.forecast.signal_store import SignalStore
 from hexbroker.forecast.trainer import ForecastTrainer
 
@@ -100,3 +99,33 @@ def test_signal_store_contains_oos_only():
     # 每条信号：ts 必须严格晚于其 train_end（OOS 红线）
     df = frame.reset_index()
     assert (df["datetime"] > pd.to_datetime(df["train_end"])).all()
+
+
+def test_put_drops_in_sample_signals():
+    """L9 修复：put() 必须丢弃样本内(ts<=train_end)信号并告警，绝不落盘。"""
+    import tempfile
+    import warnings
+
+    store = SignalStore(tempfile.mkdtemp())
+    oos = _make_signal(0.62)  # ts=2021-01-01 > train_end=2020-12-31
+    insample = ForecastSignal(
+        symbol="SHFE.cu",
+        ts=pd.Timestamp("2020-12-30"),  # ts < train_end → 泄漏
+        horizon=5,
+        p_up=0.62,
+        exp_ret=0.001,
+        quantiles={"q10": -0.01, "q25": 0.0, "q50": 0.001, "q75": 0.01, "q90": 0.02},
+        vol_hat=0.01,
+        conf=0.6,
+        model_id="test123",
+        train_end=pd.Timestamp("2020-12-31"),
+        is_effective=True,
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        n = store.put([oos, insample])
+        assert any(issubclass(c.category, Warning) for c in caught), "应产生丢弃告警"
+    assert n == 1  # 仅 OOS 落盘
+    frame = store.get_frame(model_id="test123").reset_index()
+    assert len(frame) == 1
+    assert frame.iloc[0]["datetime"] == pd.Timestamp("2021-01-01")

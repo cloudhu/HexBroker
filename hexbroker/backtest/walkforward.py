@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -46,25 +46,46 @@ class WalkForwardBacktester:
             n_folds = max(1, len(ts) // 5)
         edges = np.array_split(np.arange(len(ts)), max(1, n_folds))
 
+        # E4 修复：短折（不足该 bar 数）不做年化，避免 3~5 bar 被年度化因子放大成无意义大数
+        annualize_min_bars = 20
+
         reports: list[MetricsReport] = []
         for seg in edges:
             if len(seg) < 3:
                 continue
             lo = ts[int(seg[0])]
             hi = ts[int(seg[-1])]
-            p_sub = prices[prices.index.get_level_values(1).between(lo, hi)]
-            t_sub = targets[targets.index.get_level_values(1).between(lo, hi)]
+            plvl = prices.index.get_level_values(1)
+            tlvl = targets.index.get_level_values(1)
+            p_sub = prices[(plvl >= lo) & (plvl <= hi)]
+            t_sub = targets[(tlvl >= lo) & (tlvl <= hi)]
             if len(p_sub) < 5:
                 continue
             eng = BacktestEngine(self.cfg)
             pf = eng.run(p_sub, t_sub)
-            reports.append(compute_metrics(pf.equity_curve, freq=str(getattr(self.cfg.data, "freq", "1d"))))
+            do_annualize = len(p_sub) >= annualize_min_bars
+            reports.append(
+                compute_metrics(
+                    pf.equity_curve,
+                    freq=str(getattr(self.cfg.data, "freq", "1d")),
+                    annualize=do_annualize,
+                )
+            )
 
         aggregate: dict = {}
         if reports:
-            keys = ["total_return", "annual_return", "sharpe", "sortino", "max_drawdown", "calmar", "win_rate"]
-            for k in keys:
+            # 全部折参与聚合的指标
+            all_keys = ["total_return", "max_drawdown", "win_rate", "profit_factor"]
+            # 仅足够长的折参与年化聚合的指标（E4 修复：短折不年化）
+            ann_keys = ["annual_return", "sharpe", "sortino", "calmar"]
+            for k in all_keys:
                 vals = np.array([getattr(r, k) for r in reports])
                 aggregate[k] = float(vals.mean())
-                aggregate[f"{k}_std"] = float(vals.std())
+                aggregate[f"{k}_std"] = float(vals.std(ddof=1))
+            for k in ann_keys:
+                vals = np.array(
+                    [getattr(r, k) for r in reports if r.n_bars >= annualize_min_bars]
+                )
+                aggregate[k] = float(vals.mean()) if vals.size else 0.0
+                aggregate[f"{k}_std"] = float(vals.std(ddof=1)) if vals.size else 0.0
         return {"reports": reports, "aggregate": aggregate, "folds": len(reports)}

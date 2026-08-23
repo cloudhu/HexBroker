@@ -11,8 +11,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from typing import Callable
 
 import numpy as np
 import optuna
@@ -47,7 +46,12 @@ def default_forecast_objective(
     da = float(res.get("dir_acc", 0.5))
     ric = float(res.get("rank_ic", 0.0))
     brier = float(res.get("brier", 0.25))
-    return 0.5 * da + 0.3 * (ric * 0.5 + 0.5) + 0.2 * (1.0 - brier)
+    value = 0.5 * da + 0.3 * (ric * 0.5 + 0.5) + 0.2 * (1.0 - brier)
+    # V2 修复：report 单步终值并令剪枝器可实际裁掉低于中位数的 trial
+    trial.report(value, step=0)
+    if trial.should_prune():
+        raise optuna.TrialPruned()
+    return value
 
 
 def forecast_sharpe_aware_objective(
@@ -66,7 +70,12 @@ def forecast_sharpe_aware_objective(
     da = float(res.get("dir_acc", 0.5))
     sharpe = float(res.get("sharpe", 0.0))
     brier = float(res.get("brier", 0.25))
-    return 0.4 * da + 0.4 * float(np.tanh(sharpe)) + 0.2 * (1.0 - brier)
+    value = 0.4 * da + 0.4 * float(np.tanh(sharpe)) + 0.2 * (1.0 - brier)
+    # V2 修复：report 单步终值并令剪枝器可实际裁掉低于中位数的 trial
+    trial.report(value, step=0)
+    if trial.should_prune():
+        raise optuna.TrialPruned()
+    return value
 
 
 def run_forecast_optimization(
@@ -82,7 +91,10 @@ def run_forecast_optimization(
     storage = _ensure_storage_dir(storage)
     objective = forecast_sharpe_aware_objective if sharpe_aware else default_forecast_objective
     sampler = optuna.samplers.TPESampler(seed=seed)
-    pruner = optuna.pruners.HyperbandPruner()
+    # V2 修复：原 HyperbandPruner 依赖多步 intermediate report，但 forecast objective
+    # 为单步单次评估，从不 report/should_prune → 剪枝恒失效。改用 MedianPruner 并对
+    # 单步终值 report + should_prune，使低于已完成 trial 中位数的 trial 被实际剪枝。
+    pruner = optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=0, interval_steps=1)
     study = optuna.create_study(
         direction="maximize",
         study_name=study_name,

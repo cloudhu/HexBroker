@@ -69,8 +69,12 @@ class CTPLiveGateway:
             )
         self.credentials = CTPCredentials.from_env()
         if not self.credentials.app_id or not self.credentials.auth_code:
-            # 穿透式监管需要 AppId 与认证码；骨架阶段不强断，但必须显式提示
-            print("[CTP] 提示：穿透式监管报备需 AppId/AuthCode，请向期货公司申请。")
+            # 穿透式监管红线（模块 docstring）：缺 AppId/AuthCode 必须拒绝启动，
+            # 不得仅打印后继续连接——避免误启动真实网关。
+            raise CTPGuardError(
+                "实盘启动被拒绝：缺 AppId/AuthCode（穿透式监管报备所需）。"
+                "请向期货公司申请后设置 HEXBROKER_CTP_APP_ID / HEXBROKER_CTP_AUTH_CODE。"
+            )
         self._connect_gateway()
 
     def _connect_gateway(self) -> None:
