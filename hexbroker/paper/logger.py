@@ -24,11 +24,19 @@ _ADDED_FILES: set[str] = set()
 
 
 def _ensure_sinks(log_file: str) -> None:
-    """注册双输出 sink（幂等）。"""
+    """注册双输出 sink（幂等）。
+
+    与 ``utils.logging.init_logging`` 共存：只移除 loguru 默认 stderr sink（id 0，
+    避免双 stderr 重复输出），**保留其它模块注册的 sink**——避免 init_logging 先
+    注册的 run 日志 sink 被本模块 ``logger.remove()`` 误清（QA P2 提示③）。
+    """
     global _SINKS_READY
     fmt = "{time:YYYY-MM-DD HH:mm:ss} | {message}"
     if not _SINKS_READY:
-        logger.remove()
+        try:
+            logger.remove(0)  # 仅移除默认 stderr（若已被其它模块移除则跳过）
+        except (ValueError, TypeError):
+            pass
         logger.add(sys.stderr, level="INFO", format=fmt, colorize=False)
         _SINKS_READY = True
     if log_file not in _ADDED_FILES:
