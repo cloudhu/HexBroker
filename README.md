@@ -5,6 +5,45 @@
 基于开源生态「特性拼图」构建：Kronos（自回归基础模型，可选）+ 自研 ARTransformer（CPU 可跑 fallback）
 + Stable-Baselines3/纯 numpy PPO（RL 决策层）+ Optuna & EXAMM 风格神经进化 + 天勤 TQSDK/AkShare 数据 + vn.py 实盘骨架。
 
+## 版本
+
+- **v0.1.0**（2026-08-23）：代码审计 v2 收官——31 项缺陷定点修复（P0/P1/P2 全闭环，315 项测试全绿）；pyproject 依赖声明补齐；CI 干净环境稳定
+- **2026-08-22**：P25 影子基线 v2→v8（生产基线对照）升级
+- **2026-08-16**：LightGBM 冠军 v4（方向准确率 70.23%）终报 + 首轮代码审计（4 项 P1 修复）
+
+## 模型回测表现（可溯源交付报告）
+
+> 数据来源：`deliverables/software-hexfutures-ai/lightgbm-champion-final-report-2026-08-16.md`、`sentinel2-p25-v13-natural-rebuild-2026-08-22.md`
+
+### 预测层（LightGBM 冠军 v4，闸门1 口径）
+
+标的 SHFE.au / SHFE.ag / DCE.m 主力连续，日线 2018-01~2024-12，5 日 horizon，66 折 walk-forward（train 250/test 60/purge 5/embargo 2）+ per-fold Platt 校准：
+
+| 指标 | R7 基准 | **冠军 v4** | Δ |
+|---|---|---|---|
+| 方向准确率 dir_acc | 67.89% | **70.23%** | **+2.34pp** |
+| RankIC | 0.4092 | **0.4510** | **+0.042** |
+| 覆盖 | 84.60% | **85.04%** | +0.44pp |
+
+- 有效增量仅 4 项：per-fold Platt 校准（基础）、Optuna 调优（+0.44pp）、区间位置 f_range_pos_20（+0.34pp）、UUP 美元组（+1.17pp）；其余 20+ 候选全 66 折实证为负贡献
+- 贵金属宏观锚：**UUP / SPX 为唯二正向特征**，TNX/TLT/IEF/IXIC/DJI 均负向
+
+### 生产组合（引擎 A/B，闸门2 口径，含成本）
+
+18 品种，v8 生产基线（cross_z 标签 + 冠军 HP），OOS 2024-07-18 后；口径：引擎 A top_k=0.30/min=3/group_cap=0.5、引擎 B win252/thr0.70、组合 A30/B70、完整回测（滑点 1tick + 费 0.005% + 保证金 12% + CONTRACTS18）：
+
+| 指标 | v8 生产基线 | tail_ext（跨边界参考） |
+|---|---|---|
+| 引擎 A S2 OOS Sharpe | **1.064** | 1.096 |
+| 引擎 A S2 OOS 复利 | **+11.59%** | +11.81% |
+| 组合 A30/B70 OOS Sharpe | **0.717** | 0.725 |
+
+- 影子基线（p12 S4，v8 vs rt30 候选）：滚动 IC(63) -0.199 vs -0.026，滚动命中率(63) 0.416 vs 0.528，池化相关性 0.311
+
+### demo 快速开始（合成数据，`--demo`）
+
+方向准确率 76.82%（闸门1 ✅ PASS；闸门2 合成数据下 ⛔ FAIL，PBO 0.500——研究型输出非交付承诺）
+
 ## 架构（三层协作）
 
 ```
@@ -54,6 +93,24 @@ pytest -q
 - **弱信号带（54–58%）**：仅作辅助信号，RL 切保守档，集成向 LightGBM/技术指标倾斜。
 - 报告强制并列：方向准确率 / 交易胜率 / 盈亏比 / 最大回撤 —— 只报胜率不报盈亏比 = 无效结论。
 
+## 近期优化与修复
+
+### 优化（2026-08 精进）
+
+- **LightGBM 冠军 v4**：方向准确率 67.89% → 70.23%、RankIC 0.4092 → 0.4510（per-fold Platt 校准 / Optuna 调优 / f_range_pos_20 / UUP 美元锚 4 项有效增量）
+- **双引擎架构**：引擎 A（LightGBM 横截面 top30%）+ 引擎 B（趋势 win252/thr0.7）+ 组合配置（生产 A30/B70），OOS 全程含成本评估
+- **贵金属宏观锚锁定**：UUP/SPX 正向、TNX/TLT/IEF/IXIC/DJI 负向（唯二正向特征）
+- **依赖治理**：pyproject 单一事实源（核心 15 项 + dev/torch/sb3/sources/optional 5 组 extra）；gymnasium 移入 sb3（零引用）；torch 上限校准 <3
+
+### 修复（2026-08-23 代码审计，31 项闭环）
+
+- **红线级**：PBO 过拟合闸门失效（`is` 恒 False→恒 0.5）、PPO 策略梯度空操作（`[:,None]` 广播 + 冗余 ratio）、DSR 退化恒真（重写为偏度/峰度感知 Bailey–López de Prado 式）
+- **风控**：ATR ratchet 方向反向（只收窄→只增不减）、trailing_stop 死代码接入、RL 路径 S1/S2/S5 上下文透传、预算上限 `min(abs(budget), max_position_pct)`、涨跌停 bar 乐观成交拦截、平今双倍费不生效（open_dates 跟踪）
+- **防泄漏（L1–L9）**：winsorize/tokenizer 全样本未来函数（改 rolling/expanding 因果）、尾部标签伪造看涨（np.nan 剔除）、跨品种归一锁列、外盘 reindex→asof、pivot 短名静默均值、splitter 非幂等、pytdx 主力/市场硬编码（跨市场枚举 + 实时持仓量选主力）、Kronos 配对绕过、SignalStore 无 OOS 校验
+- **评估口径（E1–E4）**：缺盈亏比（补 profit_factor + PF 行）、DSR/PBO 文档混淆、RL 单品种 vs 基线全品种口径不可比、walkforward 短折年化 + ddof=0
+- **进化/实盘（V1–V5）**：EXAMM LSTM 单元记忆重置 + 训练集选种（改验证集）、Optuna 剪枝失效（MedianPruner + report）、PSI 空箱爆炸、CTP 缺凭证仅 print（改 raise）、contracts=None 乘数规格回退
+- 全部附回归测试（315/315 绿），提交链可溯源（`deliverables/code_audit_recheck_20260823.md` 含问题级提交映射）
+
 ## 关键设计（防泄漏红线）
 
 1. **预测层属于环境的一部分**：先 walk-forward 滚动训练，OOS 信号写入 `SignalStore`（带 model_id+train_end 指纹）；
@@ -78,7 +135,7 @@ hexbroker/            # 主包
   evaluation/         # 评估：指标/基线/DSR-PBO诊断/报告
   pipeline.py         # 端到端一条命令
 configs/              # OmegaConf 实验配置（base + 各层默认 + e01_cu_daily 示例）
-tests/                # 71 项测试（防泄漏/风控优先级/成本/一致性/RL/进化/漂移/管线/实盘守卫）
+tests/                # 315 项测试（防泄漏/风控优先级/成本/一致性/RL/进化/漂移/管线/实盘守卫）
 docs/                 # 架构设计（system_design.md 等）
 ```
 
