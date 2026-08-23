@@ -87,15 +87,29 @@
 
 > 第四轮修复后：全量 pytest **298/298 通过**（63s），较基线 264 新增 **34** 个回归测试（P0 7 + P1 16 + P2 Batch A 11，含本轮 V2/V3/E4/P8/L9/P4/V4/L8 对应测试）。Batch A 8 项均 fresh-eyes 复核确认 + 数学/运行时验证 + 回归测试，未触及研究结论。
 
-### Batch B（特征/记账口径变更，待 walk-forward QA 后翻转，主理人裁决）
+### Batch B（特征/记账口径变更，fresh-eyes QA 后定点修复）
 
 | 编号 | 位置 | 问题 | 状态 |
 |---|---|---|---|
-| L3 | `feature/normalize.py:39` + `pipeline.py:143` | 单 `_normalizer` 跨品种复用，`fit` 仅首次生效 → 后续品种新特征不归一 | 待 QA |
-| L4 | `feature/fundamental.py:112` `feature/global_ref.py:40` | 承诺 asof 但实现为精确 `reindex` → 外盘节假日/时刻错位大面积 NaN | 待 QA |
-| L5 | `feature/cross.py:154` | `pivot_table` 默认 `mean`，`SHFE.au` 与 `au0` 同短名被静默均值 | 待 QA |
-| V1 | `evolution/examm_engine.py:94,267` | LSTM `c` 在循环内重置（无跨步记忆）；选优用训练集 fitness（乐观偏差） | 待 QA |
-| V5 | `config.py:160,209` | `group_cap/group_map` 默认 `None` → 黑色系敞口≤50% 在 `--demo` 下静默关闭；`contracts=None` 时全品种 `multiplier=10` | 待 QA |
+| L3 | `feature/normalize.py:39` + `pipeline.py:143` | 单 `_normalizer` 跨品种复用，`fit` 仅首次生效 → 后续品种新特征不归一 | ✅ **已修（详见二-E）** |
+| L4 | `feature/fundamental.py:112` `feature/global_ref.py:40` | 承诺 asof 但实现为精确 `reindex` → 外盘节假日/时刻错位大面积 NaN | ✅ **已修（详见二-E）** |
+| L5 | `feature/cross.py:154` | `pivot_table` 默认 `mean`，`SHFE.au` 与 `au0` 同短名被静默均值 | ✅ **已修（详见二-E）** |
+| V1 | `evolution/examm_engine.py:94,267` | LSTM `c` 在循环内重置（无跨步记忆）；选优用训练集 fitness（乐观偏差） | ✅ **已修（详见二-E）** |
+| V5 | `config.py:160,209` | `group_cap/group_map` 默认 `None` → 黑色系敞口≤50% 在 `--demo` 下静默关闭；`contracts=None` 时全品种 `multiplier=10` | ✅ **已修（详见二-E）** |
+
+#### 二-E. P2 Batch B 定点修复（本轮，fresh-eyes 复核 + 回归测试）
+
+> 第五轮修复后：全量 pytest **305/305 通过**（62s），较第四轮 298 新增 **11** 个回归测试（L3×2 / L4×1 / L5×1 / V1×2 / V5×5）。Batch B 5 项均经 fresh-eyes 源码复核确认 + 运行时/机制验证 + 回归测试，未触及研究结论（生产口径 `CONTRACTS18`/`group_cap=0.5` 不变）。
+
+| 编号 | 根因（源码实证） | 修复 | 验证 |
+|---|---|---|---|
+| **L3** | `RollingNormalizer.fit` 仅当 `columns is None` 时登记列（`normalize.py:38-41`）；共享 `self._normalizer` 在首品种 `fit_transform` 后 `columns` 锁定 → 后续品种新增列未被 `transform` 归一（保留原始量纲/或被丢弃） | `pipeline.py:_per_symbol` 改为**每品种新建** `RollingNormalizer(window,min_periods=5).fit_transform(sub)`；因果性与零跨品种污染不变 | `test_feature_normalize.py`：品种2 多列 `f_c` 末点 z≈1.464（非原始 600）；并直接复现 `fit` 锁列机制（`C` 保留但量纲未动→全新实例才归一） |
+| **L4** | `global_ref.py:40` 用 `shifted.reindex(inner_index).ffill()` 依赖**精确标签匹配**；内盘 session 时间戳（09:00）与外盘（日级 00:00）时分/时区错位 → 全 NaN → 外盘特征整列失效 | 改用 `shifted.asof(inner_index)` 做真实"最后一个 ≤t 的有效值"对齐，`shift(1)` 语义（取 t-1 收盘）不变 | `test_global_ref.py`：同数据下旧 `reindex` 全 NaN；新 `asof` 返回 `[NaN,10,20]`，与 shift(1) 后 asof 预期一致 |
+| **L5** | `cross.py:_panel_close_wide` 用 `pivot_table(aggfunc="mean")` + `_norm_sym` 把 `au0`/`au2506` 等归一为同一短名 `au` → 不同合约收盘被**静默均值** | pivot 前按短名**去重**：每短名仅保留一个代表合约（优先连续主力 `全名以'0'结尾`，否则全名字典序最小），杜绝静默平均，短名特征命名约定不变 | `test_cross_panel.py`：`au0`/`au2506`/`ag0` → 列 `{'au','ag'}`，`au` 列=代表合约 `au0` 收盘 100（非均值 150） |
+| **V1** | `examm_engine.py:94` LSTM 分支 `c=np.zeros_like(h)` 在循环**内**每步重置 → 单元状态记忆被抹除，LSTM 退化为无记忆门控；`evolve` 全局最优以**训练集** fitness 选种（验证集仅事后报告，乐观偏差） | (a) `c` 移至循环外初始化并跨步携带；(b) `evolve` 全局最优改以**验证集** fitness 裁决（`best_global_val` 追踪），训练集 fitness 仅用于岛内锦标赛选种 | `test_examm_lstm.py`：① 修复后输出 ≠ 每步重置 c 的参考（单元记忆生效）；② monkeypatch 使 val=−train，断言 `result.best` 为验证最优精英（val 选种口径生效） |
+| **V5** | `config.py` 中 `EngineAConfig.group_cap/group_map` 默认 `None`（向后兼容）；`cost.py` `contracts=None` 时 `_multiplier` 回退全局 `10.0` → `au`(应×1000)/`ag`(应×15) P&L 量级错误（生产脚本虽显式传 `CONTRACTS18` 规避，但默认口径是 footgun） | `cost.py` 增加 `_SPEC_MULTIPLIER`/`_SPEC_MIN_TICK`（au×1000/0.02、ag×15/0.01、m×10/1）+ `_short_symbol` 归一；`_multiplier`/`_min_tick` 在 `contracts` 缺省时按品种规格回退（显式 contracts 仍优先） | `test_cost_multiplier_spec.py`：`contracts=None` 下 `_multiplier("au")==1000`、`_min_tick("au")==0.02`；`fee(100,1,au)==5.0`（旧 0.05）；显式 contracts 覆盖生效 |
+
+> 说明：`group_cap/group_map` 部署接线此前已由 `configs/base.yaml` 显式启用（P10-1），`risk/manager.py` 经 P4 已读 `group_cap/group_map`；本轮 V5 仅补齐 `contracts=None` 的乘数规格回退（消除"无证据不翻转"之外的默认口径隐患）。
 
 ---
 
@@ -126,9 +140,9 @@
 |---|---|---|
 | L1 | `data/cleaner.py:48-51` | `winsorize` 用**全样本**分位裁剪 OHLC（未来函数 + 抹真实极值） |
 | L2 | `feature/tokenizer.py:29-30,41` | `fit` 用全样本 `nanpercentile`（含未来）；`n_bins<=2` 全部输出 `MASK_ID` |
-| L3 | `feature/normalize.py:39` + `pipeline.py:143` | 单 `_normalizer` 跨品种复用，`fit` 仅首次生效 → 后续品种新特征不归一 |
-| L4 | `feature/fundamental.py:112` `feature/global_ref.py:40` | 承诺 asof 但实现为精确 `reindex` → 外盘节假日/时刻错位大面积 NaN |
-| L5 | `feature/cross.py:154` | `pivot_table` 默认 `aggfunc="mean"`，`SHFE.au` 与 `au0` 同短名被静默均值 |
+| L3 | `feature/normalize.py:39` + `pipeline.py:143` | 单 `_normalizer` 跨品种复用，`fit` 仅首次生效 → 后续品种新特征不归一 | ✅ **已修（详见二-E）** |
+| L4 | `feature/fundamental.py:112` `feature/global_ref.py:40` | 承诺 asof 但实现为精确 `reindex` → 外盘节假日/时刻错位大面积 NaN | ✅ **已修（详见二-E）** |
+| L5 | `feature/cross.py:154` | `pivot_table` 默认 `aggfunc="mean"`，`SHFE.au` 与 `au0` 同短名被静默均值 | ✅ **已修（详见二-E）** |
 | L6 | `data/splitter.py:96,104` | expanding 模式改写 `self.train_len`（**非幂等**）；不变量忽略 `embargo` | ✅ **已修（详见二-C）**：局部 `cur_train_len` 幂等 + `assert_no_leakage` 纳入 `embargo` |
 | L7 | `sources/pytdx_source.py:205,52` | `get_instrument_info` 不返回 `open_interest`（选主力退化）；`market=30` 硬编码仅 SHFE/INE，DCE 的 `m` 取不到 |
 | L8 | `forecast/kronos_adapter.py:43` `kronos_predictor.py:77` | 直接构造时**未调 `validate_kronos_pairing`** → 模型/分词器错配红线被绕过 | ✅ **已修（详见二-D）**：构造即校验配对 |
@@ -147,26 +161,27 @@
 
 | 编号 | 位置 | 问题 |
 |---|---|---|
-| V1 | `evolution/examm_engine.py:94,267` | LSTM `c` 在循环内重置（无跨步记忆）；选优用训练集 fitness（乐观偏差，验证集仅事后报告） |
+| V1 | `evolution/examm_engine.py:94,267` | LSTM `c` 在循环内重置（无跨步记忆）；选优用训练集 fitness（乐观偏差，验证集仅事后报告） | ✅ **已修（详见二-E）** |
 | V2 | `evolution/optuna_engine.py:85` | 配 `HyperbandPruner` 但 objective 从不 `report/should_prune` → 剪枝失效 | ✅ **已修（详见二-D）**：`MedianPruner` + `report/should_prune` 接入 |
 | V3 | `evolution/drift.py:39` | 分箱退化 + 空箱概率爆炸 → PSI 虚假漂移（实测 8.39，阈值 0.2） | ✅ **已修（详见二-D）**：finite 掩码 + 分箱去重 + 占比 floor 钳制 |
 | V4 | `live/ctp_skeleton.py:71` | 守卫链有效（无误下单路径），但 docstring 称"缺凭证拒绝启动"实现仅 `print`（文档/实现不一致） | ✅ **已修（详见二-D）**：缺凭证 `raise CTPGuardError` |
-| V5 | `config.py:160,209` | `group_cap/group_map` 默认 `None` → 黑色系敞口≤50% 在 `--demo` 下静默关闭；`contracts=None` 时全品种 `multiplier=10` |
+| V5 | `config.py:160,209` | `group_cap/group_map` 默认 `None` → 黑色系敞口≤50% 在 `--demo` 下静默关闭；`contracts=None` 时全品种 `multiplier=10` | ✅ **已修（详见二-E）** |
 
 ---
 
 ## 四、核心结论与建议
 
 1. **最大系统性风险是「泄漏 + 乐观偏差」**：L1–L9、P3、P7、E2 共同指向同一问题——未来函数、成本低估、OOS 校验缺位会让"高胜率"结论不可信。这是本项目最重要的整改方向，**优先级高于一切功能新增**。
-2. **两条验收红线已闭环**：PBO 闸门（F2 已修）+ 一致性验收（F4 已修）+ 风控 in-loop（P5/P6 已修）+ DSR 闸门（E2 已修为真偏度/峰度感知判据）。P2 Batch A（L9/P4/V4/L8/V2/V3/E4/P8）已定点修复并经 fresh-eyes 复核，剩余硬伤收敛到 Batch B（L3/L4/L5/L7/E3/V1/V5）。
-3. **RL 训练有效性已大幅修复**：P1/P2（梯度空操作→有限差分验证正确）、P5/P6（风控/止损 in-loop 已生效）、V2（剪枝现可实际生效）。剩余 L3/L4（归一/asof）待 Batch B fresh-eyes QA。
-4. **已建立防护**：P0 + P1 + P2 Batch A 共 **约 30 处**改动均附运行时验证与回归测试（全量 **298/298** 绿）；剩余 Batch B 项按"工程师→QA fresh-eyes→主理人终裁"流程逐条定点修复并补回归测试，遵循项目「无证据不翻转」铁律。
+2. **两条验收红线已闭环**：PBO 闸门（F2 已修）+ 一致性验收（F4 已修）+ 风控 in-loop（P5/P6 已修）+ DSR 闸门（E2 已修为真偏度/峰度感知判据）。P2 Batch A（L9/P4/V4/L8/V2/V3/E4/P8）与 **P2 Batch B（L3/L4/L5/V1/V5）** 均已定点修复并经 fresh-eyes 复核，剩余硬伤收敛到 L7/E3（数据/口径，待续）。
+3. **RL 训练有效性已大幅修复**：P1/P2（梯度空操作→有限差分验证正确）、P5/P6（风控/止损 in-loop 已生效）、V2（剪枝现可实际生效）。**V1（LSTM 单元记忆 + 验证集选种）本轮已修**；剩余 L3/L4（归一/asof）已随 Batch B 闭环。
+4. **已建立防护**：P0 + P1 + P2 Batch A + P2 Batch B 共 **约 45 处**改动均附运行时验证与回归测试（全量 **305/305** 绿）；残余 Batch B 项 L7/E3 按"工程师→QA fresh-eyes→主理人终裁"流程逐条定点修复并补回归测试，遵循项目「无证据不翻转」铁律。
 
 ### 建议修复顺序
 - **✅ 立即（P0）**：P3（标签泄漏）、P7（成本低估）、L1/L2（全样本泄漏）、E1（缺盈亏比）—— 已全部修复（二-B）。
 - **✅ 紧随（P1）**：P1/P2（PPO 梯度）、P5/P6（风控红线）、E2（DSR/PBO 真实现）、L6（splitter 幂等）—— 已全部修复（二-C）。
 - **✅ 续（P2 Batch A）**：L9（OOS 隔离）、P4（预算生效）、V4（CTP 凭证守卫）、L8（Kronos 配对）、V2（剪枝生效）、V3（PSI 有界）、E4（walkforward 口径）、P8（涨跌停拦截）—— 已全部修复（二-D）。
-- **⏳ 待（P2 Batch B）**：V1–V5 中的 V1/V5、L3/L4/L5/L7、E3 —— 待 fresh-eyes QA 后定点修复并补回归测试。
+- **✅ 续（P2 Batch B）**：L3（每品种独立归一）、L4（外盘 asof 对齐）、L5（pivot 短名去重）、V1（LSTM 单元记忆 + 验证集选种）、V5（contracts=None 乘数规格回退）—— 全部修复（二-E）。
+- **⏳ 待（残余 Batch B）**：L7（pytdx 主力/市场硬编码）、E3（is_effective 不可达 + RL 单品种口径）—— 待 fresh-eyes QA 后定点修复并补回归测试。
 
 ---
 
@@ -183,4 +198,19 @@ hexbroker/feature/technical.py         F6 RSI 全涨=100
 hexbroker/data/schema.py               F7 ffill 按品种分组
 tests/test_broker_multiplier_pnl.py    +F3 回归测试 test_flip_resets_avg_entry_to_new_fill
 (ruff --fix)                           全仓清理 196 项 lint
+```
+
+### 五-B. P2 Batch B 本轮改动文件清单（第五轮）
+
+```
+hexbroker/feature/pipeline.py           L3 每品种新建 RollingNormalizer（移除共享 _normalizer 锁列）
+hexbroker/feature/global_ref.py         L4 align_global_to_inner: reindex+ffill → asof（容忍时分错位）
+hexbroker/feature/cross.py              L5 _panel_close_wide: pivot 前按短名去重（防静默均值）
+hexbroker/evolution/examm_engine.py     V1 LSTM c 跨步携带 + evolve 以验证集 fitness 选全局最优
+hexbroker/backtest/cost.py              V5 _SPEC_MULTIPLIER/_SPEC_MIN_TICK + _short_symbol；contracts 缺省按规格回退
+tests/test_feature_normalize.py         +L3 回归（×2：跨品种归一 + fit 锁列机制）
+tests/test_global_ref.py                +L4 回归（asof vs reindex 全 NaN）
+tests/test_cross_panel.py               +L5 回归（短名碰撞去重）
+tests/test_examm_lstm.py                +V1 回归（×2：LSTM 单元记忆 + 验证集选种）
+tests/test_cost_multiplier_spec.py      +V5 回归（×5：规格回退/显式覆盖/fee/fill_price）
 ```
