@@ -19,7 +19,7 @@
 from __future__ import annotations
 
 import inspect
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Optional
 
 import numpy as np
@@ -154,6 +154,12 @@ class FuturesTradingEnv:
         close = self._px["close"].astype(float)
         self._rets = close.pct_change().fillna(0.0).to_numpy()
         self._close = close.to_numpy()
+        # 成交量序列（S2 量价背离用；无 volume 列时退化为零序列）
+        self._vol = (
+            self._px["volume"].astype(float).to_numpy()
+            if "volume" in self._px.columns
+            else np.zeros(self.n_bars, dtype=float)
+        )
         # 信号特征矩阵（滚动窗口输入）
         self._sig_mat = self._sig[SIG_FEATURES].astype(float).to_numpy()
         self._sig_mat[:, 4] = (self._sig_mat[:, 4] > 0.5).astype(float)
@@ -181,6 +187,8 @@ class FuturesTradingEnv:
         self._window: np.ndarray = np.zeros((self.obs_window, len(SIG_FEATURES)))
         self._records: list[EnvStepRecord] = []
         self._target_rows: list[tuple] = []
+        self._prev_ct: float = 0.0
+        self._bars_in_position: int = 0
 
     # ------------------------------------------------------------------
     # Gymnasium 风格接口
@@ -192,10 +200,15 @@ class FuturesTradingEnv:
         self._equity = self.initial_capital
         self._peak = self.initial_capital
         self._window = np.zeros((self.obs_window, len(SIG_FEATURES)))
+        self._records = []
+        self._target_rows = []
+        self._prev_ct = 0.0
+        self._bars_in_position = 0
         self.broker.positions.clear()
         self.broker.avg_entry.clear()
         self.broker.realized.clear()
         self.broker.trades.clear()
+        self.broker.open_dates.clear()
         self.risk.reset_ratchet()
         return self._build_obs()
 
@@ -207,6 +220,8 @@ class FuturesTradingEnv:
         p_up = float(self._sig_mat[i, 0])
         price = float(self._close[i])
         prev_equity = self._equity
+        # 行情上下文（与决策同 bar，供风控 S1/S2/S5；非未来函数）
+        recent_returns, recent_volumes, ma_price = self._market_context(i)
 
         # 1) RL 意图（离散档位或连续）
         if self.action_space_type == ActionSpaceType.DISCRETE5:
@@ -224,14 +239,17 @@ class FuturesTradingEnv:
             current_price=price,
             atr=float(self._sig_mat[i, 2]) * price * 0.5,  # vol_hat → 近似 ATR 距离
             realized_vol=max(float(self._sig_mat[i, 2]), 1e-6),
-            bars_in_position=int(self._pos_frac != 0),
+            bars_in_position=self._bars_in_position,
             highest_since_entry=self._peak / self.initial_capital,
             lowest_since_entry=(2 - self._equity / self.initial_capital) * 0.5,
             pnl_pct=(self._equity / self.initial_capital - 1.0),
             drawdown=dd,
             vol_quantile=0.5,
         )
-        decision = self.risk.evaluate(state, intent_position=intent, p_up=p_up)
+        decision = self.risk.evaluate(
+            state, intent_position=intent, p_up=p_up,
+            recent_returns=recent_returns, recent_volumes=recent_volumes, ma_price=ma_price,
+        )
 
         # 3) 目标仓位比例 → 合约数 → SimBroker 记账
         target_frac = decision.target_position
@@ -243,6 +261,8 @@ class FuturesTradingEnv:
         )
         self._target_contracts = target_contracts
         self._pos_frac = decision.target_position
+        # 真实持仓计数：本步结束后仍持有则 +1，平仓归零（供 S4 时间止损判定）
+        self._bars_in_position = (self._bars_in_position + 1) if target_frac != 0.0 else 0
 
         # 4) 估值 + 奖励
         equity = self.broker.equity({self.symbol: price})
@@ -294,6 +314,21 @@ class FuturesTradingEnv:
 
     def _prev_contracts(self) -> float:
         return float(getattr(self, "_prev_ct", 0.0))
+
+    def _market_context(self, i: int, window: int = 20) -> tuple[np.ndarray, np.ndarray, float]:
+        """最近 window 根行情上下文（风控 S1/S2/S5 信号用）。
+
+        - ``recent_returns``：最近单根收益序列（S5 波动异常 z 分数）；
+        - ``recent_volumes``：最近成交量序列（S2 量价背离）；
+        - ``ma_price``：收盘价的窗口均线（S1 趋势破坏）。
+
+        仅使用 bar i 及之前的公开行情，与决策同 bar，不构成未来函数。
+        """
+        lo = max(0, i - window + 1)
+        recent_returns = self._rets[lo : i + 1]
+        recent_volumes = self._vol[lo : i + 1]
+        ma_price = float(np.mean(self._close[lo : i + 1]))
+        return recent_returns, recent_volumes, ma_price
 
     def _build_obs(self) -> np.ndarray:
         sig = self._window.flatten()

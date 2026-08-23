@@ -18,7 +18,7 @@ from .budget import budget_target
 from .limits import HARD_STOP_DRAWDOWN, hard_stop_triggered, position_within_limit
 from .recovery import recovery_scalar, recovery_stage
 from .sell_engine import detect_sell_signals, strongest
-from .stoploss import ATRRatchet, compute_stop
+from .stoploss import ATRRatchet, compute_stop, trailing_stop
 from .types import ATRTier, RiskDecision, RiskState
 
 
@@ -30,6 +30,7 @@ class RiskManager:
         self.risk = getattr(cfg, "risk", None)
         self.hard_stop = float(hard_stop if hard_stop is not None else HARD_STOP_DRAWDOWN)
         self._ratchet = ATRRatchet(ATRTier.HIGH)
+        self._prev_stop: Optional[float] = None  # 上一根 bar 的止损价（trailing 用）
 
     # --------------------------- 主入口 ---------------------------
     def evaluate(
@@ -109,11 +110,21 @@ class RiskManager:
         )
         tier = self._ratchet.tier
         decision.atr_tier = tier
-        decision.stop_price = compute_stop(
-            state.entry_price, state.position or target, state.atr, tier
-        )
+        # ATR 止损价：用 trailing_stop 实现「止损只向有利方向移动」（红线），
+        # 参考价优先 current_price（随价移动锁定利润），缺失时回退 entry_price。
+        ref_price = state.current_price if state.current_price > 0 else state.entry_price
+        base_stop = compute_stop(ref_price, state.position or target, state.atr, tier)
+        if base_stop is None:
+            decision.stop_price = None
+            self._prev_stop = None
+        else:
+            decision.stop_price = trailing_stop(
+                ref_price, state.position or target, state.atr, tier, self._prev_stop
+            )
+            self._prev_stop = decision.stop_price
         return decision
 
     # --------------------------- 工具 ---------------------------
     def reset_ratchet(self, tier: ATRTier = ATRTier.HIGH) -> None:
         self._ratchet.reset(tier)
+        self._prev_stop = None

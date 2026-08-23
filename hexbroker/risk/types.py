@@ -6,13 +6,14 @@ from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import Optional
 
-from ..constants import RecoveryStage, SellSignalCode, SignalDirection
+from ..constants import RecoveryStage, SignalDirection
 
 
 class ATRTier(IntEnum):
     """ATR 三档止损距离倍率（索引越大倍率越小 = 止损越窄）。
 
-    约束：一旦因波动收紧（索引增大），**只增不减**（ratchet）。
+    约束：止损距离**只增不减**（ratchet）——档位索引只减不增，即只允许向更宽
+    方向（HIGH）移动，绝不向更窄方向（LOW）收窄。
     """
 
     HIGH = 0  # 2.5σ 宽止损（最保守）

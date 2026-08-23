@@ -11,7 +11,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 
@@ -153,6 +153,41 @@ class TrainStats:
         }
 
 
+def _ppo_policy_grad_logits(
+    logits: np.ndarray,
+    actions: np.ndarray,
+    adv: np.ndarray,
+    ratio: np.ndarray,
+    clip_hi: np.ndarray,
+    n: int,
+    ent_coef: float = 0.01,
+) -> np.ndarray:
+    """计算 PPO clipped 目标对 logits 的梯度 dL/dlogits，形状 (N, A)。
+
+    策略梯度（REINFORCE/PPO 标准式）：
+        dL/dlogits_j = d_logp * (onehot(a)_j - p_j)
+    其中 d_logp = dL/dlogp = (dL/dratio) * (dratio/dlogp)，而 dratio/dlogp = ratio，
+    且 dL/dratio = -adv * take（take 表示未触发 clip 的那一项被取）。
+
+    ⚠️ 历史 bug（P1+P2）：
+      - P2：dL/dratio 曾被写成 ``-adv*take*ratio``（多乘一次 ratio），导致 actor
+        梯度多出 ratio 因子；
+      - P1：d_logp 是每样本标量却被 ``[:,None]`` 等值广播到全部 logit → softmax
+        对常数平移不变 → actor 代理梯度近似空操作（策略不学习）。
+    这里用 ``(a_onehot - probs) * d_logp[:,None]`` 给出正确的非均匀策略梯度。
+    """
+    logp = _log_softmax(logits)
+    probs = np.exp(logp)
+    take = (ratio * adv) <= (clip_hi * adv)
+    d_r = -adv * take               # dL/dratio（P2 修复：不含多余 ratio）
+    d_logp = d_r * ratio            # dL/dlogp = dL/dratio * dratio/dlogp，dratio/dlogp = ratio
+    a_onehot = np.zeros_like(logits)
+    a_onehot[np.arange(n), actions] = 1.0
+    d_ent = probs * (logp + 1.0)    # 熵项 dL/dlogits（ent_coef 在调用处乘）
+    d_logits = (a_onehot - probs) * d_logp[:, None] / n + ent_coef * d_ent / n
+    return d_logits
+
+
 def _rollout(env: Any, policy: MLPPolicy, gamma: float, lam: float) -> dict:
     """收集一条完整轨迹（单环境）。"""
     obs = np.asarray(env.reset(), dtype=np.float64)
@@ -251,15 +286,9 @@ def train_ppo(
                 old_logp = np.array([roll["old_logp"][mb[i]] for i in range(n)])
                 ratio = np.exp(new_logp - old_logp)
                 clip_hi = np.clip(ratio, 1 - clip_range, 1 + clip_range)
-                # PPO surrogate
-                take = (ratio * adv_mb) <= (clip_hi * adv_mb)
-                d_r = -adv_mb * take * ratio  # dL/dratio
-                d_logp = d_r * ratio  # dL/dlogp = dL/dratio * ratio
-                # 熵项：loss -= 0.01*ent → dL/dlogits = +0.01 * probs*(logprobs+1)
-                probs = np.exp(logp)
-                d_ent = probs * (logp + 1.0)
-                d_logits = (
-                    (d_logp / n)[:, None] + 0.01 * d_ent / n
+                # PPO clipped 策略梯度（修正 P1 空操作 + P2 双乘 ratio）
+                d_logits = _ppo_policy_grad_logits(
+                    logits, actions, adv_mb, ratio, clip_hi, n, ent_coef=0.01
                 )
                 d_value = (value[:, 0] - returns_mb) / n  # 0.5*v_loss 的导数
 

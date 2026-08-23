@@ -68,3 +68,40 @@ def test_expanding_mode_works():
     sp.assert_no_leakage(folds)
     # 扩展模式：所有 fold 训练窗起点为 0
     assert all(f.train_start == 0 for f in folds)
+
+
+def test_assert_no_leakage_honors_embargo():
+    """embargo 间隙内的 fold 必须被 assert_no_leakage 捕获（L6 修复）。
+
+    构造一个 purge 合法、但 test 落在 embargo 间隙内的 fold：
+    train_max_pos=249, purge=5, embargo=2 → 合法 test_start 应为 256；
+    此处 test_start=255 仅满足 purge（255 > 249+5），却仍在 embargo(+2) 间隙内。
+    """
+    within_embargo = [Fold(train_start=0, train_end=250, test_start=255, test_end=315)]
+    sp = WalkForwardSplitter(train_len=250, test_len=60, purge=5, embargo=2)
+    with pytest.raises(HexLeakageError):
+        sp.assert_no_leakage(within_embargo)
+    # 模块级便捷函数同样应透传 embargo
+    with pytest.raises(HexLeakageError):
+        assert_no_leakage(within_embargo, purge=5, embargo=2)
+
+
+def test_split_is_idempotent():
+    """L6 修复：同一实例重复调用 split() 必须返回完全相同的 fold（expanding 亦然）。
+
+    旧实现会在 expanding 模式递增 ``self.train_len``，导致第二次调用训练窗被
+    撑大、结果漂移，并在跨品种复用（refine_lightgbm_champion 等）时污染后续品种。
+    """
+    idx = _index(1000)
+    for mode in ("rolling", "expanding"):
+        sp = WalkForwardSplitter(train_len=200, test_len=60, purge=5, embargo=2, mode=mode)
+        f1 = sp.split(idx)
+        f2 = sp.split(idx)  # 模拟跨品种复用的中间状态：再调用一次
+        assert len(f1) == len(f2)
+        for a, b in zip(f1, f2):
+            assert (a.train_start, a.train_end, a.test_start, a.test_end) == (
+                b.train_start, b.train_end, b.test_start, b.test_end,
+            )
+        # 实例属性未被污染
+        assert sp.train_len == 200
+

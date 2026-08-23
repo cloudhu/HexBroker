@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Sequence
 
 import numpy as np
@@ -24,20 +25,37 @@ def aggregate_metrics(reports: Sequence[MetricsReport]) -> dict:
 
 
 def deflated_sharpe_ratio(sharpe: float, n_obs: int, n_strategies: int = 1, skew: float = 0.0, kurt: float = 3.0) -> float:
-    """简化版 DSR（Deflated Sharpe Ratio）概率估计。
+    """Deflated Sharpe Ratio（Bailey & López de Prado, 2015）概率估计。
 
-    返回近似的「策略优于随机」概率（0~1）。越高越不易过拟合。
+    返回策略 Sharpe **优于**「n_strategies 个随机策略中最优者」的概率（0~1）：
+    越高越不易过拟合。修正旧实现的缺陷——旧版用 ``sqrt(1/n_obs)`` 作标准误、
+    忽略 skew/kurt，导致大样本下恒≈1、闸门 ``dsr>0`` 永真。
+
+    标准误纳入偏度/峰度修正：``Var(SR) = (1 - γ3·SR + (γ4-1)/4·SR²) / n``，
+    并以正态 CDF（``math.erf``，无第三方依赖）给出概率。
     """
     if n_obs <= 1:
         return 0.0
-    # 经验性调整：用策略数量做惩罚
-    adj = np.sqrt(np.log(n_strategies)) if n_strategies > 1 else 0.0
-    z = (sharpe - adj) / np.sqrt(1.0 / n_obs)
-    return float(1.0 / (1.0 + np.exp(-z)))
+    skew = 0.0 if skew is None else float(skew)
+    kurt = 3.0 if kurt is None else float(kurt)
+    var_sr = (1.0 - skew * float(sharpe) + (kurt - 1.0) / 4.0 * float(sharpe) ** 2) / n_obs
+    if var_sr <= 0:
+        return 0.0
+    se = math.sqrt(var_sr)
+    # n_strategies 个随机策略中最优 Sharpe 的期望（近似）：sqrt((1-γ)·2·ln(M))
+    gamma_euler = 0.5772156649015329
+    expected_max = math.sqrt((1.0 - gamma_euler) * 2.0 * math.log(max(n_strategies, 1)))
+    z = (float(sharpe) - expected_max) / se
+    return float(0.5 * (1.0 + math.erf(z / math.sqrt(2.0))))
 
 
 def probability_of_backtest_overfitting(sharpe_train: Sequence[float], sharpe_test: Sequence[float]) -> float:
-    """PBO：测试集 Sharpe 低于训练集 Sharpe 的比例（越高越疑似过拟合）。"""
+    """简化过拟合比值：测试集 Sharpe 低于训练集 Sharpe 的折数比例（越高越疑似过拟合）。
+
+    注意：这是**逐折简单比值**，并非完整 CSCV（Bailey & López de Prado 的
+    Combinatorial Symmetric Cross-Validation）。正式的 CSCV PBO 已在
+    ``hexbroker.pipeline._pbo`` 中实现并用于闸门 2 诊断。
+    """
     if len(sharpe_train) == 0:
         return 0.0
     return float(np.mean(np.array(sharpe_test) < np.array(sharpe_train)))

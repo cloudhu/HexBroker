@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import numpy as np
-import pytest
 
 from hexbroker.config import load_config
 from hexbroker.constants import RecoveryStage, SellSignalCode
@@ -76,14 +74,30 @@ def test_recovery_r2_halt_blocks_open():
     assert d.target_position == 0.0  # R2 暂停开仓
 
 
-def test_atr_ratchet_only_increases():
-    r = ATRRatchet(ATRTier.HIGH)
-    r.update(0.1)  # 低波动 → LOW(2)
-    assert r.tier == ATRTier.LOW
-    r.update(0.9)  # 高波动想回 HIGH(0)，但 ratchet 只增不减 → 维持 LOW
-    assert r.tier == ATRTier.LOW
-    r.update(0.5)  # 中间 → MID(1)，但 1 < 2 → 维持 LOW
-    assert r.tier == ATRTier.LOW
+def test_atr_ratchet_only_widens():
+    """ATR ratchet：止损距离「只增不减」（档位索引只减不增，HIGH=0 最宽 / LOW=2 最窄）。
+
+    规格（交易系统 v4.0 / 审计红线）：波动放大（高分位）收紧到最宽 HIGH(0)；
+    波动回落（低分位）本应收窄到最窄 LOW(2)，但 ratchet **禁止收窄**，
+    保持当前或更宽档位，确保持仓期间止损距离永不缩小。
+    旧实现 ``if int(new) >= int(self.tier)`` 方向反了（会锁定最窄距离），已修正。
+    """
+    # 起点最窄 LOW(2)：高波动应放宽到 HIGH(0)（索引减小 → 更宽 → 允许）
+    r = ATRRatchet(ATRTier.LOW)
+    r.update(0.9)
+    assert r.tier == ATRTier.HIGH
+    # 此后波动回落想收窄，ratchet 禁止收窄 → 维持最宽 HIGH(0)
+    r.update(0.1)
+    assert r.tier == ATRTier.HIGH
+    r.update(0.5)  # MID(1) 索引 1 > 0 → 维持 HIGH
+    assert r.tier == ATRTier.HIGH
+
+    # 反向路径：起点 LOW，低波动无法再收窄（已是最窄），高波动可放宽
+    r2 = ATRRatchet(ATRTier.LOW)
+    r2.update(0.1)  # LOW 已是最窄，维持
+    assert r2.tier == ATRTier.LOW
+    r2.update(0.5)  # MID(1) 索引 1 < 2 → 更宽 → 允许
+    assert r2.tier == ATRTier.MID
 
 
 def test_atr_stop_multiplier_tiers():
