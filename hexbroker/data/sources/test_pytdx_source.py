@@ -190,7 +190,8 @@ class TestHealthCheck:
         assert PytdxSource().health_check() is False
 
     def test_health_check_true_when_pytdx_present(self):
-        import pytdx  # noqa: F401  # 本环境已装
+        # pytdx 为可选数据源依赖：缺失时 skip（而非 fail），已装才验证 True
+        pytest.importorskip("pytdx")
 
         assert PytdxSource().health_check() is True
 

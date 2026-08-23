@@ -156,7 +156,8 @@ class TestHealthCheck:
         assert SinaSource().health_check() is False
 
     def test_true_when_requests_present(self):
-        import requests  # noqa: F401  # 本环境已装
+        # requests 为可选数据源依赖：缺失时 skip（而非 fail），已装才验证 True
+        pytest.importorskip("requests")
 
         assert SinaSource().health_check() is True
 
