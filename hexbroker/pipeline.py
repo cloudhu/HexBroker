@@ -108,7 +108,10 @@ def _forward_returns(prices: pd.DataFrame, horizon: int) -> pd.Series:
 # ---------------------------------------------------------------------------
 def _signal_metrics(signals: pd.DataFrame, fwd: pd.Series) -> dict:
     """方向准确率 / 有效信号准确率(带 coverage) / RankIC / Brier / 校准误差。"""
-    df = signals[["p_up", "vol_hat", "conf"]].copy()
+    cols = ["p_up", "vol_hat", "conf"]
+    if "is_effective" in signals.columns:
+        cols.append("is_effective")
+    df = signals[cols].copy()
     df["y"] = (fwd.reindex(df.index) > 0).astype(float)
     df = df.dropna()
     if len(df) == 0:
@@ -158,25 +161,38 @@ def _run_baselines(cfg, prices, signals, scale: int) -> dict[str, dict]:
 # ---------------------------------------------------------------------------
 # RL（T04）
 # ---------------------------------------------------------------------------
-def _run_rl(cfg, prices, signals, total_steps: int, reward_overrides: Optional[dict] = None) -> dict:
+def _run_rl(cfg, prices, signals, total_steps: int, scale: int, reward_overrides: Optional[dict] = None) -> dict:
     from .rl.futures_env import FuturesTradingEnv, check_env, assert_env_has_no_model_dependency
     from .rl.train import train, policy_rollout
 
     assert_env_has_no_model_dependency(FuturesTradingEnv)
-    env = FuturesTradingEnv(signals, prices, cfg)
-    if reward_overrides:
-        for k, v in reward_overrides.items():
-            setattr(env, k, float(v))
-    check_env(env)
+    symbols = list(signals.index.get_level_values(0).unique())
+    target_frames: list[pd.DataFrame] = []
+    stats = None
     t0 = time.time()
-    policy, stats, env = train(env, cfg, total_timesteps=total_steps)
+    for sym in symbols:
+        env = FuturesTradingEnv(signals, prices, cfg, symbol=sym)
+        if reward_overrides:
+            for k, v in reward_overrides.items():
+                setattr(env, k, float(v))
+        check_env(env)
+        policy, stats, env = train(env, cfg, total_timesteps=total_steps)
+        tgt = policy_rollout(policy, env)
+        if tgt is not None and len(tgt):
+            target_frames.append(tgt)
     t_train = time.time() - t0
 
-    # 用策略在环境回放，得到目标合约数帧 → 回测引擎重放（训练-回测一致性）
-    targets = policy_rollout(policy, env)
+    if target_frames:
+        targets = pd.concat(target_frames).sort_index()
+    else:
+        targets = pd.DataFrame(
+            columns=["target"],
+            index=pd.MultiIndex.from_arrays([[], []], names=["symbol", "datetime"]),
+        )
+    # 训练-回测一致性：环境记录的目标合约数帧交给回测引擎重放
     bt = _backtest(cfg, prices, targets)
-    # 对比纯信号阈值基线
-    thr = _run_baselines(cfg, prices, signals, scale=1)["signal_threshold"]["metrics"]
+    # 与基线同杠杆对比：signal_threshold 用同一 scale（不再写死 1），口径可比
+    thr = _run_baselines(cfg, prices, signals, scale=scale)["signal_threshold"]["metrics"]
     better = (
         bt["calmar"] > thr["calmar"] or abs(bt["max_drawdown"]) < abs(thr["max_drawdown"])
     )
@@ -187,13 +203,13 @@ def _run_rl(cfg, prices, signals, total_steps: int, reward_overrides: Optional[d
         "better_than_threshold": bool(better),
         "targets": targets,
         "equity": bt.pop("equity"),
+        "n_symbols": len(symbols),
     }
-
 
 # ---------------------------------------------------------------------------
 # 进化（T05）
 # ---------------------------------------------------------------------------
-def _run_evolution(cfg, signals, prices, fwd, rl_total_steps: int = 1500) -> dict:
+def _run_evolution(cfg, signals, prices, fwd, rl_total_steps: int = 1500, scale: Optional[int] = None) -> dict:
     from .evolution.drift import DriftDetector
     from .evolution.examm_engine import evolve
     from .evolution.optuna_engine import run_forecast_optimization, run_rl_optimization
@@ -243,7 +259,7 @@ def _run_evolution(cfg, signals, prices, fwd, rl_total_steps: int = 1500) -> dic
     # --- 内层 B：RL 奖励权重 NSGA-II（短训快速评估）---
     def _rl_obj(params, trial_number):
         try:
-            res = _run_rl(cfg, prices, signals, total_steps=rl_total_steps, reward_overrides=params)
+            res = _run_rl(cfg, prices, signals, total_steps=rl_total_steps, scale=scale, reward_overrides=params)
             m = res["metrics"]
             return {"sharpe": m["sharpe"], "win_rate": m["win_rate"], "max_drawdown": m["max_drawdown"]}
         except Exception:
@@ -313,7 +329,7 @@ def _pbo(cfg, prices, signals, n_splits: int = 20) -> float:
             idx = np.arange(len(df))
             rng.shuffle(idx)
             cut = int(len(idx) * 0.6)
-            for part in (idx[:cut], idx[cut:]):
+            for tag, part in (("tr", idx[:cut]), ("te", idx[cut:])):
                 sub = df.iloc[part]
                 # 用阈值策略 Sharpe 近似
                 p = sub["p_up"].to_numpy()
@@ -321,7 +337,7 @@ def _pbo(cfg, prices, signals, n_splits: int = 20) -> float:
                 dirs = np.where(p > 0.55, 1.0, np.where(p < 0.45, -1.0, 0.0))
                 rets = dirs * (2 * y - 1)  # 方向命中近似收益
                 s = float(rets.mean() / (rets.std() + 1e-9) * np.sqrt(len(rets)))
-                if part is idx[:cut]:
+                if tag == "tr":
                     s_tr = s
                 else:
                     worse += int(s < s_tr)
@@ -401,12 +417,10 @@ def run_pipeline(cfg, *, source=None, model=None, store_dir=None, skip_rl=False,
 
     rl = None
     if not skip_rl and len(signals) >= 100:
-        rl = _run_rl(cfg, prices, signals, total_steps=rl_steps or int(cfg.rl.total_timesteps))
-
+        rl = _run_rl(cfg, prices, signals, total_steps=rl_steps or int(cfg.rl.total_timesteps), scale=scale)
     evolution = None
     if not skip_evolution:
-        evolution = _run_evolution(cfg, signals, prices, fwd)
-
+        evolution = _run_evolution(cfg, signals, prices, fwd, scale=scale)
     gates = _gate_report(cfg, signals, fwd, baselines, rl, prices)
 
     summary = {

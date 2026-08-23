@@ -59,6 +59,18 @@ MAX_BARS_PER_CALL: int = 800
 # 连续主力代码后缀（新浪风格与项目风格统一识别）。
 CONTINUOUS_SUFFIX = "0"
 
+# 已知期货交易所 pytdx exhq market 代码（用于跨所自动发现主力/合约）。
+# 30=SHFE(上期所) 47=DCE(大连) 28=CZCE(郑商所) 29=CFFEX(中金所) 60=INE(上海国际能源)。
+_KNOWN_MARKETS = (MARKET_SHFE_INE, 47, 28, 29, 60)
+
+
+def _product_of_code(code: str) -> str:
+    """取合约代码前导字母部分（品种标识），如 'M2509'->'m'、'MA2509'->'ma'。
+
+    精确匹配品种，避免 'm'(豆粕) 误匹配 'MA'(甲醇) 等同字母前缀合约。
+    """
+    return "".join(ch for ch in str(code) if ch.isalpha()).lower()
+
 
 class PytdxSource(DataSource):
     """通达信公共行情服务器免费期货源（主力源）。"""
@@ -147,24 +159,26 @@ class PytdxSource(DataSource):
         return "contract", s.upper()
 
     # ---- 单合约取数 ------------------------------------------------------
-    def _fetch_contract_bars(
-        self, code: str, period: int, count: int
-    ) -> pd.DataFrame:
-        """取单合约 K 线（分页拉满 ``count`` 根），返回单 symbol 的 DataFrame。"""
-        api = self._connect()
+    def _fetch_bars_for_market(
+        self, api, market: int, code: str, period: int, count: int
+    ) -> list[dict]:
+        """在指定 ``market`` 拉取单合约 K 线（分页拉满 ``count`` 根）。
+
+        无数据或失败返回空 list（不抛异常），由调用方决定跨市场回退，
+        避免单市场失败即中断（旧实现 market=30 硬编码导致 DCE 等永失败）。
+        """
         rows: list[dict] = []
         fetched = 0
-        # 从最新开始，按 800 一页向前回溯
         for start in range(0, max(count, 1), MAX_BARS_PER_CALL):
             take = min(MAX_BARS_PER_CALL, count - fetched)
             if take <= 0:
                 break
             try:
                 chunk = api.get_instrument_bars(
-                    CATEGORY_FUTURE, MARKET_SHFE_INE, code, start, take
+                    CATEGORY_FUTURE, market, code, start, take
                 )
             except Exception as exc:
-                raise HexDataError(f"pytdx 取 {code} 失败：{exc}") from exc
+                raise HexDataError(f"pytdx 取 {code}(market={market}) 失败：{exc}") from exc
             if not chunk:
                 break
             rows.extend(chunk)
@@ -173,19 +187,48 @@ class PytdxSource(DataSource):
                 break
             if self.rate_limit_sleep:
                 time.sleep(self.rate_limit_sleep)
-        if not rows:
-            raise HexDataError(f"pytdx 未取得 {code} 任何 K 线（合约可能已退市/代码错误）")
-        return self._bars_to_frame(rows, code)
+        return rows
 
+    def _fetch_contract_bars(
+        self, code: str, period: int, count: int, market: Optional[int] = None
+    ) -> pd.DataFrame:
+        """取单合约 K 线（分页拉满 ``count`` 根），返回单 symbol 的 DataFrame。
+
+        ``market`` 指定时只在该交易所取数；为 ``None`` 时跨已知交易所自动发现
+        （DCE/CZCE/CFFEX/INE 此前因 ``market=30`` 硬编码而无法获取）。
+        """
+        api = self._connect()
+        markets = [market] if market is not None else list(_KNOWN_MARKETS)
+        last_err: Optional[Exception] = None
+        for m in markets:
+            try:
+                rows = self._fetch_bars_for_market(api, m, code, period, count)
+            except HexDataError as exc:
+                last_err = exc
+                rows = []
+            if rows:
+                return self._bars_to_frame(rows, code)
+        raise HexDataError(
+            f"pytdx 未取得 {code} 任何 K 线（合约可能已退市/代码错误/市场不匹配）；"
+            f"最后错误：{last_err}"
+        )
     # ---- 主力连续拼接辅助 ------------------------------------------------
-    def _select_main_contract(self, product: str) -> str:
-        """按持仓量选主力合约（枚举全市场合约，取 ``open_interest`` 最大者）。"""
+    def _select_main_contract(self, product: str) -> tuple[str, int]:
+        """按实时持仓量(open interest)选主力合约，返回 ``(code, market)``。
+
+        - 跨**全部**交易所枚举合约（不再硬编码 ``market=30``），按品种字母精确匹配
+          （``m`` 不会误匹配 ``MA`` 甲醇等）；
+        - 主力判定用实时报价 ``chicang``(持仓量) —— ``get_instrument_info`` 静态元数据
+          **不含** open_interest，旧实现恒为 0 → 退化成「取首个候选」；
+        - 返回所属 ``market`` 供取数使用，使 DCE/CZCE/CFFEX/INE 主力可正确拉取。
+        """
         api = self._connect()
         try:
             total = api.get_instrument_count()
         except Exception as exc:
             raise HexDataError(f"pytdx 枚举合约失败（get_instrument_count）：{exc}") from exc
-        candidates: list[tuple[str, float]] = []
+        prod = product.lower()
+        candidates: list[tuple[str, int]] = []
         step = 80
         page = 0
         while page < total:
@@ -196,31 +239,43 @@ class PytdxSource(DataSource):
             if not infos:
                 break
             for info in infos:
-                if (
-                    info.get("market") == MARKET_SHFE_INE
-                    and info.get("category") == CATEGORY_FUTURE
-                ):
-                    code = (info.get("code") or "").upper()
-                    if code and code.lower().startswith(product.lower()):
-                        oi = float(info.get("open_interest") or 0.0)
-                        candidates.append((code, oi))
+                if int(info.get("category", -1)) != CATEGORY_FUTURE:
+                    continue
+                code = (info.get("code") or "").upper()
+                # 品种精确匹配（前导字母），避免 m<->MA 等误匹配
+                if code and _product_of_code(code) == prod:
+                    candidates.append((code, int(info.get("market", MARKET_SHFE_INE))))
             page += step
         if not candidates:
             raise HexDataError(
-                f"pytdx 未在上期所/INE 找到品种 '{product}' 的活跃合约（可能已休市）"
+                f"pytdx 未找到品种 '{product}' 的任何活跃合约（可能已休市/代码错误）"
             )
-        # 持仓量最大者为主力
-        main_code = max(candidates, key=lambda x: x[1])[0]
-        return main_code
-
+        # 按实时持仓量选主力（持仓最大者）
+        best_code, best_market, best_oi = None, None, -1.0
+        for code, market in candidates:
+            try:
+                q = api.get_instrument_quote(market, code)
+            except Exception:
+                q = None
+            if not q:
+                continue
+            q0 = q[0] if isinstance(q, (list, tuple)) else q
+            # 持仓量字段在实时报价中为 chicang（部分版本别名 open_interest）
+            oi = float(q0.get("chicang") or q0.get("open_interest") or 0.0)
+            if oi > best_oi:
+                best_oi, best_code, best_market = oi, code, market
+        if best_code is None:
+            # 全部无实时报价时退回首个候选（避免卡死，行为接近旧逻辑但不保证主力）
+            best_code, best_market = candidates[0]
+        return best_code, best_market
     def _fetch_continuous(self, product: str, period: int, count: int) -> pd.DataFrame:
         """主力连续：选主力合约后取其近期 K 线。
 
         注：仅取「当前主力」近期历史；跨月连续需多合约拼接，由现有
         ``ContractStitcher``（``hexbroker/data/contract.py``）负责后向复权对齐。
         """
-        main_code = self._select_main_contract(product)
-        df = self._fetch_contract_bars(main_code, period, count)
+        main_code, main_market = self._select_main_contract(product)
+        df = self._fetch_contract_bars(main_code, period, count, market=main_market)
         # 主力连续以品种字母作 symbol，便于与 ContractStitcher 衔接
         df = df.reset_index()
         df["symbol"] = product.lower()
@@ -262,7 +317,9 @@ class PytdxSource(DataSource):
                     # Volume/Amount 已是最终值，禁止二次换算
                     "volume": float(b.get("volume", 0.0) or 0.0),
                     "amount": float(b.get("amount", 0.0) or 0.0),
-                    "open_interest": float(b.get("open_interest", 0.0) or 0.0),
+                    # pytdx 日/频 K 线持仓量字段名为 position（非 open_interest），
+                    # 旧实现读 open_interest 恒为 0 → 持仓量列全 0；兼容两种键名。
+                    "open_interest": float(b.get("open_interest") or b.get("position") or 0.0),
                 }
             )
         df = pd.DataFrame.from_records(records)
