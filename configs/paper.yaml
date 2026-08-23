@@ -1,0 +1,134 @@
+# =============================================================================
+# 模拟盘交易系统配置（自包含，§7 约定：所有魔法数字进 yaml，代码不写裸阈值）
+# 文档：docs/system_design.md（T01 项目基础设施）
+# =============================================================================
+paper:
+  # ---- 资金与预算 ----
+  initial_capital: 100000          # 初始资金（元，PRD R4）
+  budget_ratio: 0.30               # 单品种保证金预算上限占权益比例（A4）
+  evaluation_days: 20              # 首轮评估交易日数（Q5 批复）
+
+  # ---- 运行节奏 ----
+  poll_interval_sec: 60            # 主循环 tick 轮询间隔（秒）
+  intel_interval_sec: 1800         # 情报轮询间隔（秒，30-60 分钟）
+  snapshot_interval_sec: 300       # 账户快照落盘间隔（秒）
+  open_delay_min: 5                # 开盘后延迟进入分钟数（Q6 批复，跳过集合竞价）
+
+  # ---- 信号 ----
+  signal_cache: artifacts/signals_cache18_grouped_v8.parquet   # v8 信号缓存（Q2 批复）
+  freshness_threshold_days: 5      # 信号新鲜度阈值（交易日；过期→技术兜底/禁开+告警，§8.2）
+  technical:                       # 技术指标兜底参数（§8.1 c0 信号缺口）
+    fast_ma: 5
+    slow_ma: 20
+    atr_window: 14
+    atr_mult: 1.5
+
+  # ---- 风控（复用 configs/risk/v4_atr.yaml 语义/R6；按 10 万账户规模调参） ----
+  risk_config: configs/risk/v4_atr.yaml
+  risk_hard_stop: 0.20             # 组合硬止损回撤阈值（默认 0.20）
+  # 风控参数覆盖：v4_atr 语义不变（硬止损>S1-S5>预算>恢复>意图），仅将参数
+  # 从 100 万回测账户标定调整到 10 万模拟账户（否则预算≤8% 永远买不起 1 手）
+  risk_overrides:
+    vol_target: 0.30
+    kelly_cap: 1.0
+    max_position_pct: 0.50
+  risk_default_intent: 0.30        # 信号→意图仓位（风控再封顶）
+  risk_default_vol: 0.02           # 无 K 线时 realized_vol 近似
+  risk_vol_quantile: 0.5           # ATR 档位波动分位
+  default_atr_pct: 0.01            # 无 K 线时 ATR 近似（价格比例）
+  risk_reward_ratio: 1.5           # 止盈/止损距离比（计划止盈用）
+
+  # ---- 成本模型（与 SimBroker/CostModel 口径一致，PRD R4） ----
+  cost:
+    fee_rate_open: 0.00005
+    fee_rate_close: 0.00005
+    fee_rate_close_today: 0.00010
+    slippage_ticks: 1
+    margin_rate: 0.12
+    multiplier: 10.0
+    min_tick: 10.0
+
+  # ---- 落盘路径 ----
+  data_dir: data/paper
+  plans_dir: trade_plans
+  reports_dir: deliverables
+  account_file: data/paper/account.json
+  trades_log: data/paper/trades.log
+  c0_daily_csv: data/paper/c0_daily.csv
+  intel_static_file: data/paper/news_static.json   # 静态情报源（MCP 桥接 P1）
+
+  # ---- 行情 ----
+  quote_url: https://hq.sinajs.cn/list=
+  quote_timeout_sec: 10
+  bar_freq: 1d                     # 技术兜底 K 线频率
+  bar_days: 120                    # 技术兜底 K 线天数
+
+  # ---- 品种（主力连续 + 换月；c0 参数显式声明，不在 CONTRACTS18 内） ----
+  symbols:
+    ag0:
+      display: SHFE.ag
+      sina_code: nf_AG0
+      multiplier: 15
+      min_tick: 0.01
+      mode: trade                  # trade=完整启用（v8 信号+实时行情）
+      sessions:
+        day: [["09:00","10:15"],["10:30","11:30"],["13:30","15:00"]]
+        night: [["21:00","02:30"]]
+    rb0:
+      display: SHFE.rb
+      sina_code: nf_RB0
+      multiplier: 10
+      min_tick: 1
+      mode: trade
+      sessions:
+        day: [["09:00","10:15"],["10:30","11:30"],["13:30","15:00"]]
+        night: [["21:00","23:00"]]
+    c0:
+      display: DCE.c
+      sina_code: nf_C0
+      multiplier: 10
+      min_tick: 1
+      mode: accumulate             # accumulate=日线积累渐进启用（c0 决策，§8.1）
+      accumulate_days: 30          # 满 30 个交易日后自动切换 trade
+      sessions:
+        day: [["09:00","10:15"],["10:30","11:30"],["13:30","15:00"]]
+        night: []
+
+  # ---- 2026 节假日表（交易所休市日；以交易所当年公告为准，上线前人工核对一次，§8.5） ----
+  holidays_2026:
+    # 元旦（1/1-1/3）
+    - "2026-01-01"
+    - "2026-01-02"
+    - "2026-01-03"
+    # 春节（2/15-2/22，除夕 2/16）
+    - "2026-02-16"
+    - "2026-02-17"
+    - "2026-02-18"
+    - "2026-02-19"
+    - "2026-02-20"
+    - "2026-02-21"
+    - "2026-02-22"
+    # 清明（4/4-4/6）
+    - "2026-04-06"
+    # 劳动节（5/1-5/5）
+    - "2026-05-01"
+    - "2026-05-04"
+    - "2026-05-05"
+    # 端午（6/19-6/21）
+    - "2026-06-19"
+    # 中秋（9/25-9/27）
+    - "2026-09-25"
+    # 国庆（10/1-10/7）
+    - "2026-10-01"
+    - "2026-10-02"
+    - "2026-10-05"
+    - "2026-10-06"
+    - "2026-10-07"
+
+  # ---- 情报（Q3 批复：P1 仅风险提示+计划备注） ----
+  intel:
+    keywords:
+      ag0: [沪银, 白银, 银价, 贵金属]
+      rb0: [螺纹, 螺纹钢, 钢材, 铁矿, 黑色系]
+      c0: [玉米, 玉米淀粉, 农产品]
+    risk_keywords: [风险, 下跌, 上涨, 暴涨, 暴跌, 涨停, 跌停, 限产, 抛储, 政策, 关税, 制裁, 出口, 库存]

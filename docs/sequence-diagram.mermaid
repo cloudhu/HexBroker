@@ -1,158 +1,69 @@
-%% ============================================================
-%% HexFutures-AI 时序图（三张）
-%% 1) 训练/研究流水线  2) 进化外循环  3) 推理/交易流程
-%% 说明：mermaid 单文件内可分别复制使用；每张以 sequenceDiagram 开头
-%% ============================================================
-
-%% ---------- 图 1：训练 / 研究流水线（walk-forward 全流程） ----------
 sequenceDiagram
     autonumber
-    actor R as 研究者 CLI
-    participant P as ResearchPipeline
-    participant DS as DataSource TQSDK
-    participant CS as ContractStitcher
-    participant SP as WalkForwardSplitter
-    participant FP as FeaturePipeline
-    participant FM as ForecastModel Kronos
-    participant CB as ProbabilityCalibrator
-    participant SS as SignalStore
-    participant EV as EvolutionEngine Optuna
-    participant EN as FuturesTradingEnv
-    participant RM as RiskManager
-    participant AG as RLAgent SB3
-    participant BE as BacktestEngine
-    participant EA as Evaluator
-    participant RP as Reporter
+    actor Op as 运营者
+    participant Bat as start_paper_trading.bat
+    participant Main as scripts/paper_trading_main.py
+    participant Cfg as configs/paper.yaml
+    participant S as TradingScheduler
+    participant Q as RealTimeQuoteClient
+    participant SE as SignalEngine
+    participant RG as RiskGate
+    participant PM as PlanManager
+    participant PB as PaperBroker
+    participant TL as TradeLogger
+    participant IS as IntelligenceService
+    participant RR as ReviewReporter
 
-    R->>P: run(configs/experiment/e01_cu_daily.yaml)
-    P->>P: load_config + set_global_seed + init_logger
-    P->>DS: fetch_bars(symbols, start, end, freq)
-    DS-->>P: raw BarFrame
-    P->>CS: stitch(raw_bars)
-    CS-->>P: BarFrame adj_close + raw_close
-    P->>P: validate_bars + clean + resample
-    P->>SP: split(index)
-    SP-->>P: folds train/purge/test
+    Note over Op,Bat: 一、启动调用链（P0 R1，≤60s）
+    Op->>Bat: 双击执行
+    Bat->>Bat: 设置 PYTHONPATH + 复用默认 Python 环境
+    Bat->>Main: python scripts/paper_trading_main.py
+    Main->>Cfg: load_config("configs/paper.yaml")
+    Main->>Main: 校验信号缓存/品种配置/节假日表
+    Main->>PB: 加载账户快照 data/paper/account.json（无则初始 100,000）
+    Main->>S: Scheduler.run() 进入主循环
 
-    loop 每个 fold i
-        P->>FP: fit(train_i) then transform(all_i)
-        FP-->>P: FeatureFrame
-        P->>FM: fit(train_i)
-        FM-->>P: TrainLog ckpt
-        P->>FM: predict(test_i) MC 采样
-        FM-->>P: raw ForecastSignal
-        P->>CB: fit(train_i) then transform(raw)
-        CB-->>P: calibrated ForecastSignal
-        P->>SS: append(signals, model_id)
-    end
-    P->>SS: assert_oos_only()
-    SS-->>P: OK 无泄漏
-
-    Note over P,EV: 内层A 预测超参进化（可选，含 Hyperband 剪枝）
-    P->>EV: run(space=forecast, objective=dir_acc+rankIC)
-    EV->>P: 重跑上述 fold 循环 for each trial
-    EV-->>P: best_forecast_config
-
-    Note over P,AG: RL 训练（只读 SignalStore，风控 in-the-loop）
-    P->>EN: build(bars_raw, SignalStore, RiskManager, CostModel, RewardFunction)
-    EN->>RM: bind(risk_manager)
-    P->>AG: learn(total_timesteps)
-    loop 每个 env step
-        AG->>EN: action
-        EN->>EN: ActionAdapter.to_target_position
-        EN->>RM: apply(raw_target, state, signal)
-        RM-->>EN: RiskDecision approved + stop + reasons
-        EN->>EN: SimBroker.execute 成本/滑点/涨跌停
-        EN->>EN: Portfolio.update
-        EN-->>AG: obs reward terminated info
-    end
-    AG-->>P: trained agent ckpt
-
-    Note over P,EV: 内层B RL 超参进化（NSGA-II 多目标）
-    P->>EV: run(space=rl, objective=sharpe+trade_win_rate, constraint=maxDD)
-    EV-->>P: best_rl_config
-
-    P->>BE: run(bars_test, policy=agent)
-    BE-->>P: BacktestResult equity trades fills
-    P->>EA: compute(result, signals)
-    EA-->>P: MetricsReport
-    P->>EA: compare_baselines(BuyHold MACD MA2 SignalOnly)
-    EA-->>P: comparison table
-    P->>RP: render(report, figures)
-    RP-->>R: artifacts/reports/e01_cu_daily.md + png
-
-
-%% ---------- 图 2：进化外循环（含漂移触发） ----------
-sequenceDiagram
-    autonumber
-    participant SC as EvolutionScheduler
-    participant DD as DriftDetector
-    participant OE as OptunaEngine
-    participant EE as ExammEngine
-    participant P as ResearchPipeline
-    participant CFGS as ConfigStore artifacts/best
-
-    SC->>DD: detect(ref_window, cur_window)
-    alt 无漂移 且 未到周期
-        DD-->>SC: no_event
-        SC-->>SC: sleep 到下一 walk-forward step
-    else PSI>0.2 或 IC 衰减 或 到达季度
-        DD-->>SC: DriftEvent(level, metric)
-        SC->>OE: run(space=forecast, n_trials=N1)
-        OE->>P: evaluate(trial_cfg) 逐 fold report
-        P-->>OE: MetricsReport
-        OE-->>SC: best_forecast_config
-        SC->>EE: evolve(stream=recent_bars)
-        loop 每代 每岛
-            EE->>EE: mutate genome 节点/边/递归连接
-            EE->>P: 训练评估 genome ≤3 epoch
-            P-->>EE: fitness
-            EE->>EE: island migration 精英迁移
+    Note over S,TL: 二、单轮 tick 管道（默认每 60s）
+    loop 每 tick
+        S->>S: 遍历 ag0/rb0/c0，_is_symbol_tradable(symbol, now)
+        alt 非交易时段/节假日/开盘延迟中
+            S-->>S: 跳过该品种（0 新开仓）
+        else 可交易
+            S->>Q: fetch_quotes([symbol])
+            Q-->>S: Quote(price=最新价)
+            S->>SE: latest_signal(symbol, now)
+            alt 信号新鲜（v8 有近 N 日信号）
+                SE-->>S: SignalFrame(source=engine_a)
+            else 信号缺失/过期
+                SE->>SE: technical_fallback(symbol, 分钟K线)
+                SE-->>S: SignalFrame(source=technical) 或 None→禁开新仓
+            end
+            S->>RG: evaluate(signal, quote, account, pos_ctx)
+            RG-->>S: RiskDecision(target_position/liquidate/stop_price/reason)
+            S->>PM: update_from_signal(signal, decision)
+            PM-->>S: Plan(方向/目标仓位/止盈止损)
+            S->>PB: execute_plan(plan, quote, ts)
+            alt 有成交
+                PB-->>S: TradeEvent
+                S->>TL: trade(event)  # 文件+stdout 输出 5 要素
+            end
         end
-        EE-->>SC: best_genome 加入 Ensemble
-        SC->>OE: run(space=rl, n_trials=N2)
-        OE-->>SC: best_rl_config
-        SC->>CFGS: save(best_configs + model_ids + 指纹)
     end
 
-
-%% ---------- 图 3：推理 / 交易流程（实时，实盘层默认关闭） ----------
-sequenceDiagram
-    autonumber
-    participant GW as TqsdkGateway
-    participant LR as LiveRunner
-    participant BB as BarBuffer
-    participant FP as FeaturePipeline
-    participant FM as ForecastModel 已训练
-    participant CB as Calibrator
-    participant AG as RLAgent 已训练
-    participant RM as RiskManager
-    participant PF as Portfolio 实时
-    participant LG as Logger 审计
-
-    GW->>LR: on_bar(new_bar) bar 收盘触发
-    LR->>BB: append(bar) 维护 lookback 窗口
-    LR->>LR: Calendar.is_trading_time 校验
-    LR->>FP: transform(window) 复用训练期统计量
-    FP-->>LR: FeatureFrame
-    LR->>FM: predict(features) MC 采样
-    FM-->>LR: raw signal
-    LR->>CB: transform(p_raw)
-    CB-->>LR: ForecastSignal p_up 校准后
-    LR->>PF: query_state 实时持仓/权益
-    PF-->>LR: PortfolioState
-    LR->>AG: predict(obs, deterministic=True)
-    AG-->>LR: action
-    LR->>RM: apply(raw_target, state, signal)
-    RM-->>LR: RiskDecision approved + stop_price + reasons
-    alt veto 或 目标仓位不变
-        LR->>LG: log 决策与原因，不下单
-    else 需要调仓
-        LR->>GW: send_order 下一 bar 开盘限价/市价
-        GW-->>LR: order_id 成交回报
-        LR->>PF: update(fills)
-        LR->>GW: 挂条件止损 stop_price
-        LR->>LG: log 完整决策链 signal action decision fill
+    Note over S,TL: 三、情报轮询（每 30-60 分钟）+ 收盘复盘
+    loop 每 30-60 分钟（情报）
+        S->>IS: poll(symbols, since=last_poll)
+        IS->>IS: 关键词过滤/归类到品种
+        IS-->>S: list[NewsItem]
+        S->>PM: apply_news(events)
+        PM-->>S: list[PlanChange]（仅备注/风险提示，Q3）
+        S->>TL: plan_change(change)
     end
-    LR->>LR: reconcile() 与柜台对账 幂等去重
-    Note over LR,LG: 熔断：连续异常/回撤超限 → 停止开新仓并告警
+
+    Note over S,RR: 当日全部品种收盘后
+    S->>PB: snapshot()
+    PB-->>S: AccountSnapshot
+    S->>RR: generate(day, acct, trades, plans, signals, news)
+    RR->>RR: 渲染 markdown
+    RR-->>S: Path(deliverables/复盘_YYYY-MM-DD.md)
+    S->>TL: daily_summary(day)  # 命令窗口摘要

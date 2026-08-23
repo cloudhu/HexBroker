@@ -1,423 +1,163 @@
 classDiagram
-    direction LR
-
-    %% ===== 数据契约 Data Contracts =====
-    class BarFrame {
-        <<DataContract>>
-        +Index idx_symbol_datetime
-        +float open
-        +float high
-        +float low
-        +float close
-        +float volume
-        +float amount
-        +float open_interest
-        +float adj_factor
-        +bool limit_up
-        +bool limit_down
-        +str freq
-        +validate() bool
+    class TradingScheduler {
+        +cfg: Any
+        +run() None
+        +_tick() None
+        +_is_symbol_tradable(symbol: str, ts: datetime) bool
+        +_on_close(day: date) None
+        -_intel_interval_sec: int
+    }
+    class RealTimeQuoteClient {
+        +fetch_quotes(symbols: list[str]) dict[str, Quote]
+        +fetch_bars(symbol: str, freq: str, days: int) pd.DataFrame
+        -_parse_line(line: str) Quote
+    }
+    class Quote {
+        +symbol: str
+        +ts: datetime
+        +price: float
+        +open: float
+        +high: float
+        +low: float
+        +pre_settle: float
+    }
+    class SignalEngine {
+        +latest_signal(symbol: str, asof: datetime) SignalFrame | None
+        +freshness_days(symbol: str, asof: datetime) int
+        +technical_fallback(symbol: str, bars: pd.DataFrame) SignalFrame | None
+        -_cache: pd.DataFrame
+    }
+    class SignalFrame {
+        +symbol: str
+        +ts: datetime
+        +p_up: float
+        +exp_ret: float
+        +is_effective: bool
+        +source: str
+        +freshness_days: int
+    }
+    class RiskGate {
+        +evaluate(signal: SignalFrame, quote: Quote, acct: AccountSnapshot, pos_ctx: PositionCtx) RiskDecision
+        +build_state(...) RiskState
+        -_manager: RiskManager
+    }
+    class PlanManager {
+        +update_from_signal(signal: SignalFrame, decision: RiskDecision) Plan
+        +apply_news(events: list[NewsItem]) list[PlanChange]
+        +get_plan(symbol: str) Plan | None
+        +save_plan_file(day: date) Path
+    }
+    class Plan {
+        +symbol: str
+        +direction: int
+        +target_qty: float
+        +target_pos_pct: float
+        +stop_price: float | None
+        +take_profit: float | None
+        +note: str
+        +risk_flag: str
+        +source: str
+        +updated_at: datetime
+    }
+    class PaperBroker {
+        +execute_plan(plan: Plan, quote: Quote, ts: datetime) TradeEvent | None
+        +available_cash(marks: dict) float
+        +margin_used(marks: dict) float
+        +snapshot() AccountSnapshot
+        +save_snapshot(path: Path) None
+        +load_snapshot(path: Path) None
+        -_broker: SimBroker
+        -_cost: CostModel
+    }
+    class TradeEvent {
+        +trade_id: str
+        +ts: datetime
+        +symbol: str
+        +direction: int
+        +qty: float
+        +entry: float
+        +stop: float | None
+        +take_profit: float | None
+        +price: float
+        +fee: float
+        +is_open: bool
+        +is_today_close: bool
+    }
+    class IntelligenceService {
+        +poll(symbols: list[str], since: datetime) list[NewsItem]
+        +filter_by_keywords(items: list[NewsItem]) list[NewsItem]
+        +providers: list[IntelligenceProvider]
+    }
+    class IntelligenceProvider {
+        <<interface>>
+        +fetch_news(symbols: list[str], since: datetime) list[NewsItem]
+        +name() str
+    }
+    class NewsItem {
+        +ts: datetime
+        +symbols: list[str]
+        +title: str
+        +summary: str
+        +tags: list[str]
+        +source: str
+    }
+    class TradeLogger {
+        +trade(event: TradeEvent) None
+        +plan_change(change: PlanChange) None
+        +daily_summary(day: date) None
+        -_stdout_sink
+        -_file_sink
+    }
+    class ReviewReporter {
+        +generate(day: date, acct: AccountSnapshot, trades: list[TradeEvent], plans: dict, signals: dict, news: list[NewsItem]) Path
+        -_render_md(...) str
+    }
+    class AccountSnapshot {
+        +ts: datetime
+        +equity: float
+        +cash: float
+        +margin_used: float
+        +positions: dict[str, float]
+        +avg_entry: dict[str, float]
+        +realized: dict[str, float]
+        +drawdown: float
+        +peak_equity: float
+    }
+    class PositionCtx {
+        +position: float
+        +entry_price: float
+        +atr: float
+        +bars_in_position: int
+        +highest_since_entry: float
+        +lowest_since_entry: float
+    }
+    class TradingSession {
+        +is_tradable(symbol: str, ts: datetime) bool
+        +is_trading_day(ts: datetime) bool
+        +is_open_delay_passed(symbol: str, ts: datetime, delay_min: int) bool
+        +day_label(ts: datetime) date
+        -_calendar: FuturesCalendar
+        -_holidays_2026: set[date]
     }
 
-    class FeatureFrame {
-        <<DataContract>>
-        +Index idx_symbol_datetime
-        +List~str~ feature_names
-        +ndarray values
-        +str feature_fingerprint
-        +validate_no_nan_future() bool
-    }
-
-    class ForecastSignal {
-        <<DataContract>>
-        +str symbol
-        +Timestamp ts
-        +int horizon
-        +float p_up
-        +float exp_ret
-        +Dict~str,float~ quantiles
-        +float vol_hat
-        +float conf
-        +str model_id
-        +Timestamp train_end
-        +bool is_effective
-    }
-
-    class RiskDecision {
-        <<DataContract>>
-        +float approved_target_position
-        +float stop_price
-        +bool veto
-        +List~str~ reason_codes
-        +str recovery_stage
-    }
-
-    class Trade {
-        <<DataContract>>
-        +str symbol
-        +Timestamp entry_ts
-        +Timestamp exit_ts
-        +int direction
-        +float entry_price
-        +float exit_price
-        +float volume
-        +float pnl
-        +float cost
-        +str exit_reason
-    }
-
-    class MetricsReport {
-        <<DataContract>>
-        +float dir_accuracy
-        +float dir_accuracy_effective
-        +float coverage
-        +float rank_ic
-        +float icir
-        +float brier
-        +float calibration_error
-        +float trade_win_rate
-        +float profit_factor
-        +float payoff_ratio
-        +float sharpe
-        +float calmar
-        +float max_drawdown
-        +float turnover
-        +float cost_drag
-        +float deflated_sharpe
-        +float pbo
-        +to_markdown() str
-    }
-
-    %% ===== 1 数据层 =====
-    class DataSource {
-        <<abstract>>
-        +fetch_bars(symbols, start, end, freq) BarFrame
-        +health_check() bool
-    }
-    class TqsdkSource
-    class AkshareSource
-    class CsvSource
-    class QlibSource
-
-    class ContractStitcher {
-        +str main_rule
-        +str adjust_method
-        +stitch(raw_bars) BarFrame
-        +rollover_dates() List~Timestamp~
-    }
-
-    class FuturesCalendar {
-        +is_trading_time(ts, symbol) bool
-        +sessions(symbol) List~Session~
-        +next_bar_ts(ts, freq) Timestamp
-    }
-
-    class WalkForwardSplitter {
-        +int train_len
-        +int test_len
-        +int purge
-        +int embargo
-        +str mode
-        +split(index) List~Fold~
-    }
-
-    class WindowDataset {
-        +int lookback
-        +int horizon
-        +__len__() int
-        +__getitem__(i) Tuple
-    }
-
-    %% ===== 2 特征层 =====
-    class FeatureTransformer {
-        <<abstract>>
-        +fit(train_frame) void
-        +transform(frame) FeatureFrame
-        +feature_names() List~str~
-    }
-    class TechnicalFeatures
-    class MicrostructureFeatures
-    class RollingNormalizer
-
-    class FeaturePipeline {
-        +List~FeatureTransformer~ steps
-        +fit(train_frame) void
-        +transform(frame) FeatureFrame
-    }
-
-    class BaseTokenizer {
-        <<abstract>>
-        +encode(bars) ndarray
-        +decode(tokens) BarFrame
-        +vocab_size() int
-    }
-    class KronosTokenizerAdapter
-    class QuantileTokenizer
-
-    %% ===== 3 预测层（自回归）=====
-    class ForecastModel {
-        <<abstract>>
-        +str model_id
-        +fit(X_train, y_train, X_valid) TrainLog
-        +predict(X) List~ForecastSignal~
-        +save(path) void
-        +load(path) ForecastModel
-    }
-    class KronosAdapter {
-        +str model_name
-        +str tokenizer_name
-        +int max_context
-        +int horizon
-        +int n_mc_samples
-        +float temperature
-        +float top_p
-        +assert_pairing() bool
-        +finetune_via_official_scripts(csv_dir) TrainLog
-        +sample_paths(X) ndarray
-    }
-    class ARTransformer
-    class TcnBaseline
-    class GruBaseline
-    class LgbmBaseline
-    class EnsembleModel {
-        +List~ForecastModel~ members
-        +Dict~str,float~ weights
-        +reweight_by_recent_ic(window) void
-    }
-    class ProbabilityCalibrator {
-        +str method
-        +fit(p_raw, y) void
-        +transform(p_raw) ndarray
-        +calibration_error() float
-    }
-    class SignalStore {
-        +str path
-        +append(signals, model_id) void
-        +read(symbols, start, end) DataFrame
-        +to_obs_frame(cols) DataFrame
-        +assert_oos_only() bool
-    }
-
-    %% ===== 4 进化层 =====
-    class SearchSpace {
-        +suggest(trial, base_cfg) Config
-        +List~str~ param_names
-    }
-    class Objective {
-        +weights
-        +evaluate(report) Tuple
-        +should_prune(report) bool
-    }
-    class EvolutionEngine {
-        <<abstract>>
-        +run(n_trials) BestResult
-        +best_config() Config
-    }
-    class OptunaEngine {
-        +str sampler
-        +str pruner
-        +str storage
-        +resume() void
-    }
-    class ExammEngine {
-        +int n_islands
-        +int n_generations
-        +Dict~str,float~ mutation_ops
-        +evolve(stream) Genome
-    }
-    class Genome {
-        +List nodes
-        +List edges
-        +int n_params
-        +to_torch_module() Module
-    }
-    class DriftDetector {
-        +float psi_threshold
-        +detect(ref, cur) DriftEvent
-    }
-
-    %% ===== 5 RL 决策层 =====
-    class FuturesTradingEnv {
-        +SignalStore signal_store
-        +RiskManager risk_manager
-        +SimBroker broker
-        +RewardFunction reward_fn
-        +reset(seed) Tuple
-        +step(action) Tuple
-    }
-    class ObservationBuilder {
-        +List~str~ obs_names
-        +build(signal_row, bar, state, decision) ndarray
-    }
-    class ActionAdapter {
-        +str space_type
-        +to_target_position(action, state) float
-    }
-    class RewardFunction {
-        +float w_pnl
-        +float w_cost
-        +float w_dd
-        +float w_turn
-        +float w_align
-        +__call__(state, fills, decision) float
-    }
-    class RLAgent {
-        +str algo
-        +str model_id
-        +learn(total_timesteps) void
-        +predict(obs, deterministic) Action
-        +save(path) void
-        +load(path) RLAgent
-    }
-    class RiskWrapper
-
-    %% ===== 6 风控层 =====
-    class RiskManager {
-        +apply(raw_target, state, signal) RiskDecision
-        +update_state(bar, portfolio) RiskState
-    }
-    class AdaptiveATRStop {
-        +float mult_high_vol
-        +float mult_mid_vol
-        +float mult_low_vol
-        +stop_price(state) float
-    }
-    class SellSignalEngine {
-        +check(state, signal) List~str~
-    }
-    class RiskBudget {
-        +float vol_target
-        +float max_position_pct
-        +size(state, signal) float
-    }
-    class DrawdownRecovery {
-        +stage(equity_curve) str
-        +position_scalar(stage) float
-    }
-    class ExchangeLimits {
-        +clip(target, bar, state) float
-    }
-
-    %% ===== 7 回测/评估层 =====
-    class CostModel {
-        +Dict~str,float~ fee_rate
-        +float slippage_ticks
-        +Dict~str,float~ margin_rate
-        +Dict~str,float~ multiplier
-        +cost(order, bar) float
-    }
-    class SimBroker {
-        +CostModel cost_model
-        +execute(target_position, bar) List~Fill~
-        +check_margin(state) bool
-    }
-    class Portfolio {
-        +float cash
-        +Dict~str,float~ positions
-        +Series equity_curve
-        +List~Trade~ trades
-        +update(fills, bar) PortfolioState
-    }
-    class BacktestEngine {
-        +run(bars, policy) BacktestResult
-    }
-    class WalkForwardRunner {
-        +run(cfg) BacktestResult
-    }
-    class Evaluator {
-        +compute(result, signals) MetricsReport
-        +compare_baselines(result) DataFrame
-    }
-    class Reporter {
-        +render(report, figures) str
-    }
-
-    %% ===== 8 实盘层 =====
-    class BrokerGateway {
-        <<abstract>>
-        +subscribe(symbols) void
-        +on_bar(callback) void
-        +send_order(order) str
-        +query_position() Dict
-    }
-    class TqsdkGateway
-    class LiveRunner {
-        +run_once(bar) void
-        +reconcile() void
-    }
-
-    %% ===== 关系 Relationships =====
-    DataSource <|-- TqsdkSource
-    DataSource <|-- AkshareSource
-    DataSource <|-- CsvSource
-    DataSource <|-- QlibSource
-    DataSource ..> BarFrame : produces
-    ContractStitcher ..> BarFrame : transforms
-    ContractStitcher --> FuturesCalendar : uses
-    WindowDataset --> FeatureFrame : reads
-    WalkForwardSplitter ..> WindowDataset : indexes
-
-    FeatureTransformer <|-- TechnicalFeatures
-    FeatureTransformer <|-- MicrostructureFeatures
-    FeatureTransformer <|-- RollingNormalizer
-    FeaturePipeline o-- FeatureTransformer
-    FeaturePipeline ..> FeatureFrame : produces
-    BaseTokenizer <|-- KronosTokenizerAdapter
-    BaseTokenizer <|-- QuantileTokenizer
-
-    ForecastModel <|-- KronosAdapter
-    ForecastModel <|-- ARTransformer
-    ForecastModel <|-- TcnBaseline
-    ForecastModel <|-- GruBaseline
-    ForecastModel <|-- LgbmBaseline
-    ForecastModel <|-- EnsembleModel
-    EnsembleModel o-- ForecastModel
-    KronosAdapter --> BaseTokenizer : uses
-    ForecastModel ..> ForecastSignal : produces
-    ProbabilityCalibrator ..> ForecastSignal : calibrates
-    SignalStore o-- ForecastSignal
-
-    EvolutionEngine <|-- OptunaEngine
-    EvolutionEngine <|-- ExammEngine
-    EvolutionEngine --> SearchSpace : uses
-    EvolutionEngine --> Objective : uses
-    ExammEngine o-- Genome
-    Objective ..> MetricsReport : reads
-    DriftDetector ..> EvolutionEngine : triggers
-
-    FuturesTradingEnv --> SignalStore : reads_only
-    FuturesTradingEnv --> ObservationBuilder
-    FuturesTradingEnv --> ActionAdapter
-    FuturesTradingEnv --> RewardFunction
-    FuturesTradingEnv --> RiskManager : in_the_loop
-    FuturesTradingEnv --> SimBroker
-    FuturesTradingEnv --> Portfolio
-    RiskWrapper ..> FuturesTradingEnv : wraps
-    RLAgent --> FuturesTradingEnv : trains_on
-
-    RiskManager o-- AdaptiveATRStop
-    RiskManager o-- SellSignalEngine
-    RiskManager o-- RiskBudget
-    RiskManager o-- DrawdownRecovery
-    RiskManager o-- ExchangeLimits
-    RiskManager ..> RiskDecision : produces
-
-    SimBroker --> CostModel
-    Portfolio o-- Trade
-    BacktestEngine --> SimBroker
-    BacktestEngine --> Portfolio
-    BacktestEngine --> RiskManager
-    BacktestEngine ..> RLAgent : as_policy
-    WalkForwardRunner --> WalkForwardSplitter
-    WalkForwardRunner --> ForecastModel
-    WalkForwardRunner --> SignalStore
-    WalkForwardRunner --> RLAgent
-    WalkForwardRunner --> BacktestEngine
-    Evaluator ..> MetricsReport : produces
-    Reporter ..> MetricsReport : renders
-
-    BrokerGateway <|-- TqsdkGateway
-    LiveRunner --> BrokerGateway
-    LiveRunner --> ForecastModel
-    LiveRunner --> RLAgent
-    LiveRunner --> RiskManager
+    TradingScheduler --> RealTimeQuoteClient
+    TradingScheduler --> SignalEngine
+    TradingScheduler --> RiskGate
+    TradingScheduler --> PlanManager
+    TradingScheduler --> PaperBroker
+    TradingScheduler --> IntelligenceService
+    TradingScheduler --> TradeLogger
+    TradingScheduler --> ReviewReporter
+    TradingScheduler --> TradingSession
+    RealTimeQuoteClient ..> Quote
+    SignalEngine ..> SignalFrame
+    RiskGate ..> RiskDecision : 复用 hexbroker.risk.types
+    PlanManager ..> Plan
+    PaperBroker ..> TradeEvent
+    PaperBroker --> SimBroker : 复用 hexbroker.backtest.broker
+    PaperBroker --> CostModel : 复用 hexbroker.backtest.cost
+    RiskGate --> RiskManager : 复用 hexbroker.risk.manager
+    IntelligenceService --> IntelligenceProvider
+    IntelligenceService ..> NewsItem
+    TradeLogger ..> TradeEvent
+    ReviewReporter ..> AccountSnapshot
