@@ -10,7 +10,7 @@
 | 项 | 状态 |
 |---|---|
 | 全部模块编译 / 导入 | ✅ 通过（90/90） |
-| pytest 全量 | ✅ **264 项全部通过** |
+| pytest 全量 | ✅ **315 项全部通过**（90 模块编译/导入 + 305 既有 + 本轮新增 10 个 L7/E3 回归测试） |
 | 端到端 demo 管线 | ✅ 跑通并生成报告（`artifacts/reports/report_demo_20260823_*.md`） |
 | 依赖安装位置 | ⚠️ **环境缺口**：默认 `python`（managed 3.13.12）未装任何核心依赖，依赖实际在 `envs/default`；`pyproject.toml` 未声明运行依赖，新人按官方说明无法直接复现 |
 
@@ -111,11 +111,32 @@
 
 > 说明：`group_cap/group_map` 部署接线此前已由 `configs/base.yaml` 显式启用（P10-1），`risk/manager.py` 经 P4 已读 `group_cap/group_map`；本轮 V5 仅补齐 `contracts=None` 的乘数规格回退（消除"无证据不翻转"之外的默认口径隐患）。
 
+#### 二-F. P2 Batch B 残余 L7/E3 定点修复（第六轮，fresh-eyes 实证 + 回归测试）
+
+> 第六轮修复后：全量 pytest **315/315 通过**（较第五轮 305 新增 **10** 个回归测试：L7×6 / E3-A×2 / E3-B×2）。L7（数据层主力/市场硬编码）、E3（信号质量/RL 口径）均经 **fresh-eyes 直接读 pytdx 库 parser 源码 + 运行时机制验证 + 区分式回归测试** 确认根因并定点修复，遵循「无证据不翻转」铁律——E3-A 仅把 `is_effective` 纳入工作副本、不设默认阈值硬编码，默认阈下数值与旧默认分支完全一致，未翻转研究结论。
+
+**L7 — pytdx 主力/市场硬编码（fresh-eyes 实证根因）**
+
+| 子项 | 根因（源码实证） | 修复 | 验证 |
+|---|---|---|---|
+| L7-1 | pytdx K 线解析器（`ex_get_instrument_bars`）持仓量字段名为 **`position`**（非 `open_interest`）→ 旧 `_bars_to_frame` 读 `open_interest` 恒为 0 → BarFrame 的 `open_interest` 列全 0 | `_bars_to_frame` 改为 `b.get("open_interest") or b.get("position")` 兼容两键名 | `test_pytdx_source.py`：仅给 `position` 字段 → `open_interest==12345`；同时给两字段 → 优先 `open_interest` |
+| L7-2 | `_select_main_contract` 旧读 `get_instrument_info` 的 `open_interest`（静态元数据**无此字段**→恒 0）→ 主力退化成"取首个候选"；且 `market=30` 硬编码仅 SHFE/INE → DCE 的 `m` 永取不到 | 跨**全部**交易所枚举（`_KNOWN_MARKETS`），按品种字母**精确匹配**（`_product_of_code`，避免 `m`<->`MA` 误匹配）；主力判定改用实时报价 **`chicang`**（部分版本别名 `open_interest`），返回 `(code, market)` | `test_pytdx_source.py`：DCE `M2509`(market=47) 正确选中、`MA2509`(CZCE) 被过滤；双 m 合约选持仓最大者 |
+| L7-3 | `_fetch_contract_bars` 旧写死 `market=30` → DCE/CZCE/CFFEX/INE 合约永取不到 | 重构为市场感知 + 自动发现：无 `market` 时遍历 `_KNOWN_MARKETS`，单市场失败/空数据**不抛**，跨市场回退 | `test_pytdx_source.py`：`M2509` 在 market=30 返回空时自动回退 47 取数成功 |
+
+**E3 — 信号质量/RL 口径不可比（fresh-eyes 实证根因）**
+
+| 子项 | 根因（源码实证） | 修复 | 验证 |
+|---|---|---|---|
+| E3-A | `_signal_metrics` 工作副本只选 `p_up/vol_hat/conf`，**漏选 `is_effective`** → 第119行 `df["is_effective"] if ...` 分支因列缺失**永远走默认**（`abs(p-0.5)>0.05`），属死代码（审计曾反驳"信号帧无 is_effective"——`signal_store.py:83` 确有该列，但工作副本未带入） | 工作副本纳入 `is_effective`（若存在）；**不设默认阈值硬编码**，沿用该列原值 → 默认阈下数值与旧默认分支一致 | `test_signal_metrics_effective.py`：含/不含 `is_effective` 列 → `dir_acc/eff_acc/coverage/rank_ic/brier/n` 全相等（不翻转） |
+| E3-B | 旧 `_run_rl` 仅以 `symbols[0]` 单品种训练（`train`/`policy_rollout` 单品种），而基线 `baseline.py` 逐品种遍历 → 口径不可比；且阈值基线对比写死 `scale=1`，而基线/RL 实盘用 `_contract_scale(cfg, prices)` → 杠杆口径不可比 | `_run_rl` 改为跨**全品种** loop（`FuturesTradingEnv(symbol=sym)` → `train` → `policy_rollout` 逐品种）；`scale` 形参透传至 `_run_evolution`/`_rl_obj`/`run_pipeline`，且阈值基线对比用同一 `scale`（不再写死 1） | `test_pipeline_rl_caliber.py`：两品种均被训练（`n_symbols==2`）；`_run_baselines` 收到的 `scale` 与传入一致（非 1） |
+
+> 说明：E3-B 多品种 loop 不破坏现有单品种测试（`test_rl_smoke.py` 断言 `env.obs_dim==cfg.rl.obs_window*6+4`、`action_space.n==5` 仍然满足）；E3-A 刻意保持 `is_effective` 默认口径不变，守「无证据不翻转」。
+
 ---
 
 ## 三、未修复的高优先级缺陷
 
-> ✅ **已修复并移至「二-B / 二-C / 二-D」的项**：P0 组 `E1` `P3` `P7` `L1` `L2`；P1 组 `P1` `P2` `P5` `P6` `E2` `L6`；P2 Batch A `L9` `P4` `V4` `L8` `V2` `V3` `E4` `P8`。剩余（`L3` `L4` `L5` `L7` `E3` `V1` `V5`）转入 Batch B，待 fresh-eyes QA 后定点修复。
+> ✅ **已修复并移至「二-B / 二-C / 二-D / 二-E / 二-F」的项**：P0 组 `E1` `P3` `P7` `L1` `L2`；P1 组 `P1` `P2` `P5` `P6` `E2` `L6`；P2 Batch A `L9` `P4` `V4` `L8` `V2` `V3` `E4` `P8`；P2 Batch B `L3` `L4` `L5` `V1` `V5`（见二-E）、`L7` `E3`（见二-F）。**所有高优先级缺陷已闭环。**
 
 （建议主理人评审后定点修复）
 
@@ -144,7 +165,7 @@
 | L4 | `feature/fundamental.py:112` `feature/global_ref.py:40` | 承诺 asof 但实现为精确 `reindex` → 外盘节假日/时刻错位大面积 NaN | ✅ **已修（详见二-E）** |
 | L5 | `feature/cross.py:154` | `pivot_table` 默认 `aggfunc="mean"`，`SHFE.au` 与 `au0` 同短名被静默均值 | ✅ **已修（详见二-E）** |
 | L6 | `data/splitter.py:96,104` | expanding 模式改写 `self.train_len`（**非幂等**）；不变量忽略 `embargo` | ✅ **已修（详见二-C）**：局部 `cur_train_len` 幂等 + `assert_no_leakage` 纳入 `embargo` |
-| L7 | `sources/pytdx_source.py:205,52` | `get_instrument_info` 不返回 `open_interest`（选主力退化）；`market=30` 硬编码仅 SHFE/INE，DCE 的 `m` 取不到 |
+| L7 | `sources/pytdx_source.py:205,52` | `get_instrument_info` 不返回 `open_interest`（选主力退化）；`market=30` 硬编码仅 SHFE/INE，DCE 的 `m` 取不到 | ✅ **已修（详见二-F）**：跨全市场枚举 + 实时 `chicang` 选主力 + `position`→`open_interest` 兼容 |
 | L8 | `forecast/kronos_adapter.py:43` `kronos_predictor.py:77` | 直接构造时**未调 `validate_kronos_pairing`** → 模型/分词器错配红线被绕过 | ✅ **已修（详见二-D）**：构造即校验配对 |
 | L9 | `forecast/signal_store.py:34` | `put()` 不做 OOS 校验，样本内信号可写入（依赖调用方） | ✅ **已修（详见二-D）**：`put()` 丢弃样本内信号 |
 
@@ -154,7 +175,7 @@
 |---|---|---|
 | E1 | `evaluation/metrics.py` `report.py` | **全包无盈亏比(profit_factor)**，只报胜率+回撤 → 违反 README「方向准确率/胜率/盈亏比/最大回撤须同时呈现」；且 `win_rate` 是 bar 收益胜率非成交胜率 |
 | E2 | `evaluation/stats.py:39,26` | "PBO" 仅是 `test<train` 计数非 CSCV；DSR 忽略 skew/kurt 退化为 `sigmoid(sharpe*sqrt(n))≈1` → 闸门 `dsr>0` 恒真 | ✅ **已修（详见二-C）**：DSR 重写为偏度/峰度感知 Bailey–López de Prado 式 |
-| E3 | `pipeline.py:111,179` `futures_env.py:239` | `is_effective` 分支永不可达；RL 用单品种 `symbols[0]`、基线跨全品种、`scale=1` 写死 → 口径不可比 |
+| E3 | `pipeline.py:111,179` `futures_env.py:239` | `is_effective` 分支永不可达；RL 用单品种 `symbols[0]`、基线跨全品种、`scale=1` 写死 → 口径不可比 | ✅ **已修（详见二-F）**：工作副本纳入 `is_effective`（不翻转默认）；RL 跨全品种 loop + `scale` 透传阈值基线 |
 | E4 | `backtest/walkforward.py:65` | 聚合无盈亏比；3~5 bar 短折也做年化，`_std` 用 `ddof=0` | ✅ **已修（详见二-D）**：聚合盈亏比 + 短折跳过年化 + `ddof=1` |
 
 ### 🟡 进化 / 实盘守卫
@@ -174,14 +195,14 @@
 1. **最大系统性风险是「泄漏 + 乐观偏差」**：L1–L9、P3、P7、E2 共同指向同一问题——未来函数、成本低估、OOS 校验缺位会让"高胜率"结论不可信。这是本项目最重要的整改方向，**优先级高于一切功能新增**。
 2. **两条验收红线已闭环**：PBO 闸门（F2 已修）+ 一致性验收（F4 已修）+ 风控 in-loop（P5/P6 已修）+ DSR 闸门（E2 已修为真偏度/峰度感知判据）。P2 Batch A（L9/P4/V4/L8/V2/V3/E4/P8）与 **P2 Batch B（L3/L4/L5/V1/V5）** 均已定点修复并经 fresh-eyes 复核，剩余硬伤收敛到 L7/E3（数据/口径，待续）。
 3. **RL 训练有效性已大幅修复**：P1/P2（梯度空操作→有限差分验证正确）、P5/P6（风控/止损 in-loop 已生效）、V2（剪枝现可实际生效）。**V1（LSTM 单元记忆 + 验证集选种）本轮已修**；剩余 L3/L4（归一/asof）已随 Batch B 闭环。
-4. **已建立防护**：P0 + P1 + P2 Batch A + P2 Batch B 共 **约 45 处**改动均附运行时验证与回归测试（全量 **305/305** 绿）；残余 Batch B 项 L7/E3 按"工程师→QA fresh-eyes→主理人终裁"流程逐条定点修复并补回归测试，遵循项目「无证据不翻转」铁律。
+4. **已建立防护**：P0 + P1 + P2 Batch A + P2 Batch B（含 L7/E3 残余）共 **约 47 处**改动均附 fresh-eyes 复核、运行时验证与回归测试（全量 **315/315** 绿）；所有 Batch B 项均按"工程师→QA fresh-eyes→主理人终裁"流程逐条定点修复并补回归测试，遵循项目「无证据不翻转」铁律。
 
 ### 建议修复顺序
 - **✅ 立即（P0）**：P3（标签泄漏）、P7（成本低估）、L1/L2（全样本泄漏）、E1（缺盈亏比）—— 已全部修复（二-B）。
 - **✅ 紧随（P1）**：P1/P2（PPO 梯度）、P5/P6（风控红线）、E2（DSR/PBO 真实现）、L6（splitter 幂等）—— 已全部修复（二-C）。
 - **✅ 续（P2 Batch A）**：L9（OOS 隔离）、P4（预算生效）、V4（CTP 凭证守卫）、L8（Kronos 配对）、V2（剪枝生效）、V3（PSI 有界）、E4（walkforward 口径）、P8（涨跌停拦截）—— 已全部修复（二-D）。
 - **✅ 续（P2 Batch B）**：L3（每品种独立归一）、L4（外盘 asof 对齐）、L5（pivot 短名去重）、V1（LSTM 单元记忆 + 验证集选种）、V5（contracts=None 乘数规格回退）—— 全部修复（二-E）。
-- **⏳ 待（残余 Batch B）**：L7（pytdx 主力/市场硬编码）、E3（is_effective 不可达 + RL 单品种口径）—— 待 fresh-eyes QA 后定点修复并补回归测试。
+- **✅ 已收官（残余 Batch B）**：L7（pytdx 主力/市场硬编码）、E3（is_effective 不可达 + RL 单品种口径）—— 已全部定点修复并补回归测试（详见二-F），全量 315/315 绿。
 
 ---
 
@@ -213,4 +234,14 @@ tests/test_global_ref.py                +L4 回归（asof vs reindex 全 NaN）
 tests/test_cross_panel.py               +L5 回归（短名碰撞去重）
 tests/test_examm_lstm.py                +V1 回归（×2：LSTM 单元记忆 + 验证集选种）
 tests/test_cost_multiplier_spec.py      +V5 回归（×5：规格回退/显式覆盖/fee/fill_price）
+```
+
+### 五-C. P2 Batch B 残余 L7/E3 本轮改动文件清单（第六轮）
+
+```
+hexbroker/data/sources/pytdx_source.py   L7 跨全市场枚举 + 实时 chicang 选主力(返回 code,market) + position→open_interest 兼容 + 跨市场自动发现
+hexbroker/pipeline.py                    E3-A 工作副本纳入 is_effective(不翻转默认)；E3-B _run_rl 跨全品种 loop + scale 透传阈值基线
+tests/test_pytdx_source.py               +L7 回归（×6：position 读入/兼容 / 跨市场选主力 / chicang 最大 / 自动发现 DCE / 常量）
+tests/test_signal_metrics_effective.py   +E3-A 回归（×2：含列生效 / 默认阈下数值不变）
+tests/test_pipeline_rl_caliber.py        +E3-B 回归（×2：全品种 loop / scale 透传）
 ```
