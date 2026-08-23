@@ -102,3 +102,24 @@ def test_fallback_global_multiplier_when_no_contracts():
 
     # 未配置品种：1 手 × (1100-1000) × 10 - 手续费(0.5 + 0.55) = 998.95（沿用全局 ×10）
     assert broker.realized["xx0"] == pytest.approx(998.95, abs=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# 5. 反手（多头→空头）加权均价重置：修复前反手后 avg_entry 残留旧多头均价
+# ---------------------------------------------------------------------------
+def test_flip_resets_avg_entry_to_new_fill():
+    broker = _broker(_cost_with_contracts())
+    broker.execute("rb0", 2, 100.0, timestamp="t1")   # 开多 2 @100
+    broker.execute("rb0", -3, 110.0, timestamp="t2")  # 反手为 空 3 @110
+    # 反手后仓位为 -3，加权均价须重置为新空头开仓价 110（而非残留旧多头 100）
+    assert broker.position("rb0") == -3.0
+    assert broker.avg_entry["rb0"] == pytest.approx(110.0, abs=1e-9)
+    # 平掉空头：已实现盈亏按新均价 110 计算，而非错误沿用 100
+    broker.execute("rb0", 0, 120.0, timestamp="t3")
+    assert broker.position("rb0") == 0.0
+    assert broker.avg_entry["rb0"] == 0.0
+    # 经济净盈亏（含费用）：平多 +2@100→110 赚 +200；开空 3@110→120 亏 -300 ⇒ ≈ -100。
+    # 反手 bug 会残留旧多头均价 100，平空计成 (120-100)×3×10=-600 ⇒ ≈ -400。
+    assert -150.0 < broker.realized["rb0"] < -50.0          # 修复后 ≈ -100
+    assert not (-450.0 < broker.realized["rb0"] < -350.0)   # 反手 bug ≈ -400
+
