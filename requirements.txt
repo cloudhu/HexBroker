@@ -1,9 +1,9 @@
 # HexFutures-AI 依赖清单（Windows 友好版，已对齐 Kronos 精确 pin）
 # 安装：C:/Users/Administrator/.workbuddy/binaries/python/envs/default/Scripts/pip.exe install -r requirements.txt
-# 注：torch / stable-baselines3 为可选重依赖（CPU 沙箱可省略，系统会自动回退纯 numpy 实现）。
+# 注：torch / stable-baselines3 为可选重依赖（CPU 沙箱可省略，系统会自动回退纯 numpy 实现）；akshare/pytdx/requests/tqsdk 为可选数据源依赖（`.[sources]`，缺依赖时对应源 health_check 返回 False）。
 #
 # 单一事实源：核心运行依赖以 pyproject.toml [project].dependencies 为准（共 15 项）
-# （新人推荐 `pip install -e .[dev]`，可选重依赖用 `pip install -e .[torch]` / `.[sb3]`）。
+# （新人推荐 `pip install -e .[dev]`，可选重依赖用 `.[torch]` / `.[sb3]`，可选数据源用 `.[sources]`）。
 # 下方 15 项核心依赖仅为向后兼容保留（与 pyproject 同步维护）；pytest 不在核心 15 项中，
 # 对应 pyproject 的 [dev] extra，此处保留 pytest 行仅供 `pip install -r requirements.txt` 兼容。
 # 以后新增/修改依赖请优先改 pyproject.toml，再回填本文件保持一致。

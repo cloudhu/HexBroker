@@ -33,6 +33,8 @@ dev = ["pytest>=8"]
 torch = ["torch>=2.1,<3"]
 # gymnasium 为 stable-baselines3 传递依赖（RL 环境为自研 futures_env，不直接引用）
 sb3 = ["stable-baselines3>=2.3,<2.7", "sb3-contrib>=2.3", "gymnasium>=0.29,<1.1"]
+# 可选数据源（懒加载：缺依赖不阻断 import，health_check 返回 False / 对应源不可用）
+sources = ["akshare", "pytdx", "requests", "tqsdk"]
 optional = ["pyqlib", "rqalpha", "vnpy", "mlflow"]
 
 [tool.setuptools]

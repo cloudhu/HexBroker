@@ -27,7 +27,10 @@ pip install -e .[dev]
 # 可选：安装 RL 重依赖（torch / stable-baselines3），CPU 沙箱可省略
 pip install -e .[torch]       # 或 .[sb3] 启用 SB3 适配层
 
-# 兼容路径：仍可用 requirements.txt（16 项核心依赖 + pytest(dev)，向后兼容）
+# 可选：安装外部数据源（akshare / pytdx / tqsdk / requests），缺依赖时对应源 health_check 返回 False
+pip install -e .[sources]
+
+# 兼容路径：仍可用 requirements.txt（15 项核心依赖 + pytest(dev)，向后兼容）
 pip install -r requirements.txt
 ```
 
