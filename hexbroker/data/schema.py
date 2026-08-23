@@ -8,9 +8,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional
 
-import numpy as np
 import pandas as pd
 
 from .. import HexDataError
@@ -96,9 +94,9 @@ def validate_bars(df: pd.DataFrame, freq: str = "1d") -> bool:
     if (c <= 0).any() or (o <= 0).any():
         raise HexDataError("存在非正价格")
 
-    # 缺失值：前向填充 1 根后剩余 NaN 视为错误（除可选标记列）
+    # 缺失值：按品种分别前向填充 1 根后剩余 NaN 视为错误（避免跨品种互填）
     fillable = df[REQUIRED_COLS].copy()
-    ffill = fillable.ffill(limit=1)
+    ffill = fillable.groupby(level=0, group_keys=False).ffill(limit=1)
     residual = ffill.isna().sum().sum()
     if residual > 0:
         raise HexDataError(f"前向填充≤1根后仍存在 {residual} 个 NaN，数据不连续")

@@ -44,13 +44,13 @@ def make_labels(
     """
     close = np.asarray(close, dtype=float)
     n = len(close)
-    fut = np.zeros(n)
+    fut = np.full(n, np.nan)
     with np.errstate(divide="ignore", invalid="ignore"):
         ret = np.log(close[horizon:] / close[:-horizon])
     fut[:-horizon] = ret
     if kind == "direction":
-        fut = np.sign(fut)
-        fut[fut == 0] = 1.0
+        # 仅对未来 horizon 步内有定义的收益取符号；尾部 NaN 保持 NaN（不伪造标签）
+        fut = np.where(fut > 0, 1.0, np.where(fut < 0, -1.0, np.nan))
     return fut
 
 
@@ -74,7 +74,9 @@ class WindowDataset:
         self.horizon = horizon
 
     def __len__(self) -> int:
-        return max(0, len(self.labels) - self.lookback - self.horizon + 1)
+        # 最后一个有效标签位于 len-horizon-1；样本 i 的目标为 labels[i+lookback]，
+        # 故 i 最大为 len-horizon-lookback-1 → 长度 = len-lookback-horizon（无 +1，避免尾部无效标签）
+        return max(0, len(self.labels) - self.lookback - self.horizon)
 
     def __getitem__(self, i: int) -> WindowSample:
         if i < 0 or i >= len(self):

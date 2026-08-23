@@ -44,11 +44,13 @@ class Cleaner:
                 grp["close"] <= grp["low"] + 1e-9
             )
 
-            # winsorize 收益类极值（仅对原始价做轻度裁剪，避免破坏结构）
+            # winsorize 极值（仅用截至 t 的历史分位裁剪：滚动 expanding，避免未来函数）
+            # 注：用全样本分位会引用未来 bar，既泄漏又抹掉真实极值，判据失效。
             for col in ["open", "high", "low", "close", "adj_close"]:
                 s = grp[col].astype(float)
-                lo, hi = s.quantile(self.winsor_quantile), s.quantile(1 - self.winsor_quantile)
-                grp[col] = s.clip(lo, hi)
+                rolling_lo = s.expanding().quantile(self.winsor_quantile)
+                rolling_hi = s.expanding().quantile(1 - self.winsor_quantile)
+                grp[col] = s.clip(rolling_lo, rolling_hi)
 
             # 缺失前向填充 ≤ ffill_limit（契约 §8.4）
             fill_cols = ["open", "high", "low", "close", "adj_close", "raw_close",

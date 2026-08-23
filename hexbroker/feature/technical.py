@@ -9,7 +9,6 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from ..constants import OHLCV_COLS
 
 
 def _safe_ratio(a: pd.Series, b: pd.Series) -> pd.Series:
@@ -45,7 +44,9 @@ def add_technical(df: pd.DataFrame, params: dict | None = None) -> pd.DataFrame:
     gain = delta.clip(lower=0.0).rolling(14, min_periods=5).mean()
     loss = (-delta.clip(upper=0.0)).rolling(14, min_periods=5).mean()
     rs = _safe_ratio(gain, loss)
-    out["f_rsi"] = (100.0 - 100.0 / (1.0 + rs)).fillna(50.0)
+    # loss==0（全涨）时 rs 退化 0 → RSI 应为 100，而非 0
+    f_rsi = 100.0 - 100.0 / (1.0 + rs)
+    out["f_rsi"] = f_rsi.mask(loss == 0, 100.0).fillna(50.0)
 
     # MACD（因果：使用截止 t 的 EWM）
     ema12 = close.ewm(span=12, adjust=False).mean()

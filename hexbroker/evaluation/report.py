@@ -24,6 +24,7 @@ def format_report(report: MetricsReport) -> str:
         f"  Calmar        : {d['calmar']:.3f}",
         f"  年化波动      : {d['volatility'] * 100:.2f}%",
         f"  胜率          : {d['win_rate'] * 100:.1f}%",
+        f"  盈亏比(PF)    : {d['profit_factor']:.2f}",
         f"  样本数        : {d['n_bars']}",
         "=" * 48,
     ]

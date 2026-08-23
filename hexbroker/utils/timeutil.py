@@ -7,8 +7,8 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
-from typing import Iterable
+from datetime import timedelta
+from typing import Any, Iterable
 
 import pandas as pd
 
