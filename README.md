@@ -18,6 +18,19 @@
               → 报告（Q5 双闸门 + DSR/PBO 过拟合诊断）
 ```
 
+## 安装
+
+```bash
+# 推荐：以 pyproject.toml 为单一事实源，安装核心运行依赖 + 开发依赖（pytest）
+pip install -e .[dev]
+
+# 可选：安装 RL 重依赖（torch / stable-baselines3），CPU 沙箱可省略
+pip install -e .[torch]       # 或 .[sb3] 启用 SB3 适配层
+
+# 兼容路径：仍可用 requirements.txt（17 行核心依赖与 pyproject 同步，向后兼容）
+pip install -r requirements.txt
+```
+
 ## 快速开始
 
 ```bash

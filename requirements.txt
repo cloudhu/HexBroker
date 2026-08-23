@@ -1,6 +1,11 @@
-# HexFutures-AI 核心依赖（Windows 友好版，已对齐 Kronos 精确 pin）
+# HexFutures-AI 依赖清单（Windows 友好版，已对齐 Kronos 精确 pin）
 # 安装：C:/Users/Administrator/.workbuddy/binaries/python/envs/default/Scripts/pip.exe install -r requirements.txt
 # 注：torch / stable-baselines3 为可选重依赖（CPU 沙箱可省略，系统会自动回退纯 numpy 实现）。
+#
+# 单一事实源：核心运行依赖以 pyproject.toml [project].dependencies 为准
+# （新人推荐 `pip install -e .[dev]`，可选重依赖用 `pip install -e .[torch]` / `.[sb3]`）。
+# 下方 17 行核心依赖仅为向后兼容保留（与 pyproject 同步维护）；pytest 已移入 [dev] extra。
+# 以后新增/修改依赖请优先改 pyproject.toml，再回填本文件保持一致。
 
 numpy>=1.26,<3
 pandas>=2.2.3,<4
