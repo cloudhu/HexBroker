@@ -57,7 +57,7 @@ paper:
   account_file: data/paper/account.json
   trades_log: data/paper/trades.log
   c0_daily_csv: data/paper/c0_daily.csv
-  intel_static_file: data/paper/news_static.json   # 静态情报源（MCP 桥接 P1）
+  intel_static_file: data/paper/news_static.json   # 静态情报源（MCP 文件桥接：agent 用 mx-ds-mcp 拉取落盘 JSON）
 
   # ---- 行情 ----
   quote_url: https://hq.sinajs.cn/list=
@@ -129,6 +129,9 @@ paper:
 
   # ---- 情报（Q3 批复：P1 仅风险提示+计划备注） ----
   intel:
+    http:                            # HTTP 真实情报源（东财公开 API；MCP 替代，自包含零依赖）
+      enabled: true
+      timeout_sec: 10
     keywords:
       ag0: [沪银, 白银, 银价, 贵金属]
       rb0: [螺纹, 螺纹钢, 钢材, 铁矿, 黑色系]
