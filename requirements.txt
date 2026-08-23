@@ -2,9 +2,10 @@
 # 安装：C:/Users/Administrator/.workbuddy/binaries/python/envs/default/Scripts/pip.exe install -r requirements.txt
 # 注：torch / stable-baselines3 为可选重依赖（CPU 沙箱可省略，系统会自动回退纯 numpy 实现）。
 #
-# 单一事实源：核心运行依赖以 pyproject.toml [project].dependencies 为准
+# 单一事实源：核心运行依赖以 pyproject.toml [project].dependencies 为准（共 16 项）
 # （新人推荐 `pip install -e .[dev]`，可选重依赖用 `pip install -e .[torch]` / `.[sb3]`）。
-# 下方 17 行核心依赖仅为向后兼容保留（与 pyproject 同步维护）；pytest 已移入 [dev] extra。
+# 下方 16 项核心依赖仅为向后兼容保留（与 pyproject 同步维护）；pytest 不在核心 16 项中，
+# 对应 pyproject 的 [dev] extra，此处保留 pytest 行仅供 `pip install -r requirements.txt` 兼容。
 # 以后新增/修改依赖请优先改 pyproject.toml，再回填本文件保持一致。
 
 numpy>=1.26,<3
@@ -23,7 +24,7 @@ rich>=13
 tqdm>=4.67
 gymnasium>=0.29,<1.1
 lightgbm>=4.5,<5
-pytest>=8
+pytest>=8  # dev-only：pyproject 中对应 [dev] extra，此处保留供 -r 兼容
 
 # ---------- 可选（heavy，不阻塞离线链路） ----------
 # torch>=2.1,<2.6
