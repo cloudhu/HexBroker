@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+from typing import Any
 
 
 def add_internal_ratios(
@@ -148,8 +149,29 @@ def _is_inner_ratio(feature_name: str, inner_syms: set) -> bool:
 
 
 def _panel_close_wide(barframe: Any) -> pd.DataFrame:
-    """从 BarFrame 提取 close 宽表（datetime × symbol_short）。"""
+    """从 BarFrame 提取 close 宽表（datetime × symbol_short）。
+
+    L5 修复：若多个不同合约归一为同一短名（如 'au0' 与 'au2506' 均→'au'），
+    原 ``pivot_table`` 默认 ``aggfunc='mean'`` 会**静默平均**两个不同品种的收盘 →
+    跨品种特征污染。此处 pivot 前按短名去重，每短名仅保留一个代表合约
+    （优先连续主力：全名以 '0' 结尾，如 au0/ag0；否则取全名字典序最小者），
+    杜绝静默平均，同时保留短名特征命名约定（f_xr_au_ag 不变）。
+    """
     df = barframe.df[["close"]].copy()
-    df["sym_short"] = df.index.get_level_values("symbol").map(_norm_sym)
+    sym_full = df.index.get_level_values("symbol")
+    short = sym_full.map(_norm_sym)
+    df["sym_short"] = short
+    df["sym_full"] = sym_full
+    # 选代表合约：优先全名以 '0' 结尾（连续主力约定），否则全名字典序最小
+    rep: dict[str, str] = {}
+    for s_full, s_short in zip(sym_full, short):
+        if s_short not in rep:
+            rep[s_short] = s_full
+        else:
+            cur = rep[s_short]
+            if not cur.endswith("0") and s_full.endswith("0"):
+                rep[s_short] = s_full
+    keep = set(rep.values())
+    df = df[df["sym_full"].isin(keep)]
     panel = df.reset_index().pivot_table(index="datetime", columns="sym_short", values="close")
     return panel

@@ -9,7 +9,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-import numpy as np
+# 品种规格乘数/最小跳动默认值（V5 修复：contracts 未提供时按此回退，
+# 避免 au/ag 误用全局 10.0 导致 P&L 量级错误）。
+# 依据 §3.5 约定：au=×1000/tick0.02、ag=×15/tick0.01、m=×10/tick1。
+_SPEC_MULTIPLIER = {"au": 1000.0, "ag": 15.0, "m": 10.0}
+_SPEC_MIN_TICK = {"au": 0.02, "ag": 0.01, "m": 1.0}
+
+
+def _short_symbol(symbol: str | None) -> str | None:
+    """规范化品种短名：'SHFE.au'/'au0'/'AU0' -> 'au'（去点前缀与尾部数字）。"""
+    if not symbol:
+        return None
+    return symbol.split(".")[-1].rstrip("0123456789").lower()
 
 
 @dataclass
@@ -32,11 +43,20 @@ class CostModel:
     def _multiplier(self, symbol: str | None) -> float:
         if symbol and self.contracts and symbol in self.contracts:
             return float(self.contracts[symbol].get("multiplier", self.multiplier))
+        # V5 修复：contracts 未提供或非上市品种时，按品种规格回退，
+        # 避免 au(×1000)/ag(×15) 误用全局默认 10.0（P&L 量级错误）。
+        key = _short_symbol(symbol)
+        if key in _SPEC_MULTIPLIER:
+            return _SPEC_MULTIPLIER[key]
         return self.multiplier
 
     def _min_tick(self, symbol: str | None) -> float:
         if symbol and self.contracts and symbol in self.contracts:
             return float(self.contracts[symbol].get("min_tick", self.min_tick))
+        # V5 修复：同上，contracts 缺失时按品种规格回退最小跳动。
+        key = _short_symbol(symbol)
+        if key in _SPEC_MIN_TICK:
+            return _SPEC_MIN_TICK[key]
         return self.min_tick
 
     @classmethod

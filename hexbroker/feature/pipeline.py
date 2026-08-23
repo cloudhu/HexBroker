@@ -15,7 +15,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-import numpy as np
 import pandas as pd
 
 from ..constants import Freq
@@ -140,7 +139,12 @@ class FeaturePipeline:
             norm_cols = [c for c in feat_cols if not c.startswith("f_basis")]
             if norm_cols:
                 sub = df[norm_cols]
-                normed = self._normalizer.fit_transform(sub)
+                # L3 修复：每品种独立归一。原 self._normalizer 在首次 fit 后锁定 columns，
+                # 后续品种新增特征列不会被归一 → 泄漏未归一特征。改为每品种新建 normalizer，
+                # 各品种按自身列集合独立滚动 z-score（因果性不变，零跨品种污染）。
+                normed = RollingNormalizer(
+                    window=self.normalize_window, min_periods=5
+                ).fit_transform(sub)
                 df = df.drop(columns=norm_cols)
                 df = pd.concat([df, normed], axis=1)
         # 最终只保留特征列（可选：特征级白名单裁剪）

@@ -13,7 +13,7 @@ Windows 宿主下以轻量 Python 自研实现，仅作为**算子设计对照**
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from typing import Optional
 
 import numpy as np
 
@@ -79,6 +79,7 @@ def _cell_forward(cell: str, p: dict, x_seq: np.ndarray, h0: np.ndarray) -> tupl
     """x_seq: (T, in_dim)，返回 (outputs, last_hidden)。"""
     T, _ = x_seq.shape
     h = h0
+    c = np.zeros_like(h)  # 仅 LSTM 使用：跨时间步携带单元状态（记忆）
     outs = []
     for t in range(T):
         x = x_seq[t]
@@ -91,7 +92,8 @@ def _cell_forward(cell: str, p: dict, x_seq: np.ndarray, h0: np.ndarray) -> tupl
             hh = np.tanh(x @ p["Wh"] + (r * h) @ p["Uh"] + p["bh"])
             h = (1 - z) * h + z * hh
         elif cell == "lstm":
-            c = np.zeros_like(h)
+            # V1 修复：c 在循环外初始化并跨步携带；原实现每步 `c = np.zeros_like(h)`
+            # 重置 → 单元状态记忆被抹除 → LSTM 退化为无记忆门控（等价于仅 i*cc）。
             f = _sig(x @ p["Wf"] + h @ p["Uf"] + p["bf"])
             i = _sig(x @ p["Wi"] + h @ p["Ui"] + p["bi"])
             o = _sig(x @ p["Wo"] + h @ p["Uo"] + p["bo"])
@@ -249,6 +251,7 @@ def evolve(
 
     result = EvolutionResult()
     best_global: Optional[RNNGenome] = None
+    best_global_val = float("-inf")  # V1：全局最优以验证集适应度裁决
 
     for gen in range(n_generations):
         for i, pop in enumerate(islands):
@@ -264,12 +267,16 @@ def evolve(
                 child.island = i
                 if child.n_params() > max_params:
                     child = a.clone()  # 超限回退
-                child.fitness = _fitness_fn(child, X, y)
+                child.fitness = _fitness_fn(child, X, y)  # 训练集适应度（岛内锦标赛选种用）
                 new_pop.append(child)
             islands[i] = new_pop
             local_best = islands[i][0]
-            if best_global is None or local_best.fitness > best_global.fitness:
+            # V1 修复：全局最优以验证集适应度裁决（防训练集过拟合选种），
+            # 不再用训练集 fitness 直接选 best_global。
+            local_best_val = _fitness_fn(local_best, X_val, y_val)
+            if local_best_val > best_global_val:
                 best_global = local_best.clone()
+                best_global_val = local_best_val
         # 岛屿迁移：每代把最佳个体复制到邻岛（替换最差）
         for i in range(n_islands):
             donor = islands[i][0]
@@ -278,13 +285,12 @@ def evolve(
                 islands[nbr][-1] = donor.clone()
                 islands[nbr][-1].island = nbr
                 result.island_migrations += 1
-        # 验证集评估
+        # 验证集评估历史（按验证集适应度）
         if best_global is not None:
-            val_fit = _fitness_fn(best_global, X_val, y_val)
-            result.history.append(val_fit)
+            result.history.append(best_global_val)
 
     if best_global is not None:
-        best_global.fitness = _fitness_fn(best_global, X_val, y_val)
+        best_global.fitness = best_global_val  # 已是验证集适应度
         result.best = best_global
         result.best_fitness = float(best_global.fitness)
         result.n_params = best_global.n_params()

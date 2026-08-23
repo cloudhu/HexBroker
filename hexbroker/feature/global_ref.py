@@ -35,6 +35,13 @@ def align_global_to_inner(global_close: pd.Series, inner_index: pd.Index) -> pd.
 
     对每个内盘交易日 t，取外盘 index <= t 的最近值（已 shift(1)），
     保证特征只用外盘 t-1 及以前收盘。返回与 inner_index 等长的 Series。
+
+    L4 修复：原实现 ``shifted.reindex(inner_index).ffill()`` 依赖**精确标签匹配**，
+    而外盘（美盘）时间戳与内盘（中国期货 session）时间戳常有时分/时区错位 →
+    reindex 全部 miss → 全 NaN → ffill 亦全 NaN → 外盘特征整列失效。
+    改用 ``Series.asof`` 做真实"最后一个 <= t 的有效值"对齐，对时分错位鲁棒，
+    shift(1) 语义（取 t-1 收盘）保持不变。
     """
     shifted = global_close.shift(1)
-    return shifted.reindex(inner_index).ffill()
+    # asof 要求单调索引；load_global_close 保证升序，shift 不改变索引顺序。
+    return shifted.asof(inner_index)
