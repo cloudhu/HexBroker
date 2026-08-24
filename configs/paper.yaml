@@ -51,12 +51,15 @@ paper:
     multiplier: 10.0
     min_tick: 10.0
 
-  # ---- P0-1 开仓成本门禁（净期望收益 > 往返手续费 × min_ratio 才开仓） ----
+  # ---- P0-1 开仓成本门禁（净期望收益 > 往返成本 × min_ratio 才开仓） ----
   # 消费信号帧中的 exp_ret（原为死字段）：expected_pnl = direction×exp_ret/100×notional；
-  # round_trip_cost = notional×(fee_open+fee_close_today)；同时校验 p_up 方向与 exp_ret 符号一致。
+  # round_trip_cost = 手续费部分 + 滑点部分（R3）：notional×(fee_open+fee_close_today)
+  #   + 2×min_tick×slippage_ticks×multiplier（滑点参数取自 cost 段，slipage_in_cost=false 时按纯费口径）；
+  # 同时校验 p_up 方向与 exp_ret 符号一致。
   risk_gate:
     cost_gate_enabled: true
     cost_gate_min_ratio: 2.0
+    slippage_in_cost: true           # R3：往返成本口径纳入滑点（默认 true）
 
   # ---- P0-2 信号无变化冷却（消除 60s 开-平-开-平循环） ----
   # 信号指纹 (p_up, exp_ret, source) 与上一轮实际开仓相同 → 即使风控返回开仓意图也跳过；

@@ -59,6 +59,7 @@ class RiskGate:
         cost: Optional[CostModel] = None,
         cost_gate_enabled: bool = True,
         cost_gate_min_ratio: float = 2.0,
+        slippage_in_cost: bool = True,
     ) -> None:
         self._manager = load_risk_manager(risk_config, hard_stop=hard_stop, overrides=overrides)
         self._default_intent = float(default_intent)
@@ -68,12 +69,15 @@ class RiskGate:
         self._cost = cost
         self._cost_gate_enabled = bool(cost_gate_enabled)
         self._cost_gate_min_ratio = float(cost_gate_min_ratio)
+        # R3：往返成本口径是否纳入滑点（min_tick×slippage_ticks×multiplier×2 边）
+        self._slippage_in_cost = bool(slippage_in_cost)
 
     def set_cost(
         self,
         cost: Optional[CostModel],
         cost_gate_enabled: Optional[bool] = None,
         cost_gate_min_ratio: Optional[float] = None,
+        slippage_in_cost: Optional[bool] = None,
     ) -> None:
         """运行时注入成本模型与门禁参数（P0-1；scheduler 从 broker.cost 复用）。"""
         self._cost = cost
@@ -81,6 +85,8 @@ class RiskGate:
             self._cost_gate_enabled = bool(cost_gate_enabled)
         if cost_gate_min_ratio is not None:
             self._cost_gate_min_ratio = float(cost_gate_min_ratio)
+        if slippage_in_cost is not None:
+            self._slippage_in_cost = bool(slippage_in_cost)
 
     # ------------------------------------------------------------------
     # 主入口
@@ -180,7 +186,10 @@ class RiskGate:
         返回 ``(是否通过, expected_pnl, round_trip_cost, notional)``：
         - ``notional = price × multiplier(symbol)``（乘数从 CostModel 取，单手口径）；
         - ``expected_pnl = direction × exp_ret/100 × notional``（exp_ret 为日收益百分比）；
-        - ``round_trip_cost = notional × (fee_open + fee_close_today)``；
+        - ``round_trip_cost = 手续费部分 + 滑点部分``（单手往返口径，R3）：
+          - 手续费部分 = ``notional × (fee_open + fee_close_today)``；
+          - 滑点部分 = ``2 × min_tick(symbol) × slippage_ticks × multiplier(symbol)``
+            （单边滑点 × 双边；``slippage_in_cost=False`` 时按 0 计，保持纯费口径）；
         - 同时校验「p_up 方向与 exp_ret 符号一致性」——模型自相矛盾（多头却预期下跌等）
           一律拦截，避免按错误方向计算净期望收益；
         - 通过条件：``expected_pnl > round_trip_cost × cost_gate_min_ratio``。
@@ -201,9 +210,20 @@ class RiskGate:
         if direction < 0 and exp_ret >= 0:
             return False, 0.0, 0.0, notional
         expected_pnl = direction * exp_ret / 100.0 * notional
-        round_trip_cost = notional * (
+        # R3：往返成本 = 手续费部分 + 滑点部分（单手口径）。
+        # 滑点部分 = 2 × min_tick × slippage_ticks × multiplier（单边滑点 × 双边）。
+        fee_part = notional * (
             float(self._cost.fee_open) + float(self._cost.fee_close_today)
         )
+        slippage_part = 0.0
+        if self._slippage_in_cost:
+            slippage_part = (
+                2.0
+                * float(self._cost._min_tick(signal.symbol))
+                * float(self._cost.slippage_ticks)
+                * multiplier
+            )
+        round_trip_cost = fee_part + slippage_part
         if round_trip_cost <= 0:
             return True, expected_pnl, 0.0, notional
         return expected_pnl > round_trip_cost * self._cost_gate_min_ratio, expected_pnl, round_trip_cost, notional

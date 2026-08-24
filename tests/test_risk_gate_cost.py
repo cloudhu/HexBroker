@@ -1,11 +1,13 @@
-"""P0-1 开仓成本门禁单测（净期望收益 > 往返手续费 × min_ratio 才开仓）。
+"""P0-1 开仓成本门禁单测（净期望收益 > 往返成本 × min_ratio 才开仓）。
 
 覆盖：
 ① 预期收益覆盖成本 → 开仓；
 ② 不覆盖 → 拒开且 decision.reason 标注 cost_gate_reject；
 ③ exp_ret 与 p_up 方向矛盾（模型自相矛盾）→ 拒开；
 ④ 不传 cost → 门禁跳过（向后兼容，不破坏现有调用语义）；
-⑤ cost_gate_enabled=False → 显式关闭门禁（即使注入 cost）。
+⑤ cost_gate_enabled=False → 显式关闭门禁（即使注入 cost）；
+⑥ R3 滑点纳入往返成本：仅费口径通过、含滑点口径被拒 → 拒开（slippage_in_cost=False 恢复放行）；
+⑦ R3 含滑点仍通过 → 开仓。
 """
 
 from __future__ import annotations
@@ -158,4 +160,37 @@ def test_cost_gate_ignored_when_position_exists() -> None:
         _sig(exp_ret=0.001), _quote(), _acct(), _pos(position=1.0, entry=3000.0)
     )
     # 门禁不拦截（不置 0 / 不标 cost_gate_reject）；意图照常进入风控链
+    assert d.reason != "cost_gate_reject"
+
+
+# ---------------------------------------------------------------------------
+# ⑥ R3 滑点纳入往返成本：仅费口径通过、含滑点口径被拒
+# ---------------------------------------------------------------------------
+def test_cost_gate_rejects_when_slippage_makes_cost_too_high() -> None:
+    """price=3000, mult=10, min_tick=1, slippage_ticks=1 → notional=30000；
+    手续费往返 = 30000×0.00015 = 4.5；滑点往返 = 2×1×1×10 = 20.0；
+    round_trip_cost = 24.5，门槛 = 24.5×2 = 49.0。
+    exp_ret=0.06% → expected_pnl = 0.06/100×30000 = 18.0：
+    18.0 > 4.5×2=9.0（纯费口径放行）但 18.0 > 49.0 不成立 → 含滑点口径拒开。"""
+    gate = _gate(cost=_cost())
+    d = gate.evaluate(_sig(exp_ret=0.06), _quote(), _acct(), _pos())
+    assert d.target_position == 0.0
+    assert d.reason == "cost_gate_reject"
+
+    # 同一信号在 slippage_in_cost=False（纯费口径）下应放行
+    gate_fee_only = _gate(cost=_cost(), slippage_in_cost=False)
+    d2 = gate_fee_only.evaluate(_sig(exp_ret=0.06), _quote(), _acct(), _pos())
+    assert abs(d2.target_position) > 1e-9
+    assert d2.reason != "cost_gate_reject"
+
+
+# ---------------------------------------------------------------------------
+# ⑦ R3 含滑点仍通过 → 开仓
+# ---------------------------------------------------------------------------
+def test_cost_gate_allows_when_expected_pnl_covers_cost_with_slippage() -> None:
+    """exp_ret=0.2% → expected_pnl = 0.2/100×30000 = 60.0；
+    60.0 > (4.5+20.0)×2 = 49.0 → 含滑点口径仍放行。"""
+    gate = _gate(cost=_cost())
+    d = gate.evaluate(_sig(exp_ret=0.2), _quote(), _acct(), _pos())
+    assert abs(d.target_position) > 1e-9
     assert d.reason != "cost_gate_reject"

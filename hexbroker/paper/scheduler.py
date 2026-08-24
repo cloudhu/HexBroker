@@ -95,6 +95,8 @@ class TradingScheduler:
         rg_cfg = cfg.get("risk_gate", {}) if hasattr(cfg, "get") else {}
         self._cost_gate_enabled = bool(rg_cfg.get("cost_gate_enabled", True))
         self._cost_gate_min_ratio = float(rg_cfg.get("cost_gate_min_ratio", 2.0))
+        # R3：往返成本口径是否纳入滑点（默认 true）
+        self._slippage_in_cost = bool(rg_cfg.get("slippage_in_cost", True))
         if self._risk_gate is not None and hasattr(self._risk_gate, "set_cost"):
             if getattr(self._risk_gate, "_cost", None) is None:
                 broker_cost = getattr(self._broker, "cost", None)
@@ -103,6 +105,7 @@ class TradingScheduler:
                         broker_cost,
                         cost_gate_enabled=self._cost_gate_enabled,
                         cost_gate_min_ratio=self._cost_gate_min_ratio,
+                        slippage_in_cost=self._slippage_in_cost,
                     )
 
         # ---- P0-2 信号无变化冷却（消除 60s 开-平-开-平循环） ----

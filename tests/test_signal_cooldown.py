@@ -284,10 +284,11 @@ def test_cooldown_allows_open_on_signal_change(tmp_path):
     sched._broker.execute_plan(_flat_plan(), _q(3038.0, now), now)
     assert sched._broker.position("rb0") == 0.0
     # 第 2 轮：信号变化（p_up/exp_ret 均不同）→ 解除冷却，开仓并更新指纹
-    ctx["signals"]._sig = _sig(p_up=0.55, exp_ret=0.1)
+    # exp_ret=0.3% → expected_pnl=91.1 > (4.6+20.0)×2=49.1，含滑点成本门禁仍放行
+    ctx["signals"]._sig = _sig(p_up=0.55, exp_ret=0.3)
     sched._process_symbol("rb0", now + timedelta(minutes=1), _q(3038.0, now + timedelta(minutes=1)), {"rb0": 3038.0})
     assert abs(sched._broker.position("rb0")) > 0
-    assert sched._last_sig_fp["rb0"] == (0.55, 0.1, "test")
+    assert sched._last_sig_fp["rb0"] == (0.55, 0.3, "test")
 
 
 # ---------------------------------------------------------------------------
