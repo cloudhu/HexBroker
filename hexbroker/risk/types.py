@@ -29,6 +29,7 @@ class ATRTier(IntEnum):
 class RiskState:
     """风控决策所需的实时状态（由组合/回测引擎每根 bar 注入）。"""
 
+    symbol: str = ""  # 品种标识（用于止损记忆/ratchet 按品种隔离，避免跨品种串扰）
     equity: float = 0.0
     peak_equity: float = 0.0
     position: float = 0.0  # 当前仓位比例 [-1, 1]

@@ -36,7 +36,8 @@ def test_hard_stop_is_absolute_top_priority():
 
 def test_s1_trend_break_beats_rl_intent_and_budget():
     rm = RiskManager(_cfg())
-    state = _state(position=1.0, current_price=90.0, pnl_pct=0.0)
+    # bars_in_position=2 满足 S1 开仓缓冲（P0）；90 << 95 − band(0.1×2.0) → 趋势破坏
+    state = _state(position=1.0, current_price=90.0, pnl_pct=0.0, bars_in_position=2)
     d = rm.evaluate(state, intent_position=1.0, p_up=0.9, ma_price=95.0)
     assert d.liquidate is True
     assert d.target_position == 0.0

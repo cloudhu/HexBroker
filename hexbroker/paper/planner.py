@@ -89,14 +89,18 @@ class PlanManager:
         return plan
 
     def _size_qty(self, symbol: str, pos_pct: float, price: float, equity: float) -> float:
-        """目标仓位比例 → 目标手数（向下取整；>=0.5 手进 1 手）。"""
+        """目标仓位比例 → 目标手数。
+
+        规则（P1-2 修复）：raw >= 0.10 手即开至少 1 手（10 万账户 ag 在合理信号强度
+        下可开 1 手，保证金由预算第二道防线兜底 margin <= budget）；>=1 手向下取整。
+        """
         if abs(pos_pct) < 1e-9 or price <= 0 or equity <= 0:
             return 0.0
         multiplier = float(self._multipliers.get(symbol, 10.0))
         raw = abs(pos_pct) * equity / (price * multiplier)
-        lots = int(raw)
-        if lots == 0 and raw >= 0.5:
-            lots = 1
+        if raw < 0.10:
+            return 0.0
+        lots = max(1, int(raw))
         return math.copysign(lots, pos_pct)
 
     def _take_profit(self, symbol: str, quote: Optional[Quote], pos_pct: float, stop: Optional[float]) -> Optional[float]:
@@ -158,9 +162,11 @@ class PlanManager:
             "changes": [c.to_dict() for c in self._changes],
         }
         path = self._plans_dir / f"{day.isoformat()}_plan.json"
-        path.write_text(
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2, default=str),
             encoding="utf-8",
         )
+        tmp.replace(path)  # P2-6：tmp + os.replace 原子写，避免写入中断产生半文件
         log.info("交易计划已落盘 path={} plans={}", path, len(self._plans))
         return path

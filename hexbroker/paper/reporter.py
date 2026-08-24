@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Optional
 
 from ..utils.logging import get_logger
+from .trade_intent import plan_change_intent, trade_intent
+from .trade_stats import analyze_trades_log, render_daily_stats_markdown
 from .types import AccountSnapshot, NewsItem, Plan, PlanChange, SignalFrame, TradeEvent
 
 log = get_logger("PAPER")
@@ -38,12 +40,22 @@ class ReviewReporter:
         signals: dict[str, list[SignalFrame]],
         news: list[NewsItem],
         changes: Optional[list[PlanChange]] = None,
+        trades_log_path: str | Path = "data/paper/trades.log",
     ) -> Path:
-        """生成复盘 md 并落盘；返回文件路径。"""
+        """生成复盘 md 并落盘；返回文件路径。
+
+        ``trades_log_path``：审计日志路径，用于「八、当日交易统计（日志去重）」段
+        （按 trade_id 去重后统计，规避会话重放 3× 伪增；并与账户快照做闭合校验）。
+        """
         self._reports_dir.mkdir(parents=True, exist_ok=True)
-        md = self._render_md(day, acct, trades, plans, signals, news, changes or [])
+        md = self._render_md(
+            day, acct, trades, plans, signals, news, changes or [],
+            trades_log_path=trades_log_path,
+        )
         path = self._reports_dir / f"复盘_{day.isoformat()}.md"
-        path.write_text(md, encoding="utf-8")
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(md, encoding="utf-8")
+        tmp.replace(path)  # P2-6：tmp + os.replace 原子写，避免写入中断产生半文件
         log.info("复盘报告已生成 path={}", path)
         return path
 
@@ -56,6 +68,7 @@ class ReviewReporter:
         signals: dict[str, list[SignalFrame]],
         news: list[NewsItem],
         changes: list[PlanChange],
+        trades_log_path: str | Path = "data/paper/trades.log",
     ) -> str:
         lines: list[str] = []
         lines.append(f"# 模拟盘复盘 {day.isoformat()}")
@@ -91,13 +104,15 @@ class ReviewReporter:
         lines.append("## 三、当日交易明细")
         lines.append("")
         if trades:
-            lines.append("| 时间 | 品种 | 方向 | 手数 | 成交价 | 手续费 | 止损 | 止盈 |")
-            lines.append("|---|---|---|---|---|---|---|---|")
+            lines.append("| 时间 | 品种 | 方向 | 手数 | 成交价 | 手续费 | 止损 | 止盈 | 交易意图（中文） |")
+            lines.append("|---|---|---|---|---|---|---|---|---|")
             for t in trades:
+                intent = trade_intent(t.to_dict())
                 lines.append(
                     f"| {t.ts.isoformat(timespec='seconds')} | {self._display(t.symbol)} | "
                     f"{t.direction_label()} | {t.qty:g} | {t.price:g} | {t.fee:.4f} | "
-                    f"{t.stop if t.stop is not None else '-'} | {t.take_profit if t.take_profit is not None else '-'} |"
+                    f"{t.stop if t.stop is not None else '-'} | {t.take_profit if t.take_profit is not None else '-'} | "
+                    f"{intent} |"
                 )
         else:
             lines.append("（无成交）")
@@ -134,7 +149,7 @@ class ReviewReporter:
         lines.append("")
         if changes:
             for c in changes:
-                lines.append(f"- [{c.ts.isoformat(timespec='seconds')}] {c.symbol} {c.change_type}：{c.detail}")
+                lines.append(f"- {plan_change_intent(c.to_dict())}")
         else:
             lines.append("（今日无计划变更）")
         lines.append("")
@@ -148,6 +163,17 @@ class ReviewReporter:
         else:
             lines.append("- 按信号与风控正常跟踪；c0 处于日线积累期（accumulate），仅跟踪不开新仓。")
         lines.append("")
+
+        # 当日交易统计（日志去重）：从审计日志按 trade_id 去重，与账户快照闭合校验
+        lines.append("## 八、当日交易统计（日志去重）")
+        lines.append("")
+        try:
+            stats = analyze_trades_log(str(trades_log_path), day)
+            lines.append(render_daily_stats_markdown(stats, acct_realized=dict(acct.realized)))
+        except Exception as exc:  # noqa: BLE001
+            log.exception("当日交易统计（日志去重）生成失败（已隔离）")
+            lines.append(f"（统计段生成失败：{type(exc).__name__}: {exc}）\n")
+        lines.append("")
         return "\n".join(lines)
 
     # ------------------------------------------------------------------
@@ -160,8 +186,13 @@ class ReviewReporter:
         trades: list[TradeEvent],
         days_run: int,
         initial_capital: float = 100_000.0,
+        trades_log_path: str | Path = "data/paper/trades.log",
     ) -> Path:
-        """20 交易日评估摘要：收益率/已实现盈亏/回撤/成交笔数。"""
+        """20 交易日评估摘要：收益率/已实现盈亏/回撤/成交笔数。
+
+        ``trades_log_path``：审计日志路径，用于「当日交易统计（日志去重）」段
+        （按 trade_id 去重，规避会话重放 3× 伪增；与账户快照闭合校验，口径同复盘「八」段）。
+        """
         self._reports_dir.mkdir(parents=True, exist_ok=True)
         total_pnl = sum(acct.realized.values())
         ret_pct = (acct.equity - initial_capital) / initial_capital * 100 if initial_capital > 0 else 0.0
@@ -180,12 +211,27 @@ class ReviewReporter:
         lines.append(f"| 回撤 | {acct.drawdown * 100:.2f}% |")
         lines.append(f"| 成交笔数 | {len(trades)} |")
         lines.append("")
+
+        # 当日交易统计（日志去重）：口径同复盘「八」段（按 trade_id 去重 + 账户快照闭合校验）
+        lines.append("## 当日交易统计（日志去重）")
+        lines.append("")
+        try:
+            stats = analyze_trades_log(str(trades_log_path), day)
+            lines.append(render_daily_stats_markdown(stats, acct_realized=dict(acct.realized)))
+        except Exception as exc:  # noqa: BLE001
+            log.exception("评估报告交易统计段生成失败（已隔离）")
+            lines.append(f"（统计段生成失败：{type(exc).__name__}: {exc}）\n")
+        lines.append("")
+
         lines.append("## 说明")
         lines.append("")
         lines.append("- 胜率/盈亏曲线/信号命中率在积累更多交易日数据后于后续评估中展开。")
         lines.append("- 首轮重点：验证 报价→信号→风控→计划→撮合→日志→情报→复盘 管道闭环。")
+        lines.append("- 交易统计段基于审计日志按 trade_id 去重（规避会话重放 3× 伪增），与账户快照闭合校验。")
         lines.append("")
         path = self._reports_dir / f"模拟盘评估_第{days_run}交易日.md"
-        path.write_text("\n".join(lines), encoding="utf-8")
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text("\n".join(lines), encoding="utf-8")
+        tmp.replace(path)  # P2-6：tmp + os.replace 原子写（与 generate 同口径）
         log.info("首轮评估摘要已生成 path={}", path)
         return path

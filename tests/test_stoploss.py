@@ -87,6 +87,7 @@ def test_manager_s1_fires_with_context():
     state = RiskState(
         position=0.5, entry_price=100.0, current_price=90.0, atr=2.0,
         atr_tier=ATRTier.HIGH, drawdown=0.0, vol_quantile=0.5, pnl_pct=0.0,
+        bars_in_position=2,  # P0：S1 开仓缓冲（<2 根不判趋势破坏）
     )
     recent_returns = np.array([-0.01, -0.02, -0.03, -0.01, -0.02])
     recent_volumes = np.array([100.0, 100.0, 100.0, 100.0, 100.0])

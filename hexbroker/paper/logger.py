@@ -4,6 +4,7 @@
 - 成交 5 要素：``TRADE|ts|symbol|dir|qty|entry|stop|tp|price|fee``
 - 计划变更：``PLAN|ts|symbol|change_type|detail``
 - 审计 JSON：``log_structured("trade"/"plan_change", {...})``
+- 中文交易意图（运维可读化，可选）：``[意图] <中文单行>``，由 ``trade_intent`` 生成
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ from typing import Optional
 from loguru import logger
 
 from ..utils.logging import log_structured
+from .trade_intent import plan_change_intent, trade_intent
 from .types import EVT_PLAN_CHANGE, EVT_TRADE, PlanChange, TradeEvent
 
 # 模块级 sink 注册标记（避免测试/多次实例化重复添加）
@@ -59,8 +61,9 @@ def _fmt_stop(value: Optional[float]) -> str:
 class TradeLogger:
     """双输出日志器（文件 + stdout）。"""
 
-    def __init__(self, log_file: str | Path = "data/paper/trades.log") -> None:
+    def __init__(self, log_file: str | Path = "data/paper/trades.log", intent: bool = True) -> None:
         self._log_file = str(log_file)
+        self._intent = intent
         _ensure_sinks(self._log_file)
 
     # ------------------------------------------------------------------
@@ -76,6 +79,9 @@ class TradeLogger:
         )
         logger.info(line)
         log_structured(EVT_TRADE, event.to_dict())
+        if self._intent:
+            # 运维可读化：额外输出中文交易意图（与 TRADE|/JSON 行并列，additive）
+            logger.info(f"[意图] {trade_intent(event.to_dict())}")
 
     # ------------------------------------------------------------------
     # 计划变更
@@ -87,6 +93,8 @@ class TradeLogger:
         )
         logger.info(line)
         log_structured(EVT_PLAN_CHANGE, change.to_dict())
+        if self._intent:
+            logger.info(f"[意图] {plan_change_intent(change.to_dict())}")
 
     # ------------------------------------------------------------------
     # 每日摘要（命令窗口）

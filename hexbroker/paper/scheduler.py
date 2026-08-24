@@ -21,6 +21,7 @@ import numpy as np
 import pandas as pd
 
 from ..utils.logging import get_logger
+from .trade_stats import analyze_trades_log, daily_stats_alerts, summarize_daily
 from .types import NewsItem, Quote, SignalFrame, TradeEvent
 
 log = get_logger("PAPER")
@@ -57,6 +58,7 @@ class TradingScheduler:
 
         self._symbols = list(cfg.symbols.keys())
         self._open_delay_min = int(cfg.get("open_delay_min", 5))
+        self._close_buffer_min = int(cfg.get("close_buffer_min", 10))  # P1-3：收盘复盘触发缓冲
         self._poll_interval = float(cfg.get("poll_interval_sec", 60))
         self._intel_interval = float(cfg.get("intel_interval_sec", 1800))
         self._snapshot_interval = float(cfg.get("snapshot_interval_sec", 300))
@@ -65,6 +67,7 @@ class TradingScheduler:
         self._bar_days = int(cfg.get("bar_days", 120))
         self._default_atr_pct = float(cfg.get("default_atr_pct", 0.01))
         self._account_file = Path(cfg.get("account_file", "data/paper/account.json"))
+        self._trades_log = str(cfg.get("trades_log", "data/paper/trades.log"))
         self._c0_daily_csv = Path(cfg.get("c0_daily_csv", "data/paper/c0_daily.csv"))
         self._c0_symbol = "c0" if "c0" in self._symbols else None
 
@@ -84,7 +87,31 @@ class TradingScheduler:
 
         self._last_intel_poll: Optional[datetime] = None
         self._last_snapshot_ts: Optional[datetime] = None
+        self._last_stats_alert: Optional[tuple] = None  # 盘中统计告警指纹（状态变化才提醒）
         self._evaluation_done = False
+        self._closed_days: set[date] = set()  # P1-3：当日已复盘标记（幂等）
+
+        # ---- P0-1 开仓成本门禁（配置 + 注入 broker.cost） ----
+        rg_cfg = cfg.get("risk_gate", {}) if hasattr(cfg, "get") else {}
+        self._cost_gate_enabled = bool(rg_cfg.get("cost_gate_enabled", True))
+        self._cost_gate_min_ratio = float(rg_cfg.get("cost_gate_min_ratio", 2.0))
+        if self._risk_gate is not None and hasattr(self._risk_gate, "set_cost"):
+            if getattr(self._risk_gate, "_cost", None) is None:
+                broker_cost = getattr(self._broker, "cost", None)
+                if broker_cost is not None:
+                    self._risk_gate.set_cost(
+                        broker_cost,
+                        cost_gate_enabled=self._cost_gate_enabled,
+                        cost_gate_min_ratio=self._cost_gate_min_ratio,
+                    )
+
+        # ---- P0-2 信号无变化冷却（消除 60s 开-平-开-平循环） ----
+        sc_cfg = cfg.get("signal_cooldown", {}) if hasattr(cfg, "get") else {}
+        self._signal_cooldown_enabled = bool(sc_cfg.get("enabled", True))
+        self._signal_cooldown_p_up_tol = float(sc_cfg.get("p_up_tol", 0.01))
+        self._signal_cooldown_exp_ret_tol = float(sc_cfg.get("exp_ret_tol", 0.001))
+        # 每品种上一轮「实际开仓」的信号指纹 (p_up, exp_ret, source)；与 day 无关
+        self._last_sig_fp: dict[str, tuple[float, float, str]] = {}
 
     # ------------------------------------------------------------------
     # 主循环
@@ -128,11 +155,12 @@ class TradingScheduler:
         if day is None:
             return
 
-        # 收盘检测：交易日标签翻转 → 上一个交易日已收盘
-        if self._current_day is not None and day != self._current_day:
-            if self._current_day in self._active_days:
-                self._on_close(self._current_day)
-            self._current_day = day
+        # 收盘检测（P1-3）：独立于夜盘翻转——当前时刻已过当日全部品种收盘时刻 + 缓冲
+        # 且当日未复盘 → 触发 _on_close（如 8/24 15:10 即复盘，不等到 21:00 夜盘翻转）。
+        # 周末/节假日 day_label 归属下一交易日 → day_closed 返回 None，不误触发。
+        closed_day = self._session.day_closed(now, self._close_buffer_min)
+        if closed_day is not None and closed_day not in self._closed_days:
+            self._on_close(closed_day)
 
         tradable_now = any(self._session.is_tradable(s, now) for s in self._symbols)
         if tradable_now:
@@ -195,6 +223,24 @@ class TradingScheduler:
         returns, volumes, ma_price = self._aux_from_bars(bars)
         decision = self._risk_gate.evaluate(sig, quote, acct, pos_ctx, returns, volumes, ma_price)
 
+        # ---- P0-2 信号无变化冷却（消除 60s 开-平-开-平循环） ----
+        # 仅拦截「当前无持仓 + 风控意图开仓 + 信号指纹与上一轮实际开仓相同」；
+        # 已有持仓的风控动作（止损/止盈/S1-S5 平仓）永远正常走 evaluate，不受影响。
+        if (
+            self._signal_cooldown_enabled
+            and abs(pos_ctx.position) < 1e-12
+            and abs(decision.target_position) > 1e-9
+        ):
+            fp = self._signal_fingerprint(sig)
+            prev = self._last_sig_fp.get(symbol)
+            if prev is not None and self._signal_fp_same(prev, fp):
+                log.info(
+                    "品种 {} 信号未变化（p_up={:.4f} exp_ret={:.4f} src={}），冷却拦截重复开仓",
+                    symbol, sig.p_up, sig.exp_ret, sig.source,
+                )
+                decision.target_position = 0.0
+                decision.reason = "signal_cooldown"
+
         # ---- 计划 ----
         plan = self._planner.update_from_signal(sig, decision, quote=quote, equity=acct.equity)
 
@@ -204,6 +250,13 @@ class TradingScheduler:
             self._day_trades.setdefault(day, []).append(event)
             self._all_trades.append(event)
             self._logger.trade(event)
+            # P0-2：仅在实际开仓时更新指纹（预算拒绝/冷却拦截不更新 → 下次同信号仍可重试或继续拦截）
+            if (
+                self._signal_cooldown_enabled
+                and event.is_open
+                and abs(pos_ctx.position) < 1e-12
+            ):
+                self._last_sig_fp[symbol] = self._signal_fingerprint(sig)
 
     # ------------------------------------------------------------------
     # accumulate 模式（c0 决策，§8.1）
@@ -237,22 +290,31 @@ class TradingScheduler:
         stats["close"] = quote.price
 
     def _append_c0_daily(self, day: date) -> None:
-        """收盘将 c0 主力日线快照（open/high/low/close/settle）追加到 CSV。"""
+        """收盘将 c0 主力日线快照（open/high/low/close/settle）追加到 CSV。
+
+        P2-6：读-写-替换原子写（tmp + os.replace），避免追加中断产生半行。
+        """
         if self._c0_symbol is None:
             return
         stats = self._c0_intraday.get(day)
         if stats is None:
             log.info("当日无 c0 行情（{}），跳过日线积累", day)
             return
-        header = not self._c0_daily_csv.exists()
+        existing = ""
+        if self._c0_daily_csv.exists():
+            existing = self._c0_daily_csv.read_text(encoding="utf-8")
         self._c0_daily_csv.parent.mkdir(parents=True, exist_ok=True)
-        with open(self._c0_daily_csv, "a", encoding="utf-8") as f:
-            if header:
-                f.write("date,open,high,low,close,settle\n")
-            f.write(
-                f"{day.isoformat()},{stats['open']:g},{stats['high']:g},"
-                f"{stats['low']:g},{stats['close']:g},{stats['close']:g}\n"
-            )
+        header = "date,open,high,low,close,settle\n"
+        row = (
+            f"{day.isoformat()},{stats['open']:g},{stats['high']:g},"
+            f"{stats['low']:g},{stats['close']:g},{stats['close']:g}\n"
+        )
+        body = existing if existing.strip() else header
+        if not body.endswith("\n"):
+            body += "\n"
+        tmp = self._c0_daily_csv.with_name(self._c0_daily_csv.name + ".tmp")
+        tmp.write_text(body + row, encoding="utf-8")
+        tmp.replace(self._c0_daily_csv)
         log.info("c0 日线快照已追加 day={} close={}", day, stats["close"])
 
     # ------------------------------------------------------------------
@@ -333,6 +395,22 @@ class TradingScheduler:
             return None, None, None
 
     # ------------------------------------------------------------------
+    # P0-2 信号指纹（无变化冷却）
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _signal_fingerprint(sig: SignalFrame) -> tuple[float, float, str]:
+        """有效信号指纹 (p_up, exp_ret, source)；source 不同即视为信号变化。"""
+        return (float(sig.p_up), float(sig.exp_ret), str(sig.source))
+
+    def _signal_fp_same(self, a: tuple[float, float, str], b: tuple[float, float, str]) -> bool:
+        """指纹相同：p_up/exp_ret 均在容差内且信号源一致。"""
+        return (
+            a[2] == b[2]
+            and abs(a[0] - b[0]) < self._signal_cooldown_p_up_tol
+            and abs(a[1] - b[1]) < self._signal_cooldown_exp_ret_tol
+        )
+
+    # ------------------------------------------------------------------
     # 情报轮询（Q3：仅备注/风险提示）
     # ------------------------------------------------------------------
     def _maybe_poll_intel(self, now: datetime) -> None:
@@ -360,13 +438,49 @@ class TradingScheduler:
                 acct = self._broker.snapshot(marks)
                 self._broker.save_snapshot(self._account_file)
                 log.info("账户快照已保存 equity={:.2f} cash={:.2f}", acct.equity, acct.cash)
+                day = self._session.day_label(now)
+                if day is not None:
+                    self._emit_daily_stats(day)
             except Exception:
                 log.exception("快照落盘失败（已隔离）")
+
+    def _emit_daily_stats(self, day: date) -> None:
+        """盘中定时输出当日去重成交统计（随快照节奏，约 snapshot_interval 一次）。
+
+        从审计日志按 trade_id 去重统计当日成交（规避会话重放 3× 伪增），
+        输出一行 ``[统计]`` 摘要；当日无成交时不打扰（静默）。
+
+        同时运行告警检查（``daily_stats_alerts``，如闭合偏差 ≠0、副本字段不一致），
+        异常时输出 ``[告警]`` 行；同一告警指纹只在状态变化时提醒一次，避免每 5 分钟刷屏。
+        """
+        try:
+            result = analyze_trades_log(
+                self._trades_log, day, account_json_path=str(self._account_file)
+            )
+            if not result["filtered_count"]:
+                return
+            log.info("[统计] 盘中当日统计：{}", summarize_daily(result))
+            alerts = daily_stats_alerts(result)
+            if alerts:
+                fingerprint = (day.isoformat(), tuple(alerts))
+                if fingerprint != self._last_stats_alert:
+                    for alert in alerts:
+                        log.warning("[告警] {}", alert)
+                    self._last_stats_alert = fingerprint
+            else:
+                self._last_stats_alert = None  # 状态恢复，下次异常可再次提醒
+        except Exception:
+            log.exception("当日统计输出失败（已隔离）")
 
     # ------------------------------------------------------------------
     # 收盘复盘（A5）
     # ------------------------------------------------------------------
     def _on_close(self, day: date) -> None:
+        """收盘复盘（A5）。P1-3：幂等——当日已复盘不重复处理。"""
+        if day in self._closed_days:
+            log.info("交易日 {} 已复盘，跳过重复处理", day)
+            return
+        self._closed_days.add(day)
         log.info("交易日 {} 已收盘，开始复盘", day)
         try:
             self._append_c0_daily(day)
@@ -390,7 +504,10 @@ class TradingScheduler:
             signals_by_symbol.setdefault(s.symbol, []).append(s)
 
         try:
-            self._reporter.generate(day, acct, trades, plans, signals_by_symbol, news, changes)
+            self._reporter.generate(
+                day, acct, trades, plans, signals_by_symbol, news, changes,
+                trades_log_path=self._cfg.get("trades_log", "data/paper/trades.log"),
+            )
         except Exception:
             log.exception("复盘报告生成失败（已隔离）")
         try:
@@ -432,6 +549,7 @@ class TradingScheduler:
             list(self._all_trades),
             self._broker.trading_day_count,
             initial_capital=self._broker.broker.initial_capital,
+            trades_log_path=self._trades_log,
         )
         log.info(
             "★★★★★ 已运行满 {} 个交易日，评估摘要已生成（权益 {:.2f} / 已实现 {:.2f} / 成交 {} 笔）★★★★★",

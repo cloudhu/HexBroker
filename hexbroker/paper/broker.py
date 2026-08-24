@@ -288,11 +288,34 @@ class PaperBroker:
         return path
 
     def load_snapshot(self, path: Optional[str | Path] = None) -> bool:
-        """从快照恢复账户状态；文件不存在返回 False（首次启动）。"""
+        """从快照恢复账户状态；文件不存在返回 False（首次启动）。
+
+        P2-5：快照损坏（JSONDecodeError / 非 dict 结构）→ 备份损坏文件为
+        ``account.json.corrupt.<ts>`` + 重置为初始资金 + 告警日志，不启动失败。
+        """
         path = Path(path) if path else (self.data_dir / "account.json")
         if not path.exists():
             return False
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError(f"快照顶层不是对象：{type(payload).__name__}")
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
+            backup = path.with_name(f"{path.name}.corrupt.{datetime.now():%Y%m%d%H%M%S}")
+            try:
+                path.replace(backup)
+            except OSError:
+                log.warning("快照损坏备份失败 path={} backup={}", path, backup)
+            log.warning(
+                "账户快照损坏，已重置为初始资金 {:.0f} 并备份损坏文件: {}（err={}）",
+                self._broker.initial_capital, backup, exc,
+            )
+            # 重置状态（当前 _broker 即 __init__ 创建的初始账户）
+            self._peak_equity = float(self._broker.initial_capital)
+            self._trading_day_count = 0
+            self._last_trading_day = None
+            self._trade_seq = 0
+            return False
         self._broker = SimBroker(self._cost, initial_capital=float(payload.get("initial_capital", 100_000.0)))
         self._broker.positions = {str(k): float(v) for k, v in payload.get("positions", {}).items()}
         self._broker.avg_entry = {str(k): float(v) for k, v in payload.get("avg_entry", {}).items()}

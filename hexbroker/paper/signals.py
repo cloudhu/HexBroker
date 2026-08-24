@@ -96,10 +96,14 @@ class SignalEngine:
         """按优先序取 ``symbol`` 在 ``asof`` 之前（含）最新的信号。
 
         - 全部源无信号 → None（调用方走技术兜底 / 禁开新仓）。
-        - 有信号但过期（freshness_days > 阈值）→ ``is_effective=False`` 且 source 标注。
+        - 主源新鲜（freshness_days <= 阈值）→ 返回主源。
+        - 主源过期但兜底源有**更新**信号 → 返回兜底源信号（source 标注 engine_a_fbN）。
+        - 兜底源也过期/无更新 → 返回主源（维持原语义，is_effective 按新鲜度判定）。
         - ``source`` 标注信号源（engine_a=主源 / engine_a_fbN=第 N 兜底源），供审计。
         """
         asof_dt = pd.Timestamp(asof).tz_localize(None) if asof is not None else pd.Timestamp.now()
+        # 收集每个源在 asof 前最新的信号
+        rows: list[tuple[int, pd.Series, int]] = []
         for i, df in enumerate(self._caches):
             sub = df[df["symbol"] == symbol]
             sub = sub[sub["ts"] <= asof_dt]
@@ -107,17 +111,41 @@ class SignalEngine:
                 continue
             row = sub.iloc[-1]
             fd = self.freshness_days(symbol, asof_dt, row["ts"])
-            effective = bool(row["is_effective"]) and fd <= self._freshness_threshold
-            return SignalFrame(
-                symbol=symbol,
-                ts=pd.Timestamp(row["ts"]).to_pydatetime(),
-                p_up=float(row["p_up"]),
-                exp_ret=float(row["exp_ret"]),
-                is_effective=effective,
-                source="engine_a" if i == 0 else f"engine_a_fb{i}",
-                freshness_days=fd,
-            )
-        return None
+            rows.append((i, row, fd))
+        if not rows:
+            return None
+
+        # 主源
+        i0, row0, fd0 = rows[0]
+        if fd0 <= self._freshness_threshold:
+            return self._build_frame(symbol, row0, i0, fd0)
+
+        # 主源过期：找兜底源中「比主源更新」的信号（取最新者）
+        best: Optional[tuple[int, pd.Series, int]] = None
+        ts0 = pd.Timestamp(row0["ts"])
+        for i, row, fd in rows[1:]:
+            if pd.Timestamp(row["ts"]) > ts0:
+                if best is None or pd.Timestamp(row["ts"]) > pd.Timestamp(best[1]["ts"]):
+                    best = (i, row, fd)
+        if best is not None:
+            i, row, fd = best
+            return self._build_frame(symbol, row, i, fd)
+
+        # 兜底源也过期/无更新 → 返回主源（原语义）
+        return self._build_frame(symbol, row0, i0, fd0)
+
+    def _build_frame(self, symbol: str, row: pd.Series, source_idx: int, fd: int) -> SignalFrame:
+        """由缓存行构造 SignalFrame（freshness 过期 → is_effective=False）。"""
+        effective = bool(row["is_effective"]) and fd <= self._freshness_threshold
+        return SignalFrame(
+            symbol=symbol,
+            ts=pd.Timestamp(row["ts"]).to_pydatetime(),
+            p_up=float(row["p_up"]),
+            exp_ret=float(row["exp_ret"]),
+            is_effective=effective,
+            source="engine_a" if source_idx == 0 else f"engine_a_fb{source_idx}",
+            freshness_days=fd,
+        )
 
     def freshness_days(self, symbol: str, asof: Any, sig_ts: Any = None) -> int:
         """信号新鲜度（交易日数）。无信号返回超大值。"""

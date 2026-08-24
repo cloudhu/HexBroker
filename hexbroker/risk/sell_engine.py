@@ -34,15 +34,27 @@ def detect_sell_signals(
 
     # 读取阈值（优先 cfg，否则冻结默认）
     s1_window = getattr(cfg, "sell_s1_window", 20) if cfg else 20
+    s1_min_bars = getattr(cfg, "sell_s1_min_bars", 2) if cfg else 2  # P0：开仓缓冲（持仓根数不足不判 S1）
+    s1_band_atr = getattr(cfg, "sell_s1_band_atr", 0.1) if cfg else 0.1  # P0：MA 穿越带宽死区（×ATR）
     s3_target = getattr(cfg, "sell_s3_target", 0.10) if cfg else 0.10
     s4_bars = getattr(cfg, "sell_s4_bars", 20) if cfg else 20
     s5_z = getattr(cfg, "sell_s5_z", 3.0) if cfg else 3.0
 
-    # S1 趋势破坏：价格 < 均线（多头）或 > 均线（空头）
-    if ma_price is not None and state.current_price > 0:
-        if state.position > 0 and state.current_price < ma_price:
+    # S1 趋势破坏：价格 < 均线（多头）或 > 均线（空头）。
+    # P0 修复（避免「开仓后 60s 秒平」的贴线穿越循环）：
+    #   ① 开仓缓冲：bars_in_position < s1_min_bars 时跳过 S1，给新仓保护期；
+    #   ② 带宽死区：须跌破 ma − band（多头）/ 升破 ma + band（空头）才判趋势破坏，
+    #      band = s1_band_atr × ATR，过滤价格贴均线微幅往返的误触发。
+    if (
+        state.bars_in_position >= s1_min_bars
+        and ma_price is not None
+        and state.current_price > 0
+        and state.atr > 0
+    ):
+        band = s1_band_atr * state.atr
+        if state.position > 0 and state.current_price < ma_price - band:
             signals.append(SellSignalCode.S1_TREND_BREAK)
-        elif state.position < 0 and state.current_price > ma_price:
+        elif state.position < 0 and state.current_price > ma_price + band:
             signals.append(SellSignalCode.S1_TREND_BREAK)
 
     # S2 量价背离：最新成交量显著放大但价格未创新高（多头情景）

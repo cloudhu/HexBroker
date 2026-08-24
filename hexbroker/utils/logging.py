@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import sys
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Optional
 
@@ -53,10 +54,25 @@ def get_logger(tag: str = "ROOT") -> TaggedLogger:
     return TaggedLogger(tag)
 
 
+def _json_default(o: Any) -> str:
+    """JSON 序列化兜底（P2：bool 统一为 JSON 原生类型，杜绝字符串化）。
+
+    ``bool`` 是 JSON 原生类型，``json.dumps`` 不会调用 default——此函数**不处理
+    bool**，确保 ``is_open``/``is_today_close`` 等布尔字段始终序列化为
+    ``true/false`` 而非 ``"True"/"False"`` 字符串（历史日志曾因旧序列化路径
+    产出字符串导致下游解析误判）。datetime/date → ISO 字符串，其余 → str。
+    """
+    if isinstance(o, bool):
+        return "true" if o else "false"  # 防御：理论不可达（json.dumps 原生处理 bool）
+    if isinstance(o, (datetime, date)):
+        return o.isoformat()
+    return str(o)
+
+
 def log_structured(event: str, payload: dict[str, Any]) -> None:
     """写一条结构化 JSON lines 审计日志（风控决策 / 成交 / 漂移事件）。"""
     record = {"event": event, **payload}
-    _loguru_logger.bind(audit=True).info(json.dumps(record, default=str, ensure_ascii=False))
+    _loguru_logger.bind(audit=True).info(json.dumps(record, default=_json_default, ensure_ascii=False))
 
 
 def init_logging(run_id: str, artifacts_dir: str = "artifacts", level: str = "INFO") -> None:

@@ -86,6 +86,20 @@ def test_budget_constraint_rejects_oversized_order():
     assert b.position("ag0") == 0.0
 
 
+def test_budget_ratio_040_allows_ag_one_lot():
+    """P1-2：预算 0.40 下 10 万账户 ag 1 手（保证金≈30161 ≤ 40000）可通过预算防线。"""
+    b = _broker(initial=100_000.0, budget_ratio=0.40)
+    q = _quote("ag0", 16756.0)
+    ev = b.execute_plan(_plan("ag0", 1), q, ts=datetime(2026, 8, 24, 10, 0))
+    assert ev is not None
+    assert b.position("ag0") == pytest.approx(1.0)
+    assert b.margin_used() <= 0.40 * b.snapshot().equity + 1e-6
+    # 预算防线仍生效：5 手 ag 保证金 ≈ 15 万 > 预算 4 万 → 拒绝
+    ev2 = b.execute_plan(_plan("ag0", 5), q, ts=datetime(2026, 8, 24, 10, 1))
+    assert ev2 is None
+    assert b.position("ag0") == pytest.approx(1.0)
+
+
 def test_cash_constraint_never_negative():
     b = _broker(initial=100_000.0, budget_ratio=0.30)
     q = _quote("rb0", 3000.0)
@@ -180,3 +194,41 @@ def test_snapshot_roundtrip(tmp_path):
 def test_load_snapshot_missing_returns_false(tmp_path):
     b = _broker()
     assert b.load_snapshot(tmp_path / "nope.json") is False
+
+
+def test_load_snapshot_corrupt_backs_up_and_resets(tmp_path):
+    """P2-5：快照损坏 → 告警+重置初始资金+备份损坏文件，不崩溃。"""
+    b = _broker(initial=100_000.0)
+    path = tmp_path / "account.json"
+    path.write_text("{ not valid json !!", encoding="utf-8")
+    assert b.load_snapshot(path) is False
+    # 损坏文件被备份为 account.json.corrupt.<ts>
+    corrupts = list(tmp_path.glob("account.json.corrupt.*"))
+    assert len(corrupts) == 1
+    assert not path.exists()  # 原文件已被移走
+    assert "not valid json" in corrupts[0].read_text(encoding="utf-8")
+    # 账户重置为初始资金，可正常使用
+    snap = b.snapshot()
+    assert snap.equity == pytest.approx(100_000.0)
+    assert snap.positions == {}
+    assert b.trading_day_count == 0
+
+
+def test_load_snapshot_non_dict_json_resets(tmp_path):
+    """P2-5：JSON 合法但非对象结构（如列表）同样视为损坏并重置。"""
+    b = _broker(initial=100_000.0)
+    path = tmp_path / "account.json"
+    path.write_text("[1,2,3]", encoding="utf-8")
+    assert b.load_snapshot(path) is False
+    assert b.snapshot().equity == pytest.approx(100_000.0)
+    assert list(tmp_path.glob("account.json.corrupt.*"))
+
+
+def test_save_snapshot_atomic_no_tmp_left(tmp_path):
+    """P2-6：账户快照原子写，无残留 tmp 半文件。"""
+    b = _broker()
+    b.execute_plan(_plan("rb0", 1), _quote(), ts=datetime(2026, 8, 24, 10, 0))
+    path = tmp_path / "account.json"
+    b.save_snapshot(path)
+    assert path.exists()
+    assert list(tmp_path.glob("*.tmp")) == []

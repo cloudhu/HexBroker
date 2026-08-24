@@ -14,12 +14,13 @@
 from __future__ import annotations
 
 import argparse
+import os
 import signal
 import sys
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -28,6 +29,31 @@ if str(ROOT) not in sys.path:
 
 def _print_error(msg: str) -> None:
     print(f"[错误] {msg}", file=sys.stderr)
+
+
+def _try_acquire_pid_lock(pid_path: Path) -> bool:
+    """尝试获取 PID 锁（启动互斥，根除多实例并发导致 trades.log 会话重放 3× 伪增）。
+
+    返回 True：成功取得锁（已写入本进程 PID），或锁文件不可写（降级，不阻塞启动）。
+    返回 False：检测到既有**存活**实例，调用方应拒绝启动（exit 1）。
+    """
+    from hexbroker.diagnostics.health_check import _is_pid_alive
+
+    try:
+        pid_path.parent.mkdir(parents=True, exist_ok=True)
+        if pid_path.exists():
+            try:
+                old_pid = int(pid_path.read_text(encoding="utf-8").strip())
+            except Exception:
+                old_pid = None
+            if old_pid is not None and _is_pid_alive(old_pid):
+                return False
+            # 僵尸 PID 文件（进程已死）：覆盖之
+        pid_path.write_text(str(os.getpid()), encoding="utf-8")
+        return True
+    except Exception:
+        # 锁文件不可写：降级（仅健康检查「已启动实例」检测缺失），不阻塞启动
+        return True
 
 
 def _load_paper_config(config_path: str) -> Any:
@@ -67,8 +93,12 @@ def _validate(paper_cfg: Any, symbols: list[str]) -> None:
     print(f"[模拟盘] 生效节假日表：{sorted(holidays)}（共 {len(holidays)} 个，以交易所公告为准）")
 
 
-def build_components(paper_cfg: Any, offline: bool = False) -> dict[str, Any]:
-    """组装全部组件（§4.1 组件工厂）。"""
+def build_components_safe(paper_cfg: Any, offline: bool = False) -> dict[str, tuple[bool, Any]]:
+    """逐项构建组件，互不阻断；返回 ``{name: (ok, component_or_exception)}``。
+
+    供系统健康检查（diagnostics.health_check）做模块就位检测；同时被
+    :func:`build_components` 复用，保证主流程行为不变。
+    """
     from hexbroker.paper.broker import PaperBroker, build_cost_model
     from hexbroker.paper.intel import IntelligenceService
     from hexbroker.paper.logger import TradeLogger
@@ -81,73 +111,73 @@ def build_components(paper_cfg: Any, offline: bool = False) -> dict[str, Any]:
 
     symbols = list(paper_cfg.symbols.keys())
 
-    # 会话（时段 + 节假日 + 开盘延迟 + 夜盘跨日）
-    session = TradingSession.from_config(paper_cfg)
+    def _build_broker() -> PaperBroker:
+        cost = build_cost_model(paper_cfg)
+        return PaperBroker(
+            cost=cost,
+            initial_capital=float(paper_cfg.get("initial_capital", 100_000.0)),
+            budget_ratio=float(paper_cfg.get("budget_ratio", 0.30)),
+            data_dir=paper_cfg.get("data_dir", "data/paper"),
+        )
 
-    # 行情
-    quotes = RealTimeQuoteClient(
-        symbols={s: paper_cfg.symbols[s].sina_code for s in symbols},
-        url=paper_cfg.get("quote_url", "https://hq.sinajs.cn/list="),
-        timeout=float(paper_cfg.get("quote_timeout_sec", 10)),
-        offline=offline,
-    )
-
-    # 信号（多源级联：tail_ext 新鲜优先 + v8 生产兜底）
-    signals = SignalEngine(
-        cache_paths=paper_cfg.get("signal_caches") or [paper_cfg.get("signal_cache")],
-        freshness_threshold_days=int(paper_cfg.get("freshness_threshold_days", 5)),
-        **dict(paper_cfg.get("technical", {}) or {}),
-    )
-
-    # 风控
-    risk_gate = RiskGate(
-        risk_config=paper_cfg.get("risk_config", "configs/risk/v4_atr.yaml"),
-        hard_stop=float(paper_cfg.get("risk_hard_stop", 0.20)),
-        overrides=dict(paper_cfg.get("risk_overrides", {}) or {}),
-        default_intent=float(paper_cfg.get("risk_default_intent", 0.30)),
-        default_vol=float(paper_cfg.get("risk_default_vol", 0.02)),
-        vol_quantile=float(paper_cfg.get("risk_vol_quantile", 0.5)),
-    )
-
-    # 券商（资金/预算/成本）
-    cost = build_cost_model(paper_cfg)
-    broker = PaperBroker(
-        cost=cost,
-        initial_capital=float(paper_cfg.get("initial_capital", 100_000.0)),
-        budget_ratio=float(paper_cfg.get("budget_ratio", 0.30)),
-        data_dir=paper_cfg.get("data_dir", "data/paper"),
-    )
-
-    # 计划
-    multipliers = {s: float(paper_cfg.symbols[s].multiplier) for s in symbols}
-    planner = PlanManager(
-        multipliers=multipliers,
-        risk_reward_ratio=float(paper_cfg.get("risk_reward_ratio", 1.5)),
-        plans_dir=paper_cfg.get("plans_dir", "trade_plans"),
-    )
-
-    # 情报
-    intel = IntelligenceService.from_config(paper_cfg)
-
-    # 日志 / 复盘
-    logger = TradeLogger(log_file=paper_cfg.get("trades_log", "data/paper/trades.log"))
-    display = {s: paper_cfg.symbols[s].display for s in symbols}
-    reporter = ReviewReporter(
-        reports_dir=paper_cfg.get("reports_dir", "deliverables"),
-        symbols_display=display,
-    )
-
-    return {
-        "session": session,
-        "quotes": quotes,
-        "signals": signals,
-        "risk_gate": risk_gate,
-        "broker": broker,
-        "planner": planner,
-        "intel": intel,
-        "logger": logger,
-        "reporter": reporter,
+    builders: dict[str, Callable[[], Any]] = {
+        "session": lambda: TradingSession.from_config(paper_cfg),
+        "quotes": lambda: RealTimeQuoteClient(
+            symbols={s: paper_cfg.symbols[s].sina_code for s in symbols},
+            url=paper_cfg.get("quote_url", "https://hq.sinajs.cn/list="),
+            timeout=float(paper_cfg.get("quote_timeout_sec", 10)),
+            offline=offline,
+        ),
+        "signals": lambda: SignalEngine(
+            cache_paths=paper_cfg.get("signal_caches") or [paper_cfg.get("signal_cache")],
+            freshness_threshold_days=int(paper_cfg.get("freshness_threshold_days", 5)),
+            **dict(paper_cfg.get("technical", {}) or {}),
+        ),
+        "risk_gate": lambda: RiskGate(
+            risk_config=paper_cfg.get("risk_config", "configs/risk/v4_atr.yaml"),
+            hard_stop=float(paper_cfg.get("risk_hard_stop", 0.20)),
+            overrides=dict(paper_cfg.get("risk_overrides", {}) or {}),
+            default_intent=float(paper_cfg.get("risk_default_intent", 0.30)),
+            default_vol=float(paper_cfg.get("risk_default_vol", 0.02)),
+            vol_quantile=float(paper_cfg.get("risk_vol_quantile", 0.5)),
+        ),
+        "broker": _build_broker,
+        "planner": lambda: PlanManager(
+            multipliers={s: float(paper_cfg.symbols[s].multiplier) for s in symbols},
+            risk_reward_ratio=float(paper_cfg.get("risk_reward_ratio", 1.5)),
+            plans_dir=paper_cfg.get("plans_dir", "trade_plans"),
+        ),
+        "intel": lambda: IntelligenceService.from_config(paper_cfg),
+        "logger": lambda: TradeLogger(log_file=paper_cfg.get("trades_log", "data/paper/trades.log")),
+        "reporter": lambda: ReviewReporter(
+            reports_dir=paper_cfg.get("reports_dir", "deliverables"),
+            symbols_display={s: paper_cfg.symbols[s].display for s in symbols},
+        ),
     }
+
+    results: dict[str, tuple[bool, Any]] = {}
+    for name, fn in builders.items():
+        try:
+            results[name] = (True, fn())
+        except Exception as exc:  # noqa: BLE001
+            results[name] = (False, exc)
+    return results
+
+
+def build_components(paper_cfg: Any, offline: bool = False) -> dict[str, Any]:
+    """组装全部组件（§4.1 组件工厂）。任一组件失败则抛出首个异常。"""
+    safe = build_components_safe(paper_cfg, offline=offline)
+    comp: dict[str, Any] = {}
+    first_err: Optional[Exception] = None
+    for name in ("session", "quotes", "signals", "risk_gate", "broker", "planner", "intel", "logger", "reporter"):
+        ok, val = safe[name]
+        if ok:
+            comp[name] = val
+        elif first_err is None:
+            first_err = val
+    if first_err is not None:
+        raise first_err
+    return comp
 
 
 def main() -> int:
@@ -156,11 +186,24 @@ def main() -> int:
     parser.add_argument("--days", type=int, default=None, help="运行 N 个交易日后退出（默认不退出）")
     parser.add_argument("--offline", action="store_true", help="离线 mock 行情模式（冒烟/演示）")
     parser.add_argument("--smoke", action="store_true", help="冒烟：单轮 tick + 收盘复盘后即退出")
+    parser.add_argument("--health-check", action="store_true", help="仅运行系统健康检查并打印报告后退出（不启动交易）")
     args = parser.parse_args()
 
     try:
         paper_cfg = _load_paper_config(args.config)
         symbols = list(paper_cfg.symbols.keys())
+    except Exception as exc:
+        _print_error(f"配置加载失败：{exc}")
+        return 1
+
+    # 系统健康检查（独立只读探测，不依赖启动校验）
+    if args.health_check:
+        from hexbroker.diagnostics.health_check import run_health_check
+
+        run_health_check(paper_cfg, offline=args.offline)
+        return 0
+
+    try:
         _validate(paper_cfg, symbols)
     except Exception as exc:
         _print_error(f"启动校验失败：{exc}")
@@ -264,7 +307,22 @@ def main() -> int:
         print(f"[模拟盘]   成交日志 {len(trade_lines)} 行；复盘报告 {len(reports)} 份（{Path(paper_cfg.reports_dir)}）")
         return 0
 
-    scheduler.run()
+    # PID 锁：启动互斥（根除多实例并发导致 trades.log 会话重放 3× 伪增）
+    # 写 PID 前先检测既有存活实例；存活则拒绝第二个实例（exit 1），避免 append 叠加。
+    pid_path = Path(paper_cfg.get("data_dir", "data/paper")) / "paper.pid"
+    if not _try_acquire_pid_lock(pid_path):
+        print(f"[模拟盘] 已有存活实例（PID 锁 {pid_path}），拒绝重复启动以避免 trades.log 会话重放叠加。")
+        print(f"[模拟盘]   如需强制重启，请先结束该实例或删除 PID 锁文件后重试。")
+        return 1
+
+    try:
+        scheduler.run()
+    finally:
+        if pid_path is not None and pid_path.exists():
+            try:
+                pid_path.unlink()
+            except OSError:
+                pass
     return 0
 
 

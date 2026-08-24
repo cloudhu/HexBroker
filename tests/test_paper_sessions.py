@@ -99,6 +99,22 @@ def test_open_delay_night_session():
     assert s.is_open_delay_passed("ag0", _dt(MON, 21, 6), delay_min=5)
 
 
+def test_open_delay_night_crosses_midnight_after_midnight():
+    """P1-1：跨日夜盘 00:00-02:30 凌晨段，延迟相对「当晚 21:00」判定（不得恒判延迟中）。"""
+    s = _session()
+    # 周一 21:00 夜盘 → 周二凌晨 00:30（相对 21:00 已过 3.5h >> 5min 延迟）
+    assert s.is_open_delay_passed("ag0", _dt(TUE, 0, 30), delay_min=5) is True
+    assert s.is_open_delay_passed("ag0", _dt(TUE, 1, 0), delay_min=5) is True
+    assert s.is_open_delay_passed("ag0", _dt(TUE, 2, 29), delay_min=5) is True
+    # 边界：凌晨 00:00 整点也视为已过延迟
+    assert s.is_open_delay_passed("ag0", _dt(TUE, 0, 0), delay_min=5) is True
+    # 21:00 当晚（< 21:05）仍应延迟
+    assert s.is_open_delay_passed("ag0", _dt(MON, 21, 2), delay_min=5) is False
+    # rb（21:00-23:00 不跨日）行为不变（原逻辑：非跨日夜盘开不施加延迟）
+    assert s.is_open_delay_passed("rb0", _dt(MON, 21, 2), delay_min=5) is True
+    assert s.is_open_delay_passed("rb0", _dt(MON, 21, 6), delay_min=5) is True
+
+
 def test_open_delay_zero_disabled():
     s = _session()
     assert s.is_open_delay_passed("ag0", _dt(MON, 9, 1), delay_min=0)
@@ -136,6 +152,38 @@ def test_next_trading_day_skips_holiday():
     # 2026-09-30（周三）之后第一个交易日：10-01 国庆（唯一节假日）→ 落到 10-02（周五）
     nd = s.next_trading_day(date(2026, 9, 30))
     assert nd == date(2026, 10, 2)
+
+
+# ---------------------------------------------------------------------------
+# 收盘触发（P1-3：独立于夜盘翻转，日盘收盘 + 缓冲后触发）
+# ---------------------------------------------------------------------------
+def test_day_closed_after_day_session():
+    s = _session()
+    # 8/24 15:10（周一，15:00 收盘 + 10min 缓冲）→ 触发复盘
+    assert s.day_closed(_dt(MON, 15, 10)) == MON
+    assert s.day_closed(_dt(MON, 16, 0)) == MON
+    # 未到收盘时刻（盘中）→ 不触发
+    assert s.day_closed(_dt(MON, 14, 59)) is None
+    assert s.day_closed(_dt(MON, 9, 0)) is None
+    # 夜盘（>= 21:00）day_label 归属下一交易日，日盘尚未结束 → 不触发
+    assert s.day_closed(_dt(MON, 21, 30)) is None
+    # 凌晨段（下一交易日日盘未开）→ 不触发
+    assert s.day_closed(_dt(TUE, 1, 0)) is None
+
+
+def test_day_closed_weekend_and_holiday_not_triggered():
+    s = _session()
+    # 周末：day_label 跳到周一 → 与当前日期不符 → 不误触发
+    assert s.day_closed(_dt(date(2026, 8, 22), 20, 0)) is None  # 周六 20:00
+    assert s.day_closed(_dt(date(2026, 8, 23), 15, 10)) is None  # 周日
+    # 节假日（10-01 国庆，周四）：day_label 归属 10-08 → 不误触发
+    assert s.day_closed(_dt(NATIONAL, 15, 10)) is None
+
+
+def test_day_close_threshold_buffer():
+    s = _session()
+    assert s.day_close_threshold(10) == time(15, 10)
+    assert s.day_close_threshold(0) == time(15, 0)
 
 
 # ---------------------------------------------------------------------------

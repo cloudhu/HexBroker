@@ -29,8 +29,10 @@ class RiskManager:
         self.cfg = cfg
         self.risk = getattr(cfg, "risk", None)
         self.hard_stop = float(hard_stop if hard_stop is not None else HARD_STOP_DRAWDOWN)
-        self._ratchet = ATRRatchet(ATRTier.HIGH)
-        self._prev_stop: Optional[float] = None  # 上一根 bar 的止损价（trailing 用）
+        # 按品种隔离 ATR ratchet 与移动止损记忆（P1 修复：避免 ag0/rb0 交替
+        # evaluate 时互相污染止损档位与 prev_stop，导致止损价跨品种串扰）
+        self._ratchets: dict[str, ATRRatchet] = {}
+        self._prev_stops: dict[str, float] = {}
 
     # --------------------------- 主入口 ---------------------------
     def evaluate(
@@ -105,13 +107,16 @@ class RiskManager:
         decision.target_position = float(target)
         decision.kelly_fraction = float(budget)
 
-        # ATR 三档 ratchet（只增不减）+ 止损价
-        self._ratchet.update(
+        # ATR 三档 ratchet（只增不减）+ 止损价（按品种隔离记忆）
+        sym = state.symbol or "default"
+        ratchet = self._ratchets.setdefault(sym, ATRRatchet(ATRTier.HIGH))
+        prev_stop = self._prev_stops.get(sym)
+        ratchet.update(
             state.vol_quantile,
             vol_low_q=getattr(cfg, "vol_low_q", 0.2),
             vol_high_q=getattr(cfg, "vol_high_q", 0.8),
         )
-        tier = self._ratchet.tier
+        tier = ratchet.tier
         decision.atr_tier = tier
         # ATR 止损价：用 trailing_stop 实现「止损只向有利方向移动」（红线），
         # 参考价优先 current_price（随价移动锁定利润），缺失时回退 entry_price。
@@ -119,15 +124,23 @@ class RiskManager:
         base_stop = compute_stop(ref_price, state.position or target, state.atr, tier)
         if base_stop is None:
             decision.stop_price = None
-            self._prev_stop = None
+            self._prev_stops.pop(sym, None)
         else:
             decision.stop_price = trailing_stop(
-                ref_price, state.position or target, state.atr, tier, self._prev_stop
+                ref_price, state.position or target, state.atr, tier, prev_stop
             )
-            self._prev_stop = decision.stop_price
+            self._prev_stops[sym] = decision.stop_price
         return decision
 
     # --------------------------- 工具 ---------------------------
-    def reset_ratchet(self, tier: ATRTier = ATRTier.HIGH) -> None:
-        self._ratchet.reset(tier)
-        self._prev_stop = None
+    def reset_ratchet(self, symbol: Optional[str] = None, tier: ATRTier = ATRTier.HIGH) -> None:
+        """重置 ATR ratchet / 止损记忆。
+
+        ``symbol`` 指定则仅重置该品种；None 则全部重置（保持旧调用兼容）。
+        """
+        if symbol is None:
+            self._ratchets.clear()
+            self._prev_stops.clear()
+            return
+        self._ratchets[symbol] = ATRRatchet(tier)
+        self._prev_stops.pop(symbol, None)

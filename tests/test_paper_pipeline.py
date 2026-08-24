@@ -304,6 +304,83 @@ def test_accumulate_mode_tracks_but_no_open(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# 计划手数（P1-2：10 万账户 ag 可开 1 手）
+# ---------------------------------------------------------------------------
+def test_size_qty_ag_one_lot_at_100k():
+    """P1-2：10 万账户 ag 在合理信号强度（意图 0.30）下可开 1 手（raw=0.119 >= 0.10）。"""
+    planner = PlanManager(multipliers={"ag0": 15.0, "rb0": 10.0, "c0": 10.0})
+    # ag0：0.30×100000/(16756×15) = 0.1194 → 至少 1 手
+    assert planner._size_qty("ag0", 0.30, 16756.0, 100_000.0) == 1.0
+    # rb0：0.30×100000/(3600×10) = 0.833 → 1 手
+    assert planner._size_qty("rb0", 0.30, 3600.0, 100_000.0) == 1.0
+    # c0：0.30×100000/(2718×10) = 1.104 → 1 手
+    assert planner._size_qty("c0", 0.30, 2718.0, 100_000.0) == 1.0
+    # 信号强度过低（raw < 0.10）→ 0 手
+    assert planner._size_qty("ag0", 0.05, 16756.0, 100_000.0) == 0.0
+    # >= 1 手向下取整
+    assert planner._size_qty("c0", 0.60, 2718.0, 100_000.0) == 2.0
+
+
+# ---------------------------------------------------------------------------
+# 收盘触发（P1-3：15:10 触发复盘，不等到 21:00 夜盘翻转；幂等）
+# ---------------------------------------------------------------------------
+def test_tick_triggers_close_after_day_close(monkeypatch, tmp_path):
+    """P1-3：8/24 15:10（周一）应触发复盘；当日已复盘不重复。"""
+    sched, ctx = _scheduler(tmp_path, sig=_eff_signal())
+
+    class _FakeDT(datetime):
+        @classmethod
+        def now(cls):
+            return datetime(2026, 8, 24, 15, 10)
+
+    monkeypatch.setattr("hexbroker.paper.scheduler.datetime", _FakeDT)
+    sched._tick()
+    report = ctx["tmp"] / "reports" / "复盘_2026-08-24.md"
+    assert report.exists()  # 15:10 即触发复盘（不等到 21:00 夜盘翻转）
+    assert sched._broker.trading_day_count == 1
+
+    # 再次 tick → 当日已复盘不重复
+    sched._tick()
+    assert sched._broker.trading_day_count == 1
+    assert len(list((ctx["tmp"] / "reports").glob("复盘_*.md"))) == 1
+
+
+def test_on_close_idempotent(tmp_path):
+    """P1-3：_on_close 幂等——直接重复调用不重复处理。"""
+    sched, ctx = _scheduler(tmp_path, sig=_eff_signal())
+    sched._on_close(MON)
+    sched._on_close(MON)
+    assert sched._broker.trading_day_count == 1
+    assert len(list((ctx["tmp"] / "reports").glob("复盘_*.md"))) == 1
+
+
+# ---------------------------------------------------------------------------
+# 原子写（P2-6：计划/复盘/c0 日线无残留 tmp 半文件）
+# ---------------------------------------------------------------------------
+def test_atomic_write_no_tmp_leftovers(tmp_path):
+    """P2-6：计划落盘/复盘报告/c0 日线追加原子写，无残留 tmp 文件。"""
+    syms = {
+        "rb0": {"display": "SHFE.rb", "sina_code": "nf_RB0", "multiplier": 10, "min_tick": 1, "mode": "trade", "sessions": {"day": _DAY, "night": [["21:00", "23:00"]]}},
+        "c0": {"display": "DCE.c", "sina_code": "nf_C0", "multiplier": 10, "min_tick": 1, "mode": "accumulate", "accumulate_days": 30, "sessions": {"day": _DAY, "night": []}},
+    }
+    paper_cfg = _paper_cfg(syms)
+    paper_cfg.c0_daily_csv = str(tmp_path / "c0_daily.csv")
+    sched, ctx = _scheduler(tmp_path, paper_cfg=paper_cfg, sig=_eff_signal())
+    now = datetime(2026, 8, 24, 10, 0)
+    marks = {"rb0": RB_PRICE, "c0": 2265.0}
+    sched._process_symbol("rb0", now, Quote(symbol="rb0", ts=now, price=RB_PRICE, open=2990, high=3010, low=2990, pre_settle=2990), marks)
+    sched._process_symbol("c0", now, Quote(symbol="c0", ts=now, price=2265.0, open=2260, high=2275, low=2255, pre_settle=2260), marks)
+    sched._on_close(MON)
+
+    assert (ctx["tmp"] / "plans" / "2026-08-24_plan.json").exists()
+    assert (ctx["tmp"] / "reports" / "复盘_2026-08-24.md").exists()
+    assert (tmp_path / "c0_daily.csv").exists()
+    assert not list((ctx["tmp"] / "plans").glob("*.tmp"))
+    assert not list((ctx["tmp"] / "reports").glob("*.tmp"))
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+# ---------------------------------------------------------------------------
 # 情报：风险提示/备注 → 计划变更 + PLAN 日志（Q3/R7/R8）
 # ---------------------------------------------------------------------------
 def test_intel_news_plan_note_and_log(tmp_path):

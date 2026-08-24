@@ -121,7 +121,12 @@ class TradingSession:
         for s in sessions:
             if t in s:
                 if s.start in self._opening_starts(sessions):
-                    start_dt = datetime.combine(_to_date(ts), s.start)
+                    base_day = _to_date(ts)
+                    # P1-1：跨日夜盘（21:00-02:30）凌晨段 ts 的 date 是次日，基准日回退一天，
+                    # 使 00:00-02:30 的延迟判断相对「当晚 21:00」计算（否则恒判为延迟中）。
+                    if s.crosses_midnight and t <= s.end:
+                        base_day = base_day - timedelta(days=1) if base_day is not None else None
+                    start_dt = datetime.combine(base_day, s.start)
                     if ts < start_dt + timedelta(minutes=int(delay_min)):
                         return False
                 return True
@@ -138,6 +143,41 @@ class TradingSession:
         while not self.is_trading_day(d):
             d = d + timedelta(days=1)
         return d
+
+    def day_close_threshold(self, buffer_min: int = 10) -> time:
+        """全部品种日盘收盘时刻的最大值 + 缓冲（P1-3 收盘复盘触发阈值）。
+
+        只取日盘时段（start < night_boundary）：夜盘（含 21:00-23:00 非跨日）归属
+        下一交易日，不计入当日收盘；无日盘时段时兜底 15:00（通用商品期货时段）。
+        """
+        close_times: list[time] = []
+        for sessions in self.symbol_sessions.values():
+            for s in sessions:
+                if s.start < self.night_boundary:
+                    close_times.append(s.end)
+        latest = max(close_times) if close_times else time(15, 0)
+        total = latest.hour * 60 + latest.minute + int(buffer_min)
+        hh, mm = divmod(total, 60)
+        return time(hh % 24, mm % 60)
+
+    def day_closed(self, ts: Any, buffer_min: int = 10) -> Optional[date]:
+        """当前时刻所属交易日的日盘是否已收盘（收盘时刻 + 缓冲已过）。
+
+        返回该交易日（供收盘复盘触发，P1-3）；以下情况返回 None：
+        - 未到收盘时刻（含盘中/夜盘凌晨段）；
+        - 夜盘（>= night_boundary）day_label 已归属下一交易日，日盘尚未结束；
+        - 周末/节假日 day_label 跳到下一交易日（不误触发）。
+        """
+        d = _to_date(ts)
+        if d is None:
+            return None
+        trading_day = self.day_label(ts)
+        if trading_day is None or trading_day != d:
+            return None
+        t = pd_time(ts)
+        if t >= self.day_close_threshold(buffer_min):
+            return trading_day
+        return None
 
     # ------------------------------------------------------------------
     # 内部工具
