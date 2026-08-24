@@ -84,3 +84,60 @@ signal_cooldown:
    `scripts/replay_0824_cost_cooldown.py`
 2. `docs(p0): P0-1/P0-2 成本门禁+信号冷却实现说明与复跑验证`
    文件：`deliverables/2026-08-24_p0_cost_gate_cooldown.md`（本文档）
+
+---
+
+## R3 滑点纳入成本门禁口径（2026-08-24 追加）
+
+### 背景
+P0-1 门禁的 `round_trip_cost` 原仅含手续费（`notional×(fee_open+fee_close_today)`），
+未计入滑点。rb0 单边滑点 1 tick=¥10/手、往返 ¥20 > 往返手续费 ¥4.5：rb0 信号
+exp_ret=0.171% 对成本门禁的覆盖倍数由费口径 11.4× 降至含滑点约 2.1×（余量薄，
+低质量信号可能被放行）。本次把滑点纳入往返成本口径。
+
+### 公式（`hexbroker/paper/risk_gate.py::_cost_gate_pass`，R3 起取代上方纯费口径）
+```text
+round_trip_cost = 手续费部分 + 滑点部分
+手续费部分 = notional × (fee_open + fee_close_today)
+滑点部分   = 2 × min_tick(symbol) × slippage_ticks × multiplier(symbol)   # 单边滑点 × 双边
+```
+参数取自注入的 CostModel（scheduler 从 broker.cost 复用注入 `set_cost`，不新增记账代码）：
+- `fee_open` / `fee_close_today`（费率，rb0=0.00005/0.00010）；
+- `min_tick(symbol)`（品种级私有方法 `_min_tick`，rb0=1.0）；
+- `slippage_ticks`（rb0=1.0）；
+- `multiplier(symbol)`（品种级私有方法 `_multiplier`，rb0=10.0）。
+
+开关：`configs/paper.yaml` → `risk_gate.slippage_in_cost`（默认 `true`）；
+`false` 时滑点部分按 0 计，恢复纯费口径。`cost=None`（未注入）时门禁整段跳过（向后兼容不变）。
+
+### 影响
+- rb0 往返成本由 ¥4.5 → ¥24.5（含滑点 ¥20）；门禁门槛由 2×¥4.5=¥9 → 2×¥24.5=¥49。
+- 仅费口径通过、含滑点被拒的信号（rb0 多头 exp_ret ∈ (0.03%, 0.163%)）现在会被拦截，
+  低质量信号不再被放行。
+- 8/24 rb0 信号 exp_ret=0.171%：expected_pnl=¥51.9 > ¥49 → 仍通过；覆盖倍数 11.4× → 约 2.1×。
+
+### 复跑结果（`scripts/replay_0824_cost_cooldown.py --rounds 60`）
+| 档位 | 配置 | 开仓 | 平仓 | 末态持仓 |
+|---|---|---|---|---|
+| 1 修复前 | min_bars=1 band=0 无门禁无冷却 | 30 | 30 | 0.0 |
+| 2 仅 cb37333 | min_bars=2 band=0.1×ATR | 3 | 2 | 1.0 |
+| 3 cb37333+P0-1+P0-2 | min_bars=2 band=0.1×ATR + 门禁（含滑点）+ 冷却 | 1 | 1 | 0.0 |
+
+档 3 维持 1开1平（rb0 含滑点覆盖倍数约 2.1× 仍 > 2×，门禁未拦截该信号；重复开仓
+由信号冷却消除，与 R3 前一致）。
+
+### 测试
+- `tests/test_risk_gate_cost.py` 新增 2 例（共 8）：
+  - ⑥ 仅费口径通过、含滑点口径被拒（exp_ret=0.06%）→ reason=cost_gate_reject；
+    同一信号 `slippage_in_cost=False` → 放行（验证开关）；
+  - ⑦ 含滑点仍通过（exp_ret=0.2%）→ 开仓。
+- `tests/test_signal_cooldown.py` 信号变化用例的信号 B 由 exp_ret=0.1% 调至 0.3%：
+  0.1% 在新口径下被成本门禁拦截（与冷却语义无关）；0.3% 仍通过门禁且保持「信号变化 → 开仓」语义。
+- paper/risk 相关用例全绿；全量 pytest 环境性失败（缺 pyarrow/pydantic 等）与本次无关。
+
+### 提交
+- `feat(hexbroker): R3 滑点纳入成本门禁往返成本口径`
+  文件：`hexbroker/paper/risk_gate.py`、`hexbroker/paper/scheduler.py`、
+  `configs/paper.yaml`、`tests/test_risk_gate_cost.py`、`tests/test_signal_cooldown.py`
+- `docs(hexbroker): R3 滑点成本口径说明`
+  文件：`deliverables/2026-08-24_p0_cost_gate_cooldown.md`（本文档）
