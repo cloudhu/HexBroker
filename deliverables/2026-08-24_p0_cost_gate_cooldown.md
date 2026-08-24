@@ -141,3 +141,51 @@ round_trip_cost = 手续费部分 + 滑点部分
   `configs/paper.yaml`、`tests/test_risk_gate_cost.py`、`tests/test_signal_cooldown.py`
 - `docs(hexbroker): R3 滑点成本口径说明`
   文件：`deliverables/2026-08-24_p0_cost_gate_cooldown.md`（本文档）
+
+---
+
+## R3-1 min_tick 兜底补全（2026-08-24 追加，QA R3 复核遗留）
+
+### 背景
+`hexbroker/backtest/cost.py` 的品种规格兜底表 `_SPEC_MIN_TICK` 原仅覆盖
+au(0.02)/ag(0.01)/m(1.0)。当 `CostModel.contracts` 未提供某品种（回测/RL 环境、
+或品种未显式声明）时，`_min_tick(symbol)` 走兜底：rb/c 不在表内 → 回退全局
+`min_tick=10.0` → 单边滑点 10×1×10×1=¥100、往返 ¥200（正确应为 1×1×10×1=¥10
+单边、往返 ¥20），滑点成本 10× 虚高。方向保守（不会不安全开仓），但口径虚高。
+
+生产模拟盘路径不受影响：`configs/paper.yaml` symbols 段已显式声明
+ag0(mult=15,min_tick=0.01)、rb0(mult=10,min_tick=1)、c0(mult=10,min_tick=1)，
+contracts 优先于兜底表。
+
+### 改动（`hexbroker/backtest/cost.py`）
+- `_SPEC_MIN_TICK` 补 `"rb": 1.0, "c": 1.0`（依据 paper.yaml rb0/c0 `min_tick: 1`
+  显式声明；无证据不翻转其他品种物理值，其余品种保持回退全局默认=保守方向）。
+- `_SPEC_MULTIPLIER` 补 `"rb": 10.0, "c": 10.0`（依据 paper.yaml rb0/c0
+  `multiplier: 10` 显式声明；与全局默认一致，仅为表完整性）。
+- `_min_tick`/`_multiplier` 兜底回退时新增告警：品种未在规格表声明、回退全局
+  默认时 `logging.warning` 一条（提示「回退全局 min_tick/multiplier」），
+  按 (kind, symbol) 去重仅告警一次，避免静默 10× 虚高且不刷屏；`symbol=None`
+  不告警。
+
+### 影响
+- rb/c 兜底路径滑点从 ¥200 修正为 ¥20（10× 虚高消除），与 paper.yaml 显式声明口径一致。
+- 未声明品种（如 cu0）仍回退全局默认（保守方向不破坏），并可见告警提示。
+
+### 测试（`tests/test_cost_multiplier_spec.py`，新增 2 例 + 原 2 例断言更新）
+- 新增 `test_r3_1_min_tick_fallback_rb_c`：`_min_tick("rb0")==1.0`、
+  `_min_tick("c0")==1.0`、`_multiplier("rb0")==10.0`、未覆盖品种 `_min_tick("cu0")==10.0`
+  （保守回退）、rb0 单边滑点 ¥10/往返 ¥20。
+- 新增 `test_r3_1_contracts_provided_take_priority`：contracts 提供时优先
+  （`{"rb0":{"min_tick":2.0,"multiplier":20.0}}` → 2.0/20.0）；同短名未配置合约
+  （rb1）仍走兜底表 1.0。
+- 原 `test_spec_min_tick_fallback_when_contracts_none` / `test_spec_multiplier_fallback_when_contracts_none`
+  更新：rb/c 断言由「回退全局 10.0」改为「规格表 1.0/10.0」，并补 cu0 回退断言。
+- 结果：cost 相关 13/13 通过；paper/risk/broker 相关 49/49 通过；
+  全量 pytest `20 failed, 289 passed, 11 skipped, 15 errors`——failed/errors 均为
+  本环境缺 pyarrow/pydantic/RL 依赖导致，与本次改动无关（基线一致）。
+
+### 提交
+- `feat(hexbroker): R3-1 补全 _SPEC_MIN_TICK 兜底（rb/c）+ 缺声明 warn`
+  文件：`hexbroker/backtest/cost.py`、`tests/test_cost_multiplier_spec.py`
+- `docs(hexbroker): R3-1 min_tick 兜底说明`
+  文件：`deliverables/2026-08-24_p0_cost_gate_cooldown.md`（本文档）
