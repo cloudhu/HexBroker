@@ -6,14 +6,21 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 # 品种规格乘数/最小跳动默认值（V5 修复：contracts 未提供时按此回退，
 # 避免 au/ag 误用全局 10.0 导致 P&L 量级错误）。
 # 依据 §3.5 约定：au=×1000/tick0.02、ag=×15/tick0.01、m=×10/tick1。
-_SPEC_MULTIPLIER = {"au": 1000.0, "ag": 15.0, "m": 10.0}
-_SPEC_MIN_TICK = {"au": 0.02, "ag": 0.01, "m": 1.0}
+# R3-1 补全：rb/c 依据 configs/paper.yaml symbols 段显式声明（rb0/c0: multiplier=10, min_tick=1）。
+_SPEC_MULTIPLIER = {"au": 1000.0, "ag": 15.0, "m": 10.0, "rb": 10.0, "c": 10.0}
+_SPEC_MIN_TICK = {"au": 0.02, "ag": 0.01, "m": 1.0, "rb": 1.0, "c": 1.0}
+
+# 已对「回退全局默认」告警过的 (kind:key)，避免每个 tick 重复刷屏。
+_WARNED_FALLBACK: set[str] = set()
 
 
 def _short_symbol(symbol: str | None) -> str | None:
@@ -21,6 +28,27 @@ def _short_symbol(symbol: str | None) -> str | None:
     if not symbol:
         return None
     return symbol.split(".")[-1].rstrip("0123456789").lower()
+
+
+def _warn_fallback_once(kind: str, symbol: str | None, value: float) -> None:
+    """品种未在规格表声明、回退全局默认时告警一次（避免静默 10× 虚高；不刷屏）。
+
+    kind 取 "MULTIPLIER"/"MIN_TICK"；仅对非 None symbol 且每 (kind, key) 首次回退时告警。
+    """
+    key = _short_symbol(symbol)
+    if not key:
+        return
+    dedup_key = f"{kind}:{key}"
+    if dedup_key in _WARNED_FALLBACK:
+        return
+    _WARNED_FALLBACK.add(dedup_key)
+    logger.warning(
+        "品种 %s 未在 _SPEC_%s 声明，回退全局默认 %s=%s",
+        symbol,
+        kind,
+        kind.lower(),
+        value,
+    )
 
 
 @dataclass
@@ -48,6 +76,7 @@ class CostModel:
         key = _short_symbol(symbol)
         if key in _SPEC_MULTIPLIER:
             return _SPEC_MULTIPLIER[key]
+        _warn_fallback_once("MULTIPLIER", symbol, self.multiplier)
         return self.multiplier
 
     def _min_tick(self, symbol: str | None) -> float:
@@ -57,6 +86,7 @@ class CostModel:
         key = _short_symbol(symbol)
         if key in _SPEC_MIN_TICK:
             return _SPEC_MIN_TICK[key]
+        _warn_fallback_once("MIN_TICK", symbol, self.min_tick)
         return self.min_tick
 
     @classmethod
