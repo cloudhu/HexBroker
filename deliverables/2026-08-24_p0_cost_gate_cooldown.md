@@ -189,3 +189,20 @@ contracts 优先于兜底表。
   文件：`hexbroker/backtest/cost.py`、`tests/test_cost_multiplier_spec.py`
 - `docs(hexbroker): R3-1 min_tick 兜底说明`
   文件：`deliverables/2026-08-24_p0_cost_gate_cooldown.md`（本文档）
+
+---
+
+## P0-3 信号新鲜度（2026-08-25 补记）
+
+夜盘审计发现 08-24 夜盘用 08-21 信号开仓：根因是 `freshness_threshold_days=5`
+配合**工作日差**新鲜度（周五信号周一 fd=1≤5 仍判新鲜）。已将阈值收紧为 **0
+（隔夜过期，仅当天信号有效）**，并补启动自检 WARN + 运行时告警（每品种每日一次去重）。
+
+- 阈值：`hexbroker/paper/signals.py`（默认值）+ `configs/paper.yaml` 均为 0，
+  `scripts/paper_trading_main.py` / `health_check.check_lifecycle` 缺省值同步。
+- 自检：`check_data_sources` 计算 fd（复用 `_business_days` 口径），`fd>阈值` → WARN
+  「建议开盘前刷新 (p22_tail_ext.py --skip-eval)」，不阻断启动。
+- 运行时：`TradingScheduler._warn_stale_signal_once` → `[告警] 信号陈旧 fd=.. 品种=..`，
+  `(symbol, day)` 去重；`SignalEngine.freshness_threshold` property 暴露阈值。
+- 详细口径、运维手册（开盘前刷新流程、数据依赖、当前环境数据仅到 08-21 的限制）与
+  测试清单见 **`deliverables/2026-08-25_p0_signal_refresh.md`**。
