@@ -19,7 +19,9 @@ paper:
   signal_caches:
     - artifacts/signals_cache18_grouped_v8_tail_ext.parquet   # 主源：P22 末折评估窗延长变体，覆盖至 2026-08-21（修复信号过期）
     - artifacts/signals_cache18_grouped_v8.parquet            # 兜底：v8 生产基线（止 2026-06-29，fold 边界限制）
-  freshness_threshold_days: 5      # 信号新鲜度阈值（交易日；过期→技术兜底/禁开+告警，§8.2）
+  freshness_threshold_days: 0      # 信号新鲜度阈值（交易日；过期→技术兜底/禁开+告警，§8.2）
+                                   # P0-3：0=隔夜过期，仅当天（同一交易日）信号有效；
+                                   # 忘记开盘前刷新缓存 → 主源全部过期 → 仅技术兜底开仓（见 deliverables/2026-08-25_p0_signal_refresh.md）
   technical:                       # 技术指标兜底参数（§8.1 c0 信号缺口）
     fast_ma: 5
     slow_ma: 20

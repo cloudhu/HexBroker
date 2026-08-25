@@ -2,6 +2,7 @@
 
 - 主源：v8 信号缓存（``artifacts/signals_cache18_grouped_v8.parquet``，含 ag0/rb0，**不含 c0**）。
 - 新鲜度检测：信号日距当前交易日的距离超过阈值 → 标记过期（有持仓仅风控 / 无持仓禁开+告警，§8.2）。
+  P0-3：阈值默认 **0 = 隔夜过期**，仅同一交易日（fd=0）的信号可驱动开仓。
 - 技术指标兜底（c0 或信号缺失时）：双均线 + ATR 通道（§4.3 决策建议）。
 """
 
@@ -54,13 +55,25 @@ class SignalEngine:
     - 信号源（按优先序）：主源（如 tail_ext，覆盖至最新）→ 兜底源（如 v8 生产基线）→ 技术指标。
     - 新鲜度检测：信号日距当前交易日的距离超过阈值 → 标记过期（有持仓仅风控 / 无持仓禁开+告警，§8.2）。
     - 技术指标兜底（c0 或全部缓存信号缺失时）：双均线 + ATR 通道（§4.3 决策建议）。
+
+    Args:
+        cache_path: 单信号缓存路径（向后兼容，等价 ``cache_paths=[cache_path]``）。
+        cache_paths: 多源级联信号缓存路径（优先于 ``cache_path``）。
+        freshness_threshold_days: 信号新鲜度阈值（工作日/交易日近似差）。
+            **默认 0 = 隔夜过期**（P0-3）：仅 ``fd == 0``（同一交易日）的信号视为新鲜，
+            ``fd >= 1``（隔夜、含周五信号周一用）即过期 → ``is_effective=False``
+            → 有持仓仅风控 / 无持仓禁开（§8.2），由技术兜底接手。
+        fast_ma: 技术兜底快均线窗口。
+        slow_ma: 技术兜底慢均线窗口。
+        atr_window: 技术兜底 ATR 窗口。
+        atr_mult: 技术兜底 ATR 通道倍数。
     """
 
     def __init__(
         self,
         cache_path: str | Path | None = None,
         cache_paths: list[str | Path] | None = None,
-        freshness_threshold_days: int = 5,
+        freshness_threshold_days: int = 0,
         fast_ma: int = 5,
         slow_ma: int = 20,
         atr_window: int = 14,
@@ -79,6 +92,14 @@ class SignalEngine:
         self._atr_window = int(atr_window)
         self._atr_mult = float(atr_mult)
         self._caches: list[pd.DataFrame] = [self._load_cache(p) for p in self._paths]
+
+    @property
+    def freshness_threshold(self) -> int:
+        """信号新鲜度阈值（交易日；0=隔夜过期，仅当天信号有效）。
+
+        供调用方（调度器运行时告警 / 健康自检）判定信号是否陈旧，避免各处重复读配置。
+        """
+        return self._freshness_threshold
 
     def _load_cache(self, cache_path: Path) -> pd.DataFrame:
         """读取信号缓存并规范化列/类型；缺失时抛 FileNotFoundError（启动期致命）。"""

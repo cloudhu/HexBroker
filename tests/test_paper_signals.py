@@ -28,6 +28,11 @@ def _write_cache(path, rows) -> None:
 
 
 def _engine(tmp_path, primary_rows, backup_rows, threshold: int = 5) -> SignalEngine:
+    """构造双源引擎。
+
+    注：本文件验证「多源级联」语义，故显式传入宽松阈值 5（与生产默认解耦）；
+    P0-3 后生产默认阈值为 0（隔夜过期），阈值语义的用例见 ``test_signal_freshness.py``。
+    """
     primary = tmp_path / "primary.parquet"
     backup = tmp_path / "backup.parquet"
     _write_cache(primary, primary_rows)

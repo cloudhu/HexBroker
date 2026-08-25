@@ -130,7 +130,8 @@ def build_components_safe(paper_cfg: Any, offline: bool = False) -> dict[str, tu
         ),
         "signals": lambda: SignalEngine(
             cache_paths=paper_cfg.get("signal_caches") or [paper_cfg.get("signal_cache")],
-            freshness_threshold_days=int(paper_cfg.get("freshness_threshold_days", 5)),
+            # P0-3：缺省 0 = 隔夜过期（仅当天信号有效），与 configs/paper.yaml 一致
+            freshness_threshold_days=int(paper_cfg.get("freshness_threshold_days", 0)),
             **dict(paper_cfg.get("technical", {}) or {}),
         ),
         "risk_gate": lambda: RiskGate(

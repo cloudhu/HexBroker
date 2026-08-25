@@ -25,7 +25,7 @@ import os
 import sys
 import time
 import urllib.request
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Optional
 
@@ -128,7 +128,33 @@ def _probe_http(url: str, headers: dict[str, str], timeout: float) -> tuple[bool
         return False, f"{type(exc).__name__}: {exc} (耗时 {ms:.0f}ms)"
 
 
-def check_data_sources(paper_cfg: Any, offline: bool = False, timeout: float = 8.0) -> list[CheckItem]:
+def signal_freshness_days(latest_ts: Any, asof: Any = None) -> Optional[int]:
+    """信号缓存最新时间戳距 ``asof``（默认今日）的工作日差（P0-3 新鲜度自检）。
+
+    与 ``hexbroker.paper.signals._business_days`` 同口径（``np.busday_count``），
+    直接复用该实现以避免两处逻辑漂移；依赖不可用/时间戳无法解析时返回 ``None``（跳过检查）。
+    """
+    if latest_ts is None:
+        return None
+    try:
+        from ..paper.signals import _business_days, _to_date
+
+        sig_day = _to_date(latest_ts)
+        ref_day = _to_date(asof) if asof is not None else date.today()
+        if sig_day is None or ref_day is None:
+            return None
+        return int(_business_days(sig_day, ref_day))
+    except Exception:
+        return None
+
+
+def check_data_sources(
+    paper_cfg: Any,
+    offline: bool = False,
+    timeout: float = 8.0,
+    asof: Any = None,
+) -> list[CheckItem]:
+    """数据源连通性 + 信号缓存存在性/新鲜度检查（``asof`` 仅供测试注入基准日）。"""
     items: list[CheckItem] = []
 
     # 1a. 实时行情源（hq.sinajs.cn）
@@ -164,8 +190,9 @@ def check_data_sources(paper_cfg: Any, offline: bool = False, timeout: float = 8
             CheckItem("OK" if ok else "FAIL", "K线兜底源 (stock2.finance.sina.com.cn)", detail)
         )
 
-    # 1c. 信号缓存（本地 parquet，多源级联）
+    # 1c. 信号缓存（本地 parquet，多源级联）+ P0-3 新鲜度防护（陈旧 → WARN，不阻断）
     caches = paper_cfg.get("signal_caches") or [paper_cfg.get("signal_cache")]
+    threshold = int(paper_cfg.get("freshness_threshold_days", 0) or 0)
     if not caches:
         items.append(CheckItem("WARN", "信号缓存", "未配置 signal_caches / signal_cache"))
     for cache in caches:
@@ -181,17 +208,31 @@ def check_data_sources(paper_cfg: Any, offline: bool = False, timeout: float = 8
             df = pd.read_parquet(path)
             n = len(df)
             latest = None
+            latest_ts = None
             if "ts" in df.columns and len(df):
-                latest = pd.to_datetime(df["ts"]).max()
-                latest = latest.strftime("%Y-%m-%d %H:%M")
+                latest_ts = pd.to_datetime(df["ts"]).max()
+                latest = latest_ts.strftime("%Y-%m-%d %H:%M")
             syms = sorted(set(df["symbol"].tolist())) if "symbol" in df.columns else []
-            items.append(
-                CheckItem(
-                    "OK",
-                    f"信号缓存: {path.name}",
-                    f"存在, {n} 行, 品种 {syms}, 最新 {latest}",
+            fd = signal_freshness_days(latest_ts, asof)
+            if fd is not None and fd > threshold:
+                # 陈旧缓存：阈值 0 时隔夜即过期 → 主源信号不驱动开仓（技术兜底接手）
+                items.append(
+                    CheckItem(
+                        "WARN",
+                        f"信号缓存: {path.name}",
+                        f"信号陈旧 fd={fd}>阈值{threshold}，最新{latest}，"
+                        f"建议开盘前刷新 (p22_tail_ext.py --skip-eval)",
+                    )
                 )
-            )
+            else:
+                fd_text = f", 新鲜度 fd={fd}<=阈值{threshold}" if fd is not None else ""
+                items.append(
+                    CheckItem(
+                        "OK",
+                        f"信号缓存: {path.name}",
+                        f"存在, {n} 行, 品种 {syms}, 最新 {latest}{fd_text}",
+                    )
+                )
         except Exception as exc:
             items.append(CheckItem("FAIL", f"信号缓存: {path.name}", f"读取失败：{exc}"))
 
@@ -260,7 +301,7 @@ def check_lifecycle(paper_cfg: Any) -> list[CheckItem]:
     open_delay = paper_cfg.get("open_delay_min", 5)
     close_buf = paper_cfg.get("close_buffer_min", 10)
     eval_days = paper_cfg.get("evaluation_days", 20)
-    fresh = paper_cfg.get("freshness_threshold_days", 5)
+    fresh = paper_cfg.get("freshness_threshold_days", 0)
     bar_freq = paper_cfg.get("bar_freq", "1d")
     bar_days = paper_cfg.get("bar_days", 120)
 
@@ -270,7 +311,14 @@ def check_lifecycle(paper_cfg: Any) -> list[CheckItem]:
     items.append(CheckItem("INFO", "开盘延迟", f"{open_delay}min（跳过集合竞价，Q6）"))
     items.append(CheckItem("INFO", "收盘复盘缓冲", f"{close_buf}min（日盘收盘 + 缓冲后触发复盘，P1-3）"))
     items.append(CheckItem("INFO", "评估周期", f"满 {eval_days} 个交易日自动输出评估摘要（Q5）"))
-    items.append(CheckItem("INFO", "信号新鲜度阈值", f"{fresh} 交易日（过期→技术兜底/禁开+告警，§8.2）"))
+    fresh_extra = "，0=隔夜过期（仅当天信号有效，P0-3）" if int(fresh or 0) == 0 else ""
+    items.append(
+        CheckItem(
+            "INFO",
+            "信号新鲜度阈值",
+            f"{fresh} 交易日（过期→技术兜底/禁开+告警，§8.2）{fresh_extra}",
+        )
+    )
     items.append(CheckItem("INFO", "技术兜底 K线", f"{bar_freq} / 近 {bar_days} 天（信号缺口时双均线+ATR 通道）"))
 
     # 品种与模式

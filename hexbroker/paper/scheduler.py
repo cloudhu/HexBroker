@@ -116,6 +116,9 @@ class TradingScheduler:
         # 每品种上一轮「实际开仓」的信号指纹 (p_up, exp_ret, source)；与 day 无关
         self._last_sig_fp: dict[str, tuple[float, float, str]] = {}
 
+        # ---- P0-3 主源信号陈旧运行时告警（每品种每交易日仅一次，避免 60s 刷屏） ----
+        self._stale_warn: dict[tuple[str, Optional[date]], bool] = {}
+
     # ------------------------------------------------------------------
     # 主循环
     # ------------------------------------------------------------------
@@ -207,6 +210,8 @@ class TradingScheduler:
 
         # ---- 信号 ----
         sig = self._signals.latest_signal(symbol, now)
+        # P0-3：主源信号陈旧（fd > 阈值）→ 告警一次（每品种每交易日），随后走技术兜底/禁开
+        self._warn_stale_signal_once(symbol, sig, day)
         bars = self._cached_bars(symbol, day)
         if sig is None or not sig.is_effective:
             sig = self._signals.technical_fallback(symbol, bars)
@@ -396,6 +401,43 @@ class TradingScheduler:
             return returns, volumes, ma_price
         except Exception:
             return None, None, None
+
+    # ------------------------------------------------------------------
+    # P0-3 信号陈旧运行时告警（每品种每交易日一次）
+    # ------------------------------------------------------------------
+    def _warn_stale_signal_once(
+        self, symbol: str, sig: Optional[SignalFrame], day: Optional[date]
+    ) -> bool:
+        """主源信号陈旧告警（去重：同品种同交易日仅告警一次，避免 60s tick 刷屏）。
+
+        Args:
+            symbol: 品种代码。
+            sig: 主源信号帧（``latest_signal`` 结果，可为 None）。
+            day: 当前交易日标签（``session.day_label``）。
+
+        Returns:
+            本次是否实际输出了告警（已去重则为 False）。
+        """
+        if sig is None:
+            return False
+        threshold = getattr(self._signals, "freshness_threshold", None)
+        if threshold is None:
+            return False  # 信号引擎未暴露阈值（如 mock/旧实现）→ 静默跳过
+        try:
+            fd = int(sig.freshness_days)
+            limit = int(threshold)
+        except (TypeError, ValueError):
+            return False
+        if fd <= limit:
+            return False
+        key = (symbol, day)
+        if self._stale_warn.get(key):
+            return False
+        self._stale_warn[key] = True
+        log.warning(
+            "[告警] 信号陈旧 fd={} 品种={}，主源过期，已降级/禁开（技术兜底接手）", fd, symbol
+        )
+        return True
 
     # ------------------------------------------------------------------
     # P0-2 信号指纹（无变化冷却）
