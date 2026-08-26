@@ -232,3 +232,64 @@ def test_save_snapshot_atomic_no_tmp_left(tmp_path):
     b.save_snapshot(path)
     assert path.exists()
     assert list(tmp_path.glob("*.tmp")) == []
+
+
+# ---------------------------------------------------------------------------
+# P0-1：平仓事件止损/止盈必须读「持仓实际档位」，禁止复用 plan 派生值
+# ---------------------------------------------------------------------------
+def test_close_stop_uses_position_actual_stop_not_plan():
+    """P0-1 回归：ag0 平仓事件 stop 必须读 ag0 开仓时设定的实际止损。
+
+    即便平仓 plan 故意携带 rb0 的止损（模拟历史跨品种污染场景 86 次错乱），
+    close_ev.stop 也必须等于 ag0 持仓实际止损 17307.07，而非 plan 的 2917.89。
+    """
+    b = _broker(budget_ratio=0.45)
+    open_ag = b.execute_plan(
+        _plan("ag0", -1, stop=17307.07), _quote("ag0", 17500.0), ts=datetime(2026, 8, 24, 10, 0)
+    )
+    open_rb = b.execute_plan(
+        _plan("rb0", 1, stop=2917.89), _quote("rb0", 3000.0), ts=datetime(2026, 8, 24, 10, 0)
+    )
+    assert open_ag is not None and open_rb is not None
+    assert open_ag.stop == pytest.approx(17307.07)
+    assert open_rb.stop == pytest.approx(2917.89)
+
+    close_ag = b.execute_plan(
+        _plan("ag0", 0, stop=2917.89), _quote("ag0", 17400.0), ts=datetime(2026, 8, 24, 14, 0)
+    )
+    assert close_ag is not None
+    assert close_ag.stop == pytest.approx(17307.07)
+    assert close_ag.stop != pytest.approx(2917.89)
+    assert close_ag.take_profit == pytest.approx(3100.0)
+
+
+def test_close_stop_with_none_plan_falls_back_to_position():
+    """P0-1：平仓 plan 未带 stop（None）时，仍读持仓实际止损而非 None。"""
+    b = _broker(budget_ratio=0.45)
+    b.execute_plan(
+        _plan("ag0", -1, stop=17307.07), _quote("ag0", 17500.0), ts=datetime(2026, 8, 24, 10, 0)
+    )
+    close_ag = b.execute_plan(
+        _plan("ag0", 0, stop=None), _quote("ag0", 17400.0), ts=datetime(2026, 8, 24, 14, 0)
+    )
+    assert close_ag is not None
+    assert close_ag.stop == pytest.approx(17307.07)
+
+
+def test_stops_persisted_across_snapshot(tmp_path):
+    """P0-1 + P0-3：持仓实际止损随快照落盘/恢复，重启不丢档位（避免重复开仓误判）。"""
+    b = _broker(budget_ratio=0.45)
+    b.execute_plan(
+        _plan("ag0", -1, stop=17307.07), _quote("ag0", 17500.0), ts=datetime(2026, 8, 24, 10, 0)
+    )
+    path = tmp_path / "account.json"
+    b.save_snapshot(path)
+
+    b2 = _broker(budget_ratio=0.45)
+    assert b2.load_snapshot(path) is True
+    assert b2._stops.get("ag0") == pytest.approx(17307.07)
+    close_ag = b2.execute_plan(
+        _plan("ag0", 0, stop=99999.0), _quote("ag0", 17400.0), ts=datetime(2026, 8, 25, 10, 0)
+    )
+    assert close_ag is not None
+    assert close_ag.stop == pytest.approx(17307.07)

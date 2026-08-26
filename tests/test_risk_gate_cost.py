@@ -194,3 +194,23 @@ def test_cost_gate_allows_when_expected_pnl_covers_cost_with_slippage() -> None:
     d = gate.evaluate(_sig(exp_ret=0.2), _quote(), _acct(), _pos())
     assert abs(d.target_position) > 1e-9
     assert d.reason != "cost_gate_reject"
+
+
+# ---------------------------------------------------------------------------
+# ⑧ 技术兜底信号（is_effective=False）→ 不驱动新开仓（P1-1/P1-2 硬禁开）
+# ---------------------------------------------------------------------------
+def test_noneffective_signal_does_not_open() -> None:
+    """技术兜底返回 ``is_effective=False``（降级方向提示，无模型 edge）→
+    ``RiskGate._intent`` 返回 0 → 不触发成本门禁、``target_position=0``、不开仓。
+
+    回归锁：审计发现旧版技术兜底把「上一日涨跌幅」当 exp_ret，
+    在「昨日涨+弱多」时会绕过成本门禁误开仓（P1-1/P1-2）。
+    """
+    gate = _gate(cost=_cost())
+    sig = SignalFrame(
+        symbol="rb0", ts=_TS, p_up=0.65, exp_ret=0.0,
+        is_effective=False, source="technical", freshness_days=0,
+    )
+    d = gate.evaluate(sig, _quote(), _acct(), _pos())
+    assert d.target_position == 0.0
+    assert d.reason != "cost_gate_reject"  # 由 _intent=0 阻断，而非成本门禁

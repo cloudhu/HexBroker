@@ -107,17 +107,18 @@ WF_SPLITTER = dict(train_len=250, test_len=60, purge=5, embargo=2, mode="rolling
 
 
 def _setup_cfg(group_syms: list[str], global_codes: list[str]):
-    """复刻 build_group_signals 的 cfg（数据端 2026-08-21），并应用 champion HP。
+    """复刻 build_group_signals 的 cfg 并应用 champion HP。
 
     cfg.data.end 在特征流水线中不参与切片（FeaturePipeline 处理全部 bars），
-    显式写 2026-08-21 仅作语义标注；HP 应用方式与 walk_forward_lightgbm 相同。
+    故设为动态“今日”——本地延长 K 线不含未来交易日，该值仅作语义标注，
+    不会钉死尾折窗口；HP 应用方式与 walk_forward_lightgbm 相同。
     """
     cfg = load_config("configs/base.yaml")
     std_syms = [LOCAL_MAP[s] for s in group_syms]
     cfg.data.symbols = std_syms
     cfg.data.freq = FREQ
     cfg.data.start = DATA_START
-    cfg.data.end = "2026-08-21"
+    cfg.data.end = str(pd.Timestamp.today().date())  # 动态：避免硬编码钉死尾折窗口（本地 K 线不含未来日，该值仅语义标注）
     cfg.forecast.horizon = 5
     cfg.forecast.n_mc_samples = 30
     cfg.forecast.calibration_method = "platt"
@@ -308,19 +309,24 @@ def merge_tail_ext() -> Path:
     tail_all = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(
         columns=["symbol", "ts", "p_up", "exp_ret", "is_effective"]
     )
-    # 追加尾信号不得与该品种 v8 行重叠（逐品种校验：ts > 该品种 v8 末信号日）
+    # 逐品种裁剪：尾折模型对 v8 已有区间的预测与 v8 逐字节一致（P22 同窗口校验），
+    # 故仅保留“该品种 v8 末信号日之后”的新交易日，<= v8_max 的尾记录直接裁剪
+    # （v8 为权威值，避免重复计数，也不破坏“绝不覆盖 v8”约束）。
     v8_max_per_sym = v8.groupby("symbol")["ts"].max().rename("v8_max")
     if len(tail_all):
         chk = tail_all.merge(v8_max_per_sym, left_on="symbol", right_index=True, how="left")
-        overlap = int((chk["ts"] <= chk["v8_max"].fillna(pd.Timestamp.min)).sum())
-        if overlap:
-            bad = chk[chk["ts"] <= chk["v8_max"].fillna(pd.Timestamp.min)]
-            raise SystemExit(
-                f"[FAIL] 追加尾信号与该品种 v8 行重叠 {overlap} 行"
-                f"（首例: {bad.iloc[0]['symbol']} {pd.Timestamp(bad.iloc[0]['ts']).date()} "
-                f"<= v8_max {pd.Timestamp(bad.iloc[0]['v8_max']).date()}）"
-            )
-        tail_all = tail_all.sort_values(["symbol", "ts"])
+        overlap_mask = chk["ts"] <= chk["v8_max"].fillna(pd.Timestamp.min)
+        n_overlap = int(overlap_mask.sum())
+        if n_overlap:
+            clipped = chk[overlap_mask]
+            print(f"[CLIP] 裁剪与 v8 重叠的尾记录 {n_overlap} 行（保留 v8 权威值；"
+                  f"首例: {clipped.iloc[0]['symbol']} "
+                  f"{pd.Timestamp(clipped.iloc[0]['ts']).date()} "
+                  f"<= v8_max {pd.Timestamp(clipped.iloc[0]['v8_max']).date()}）")
+        tail_all = (
+            chk.loc[~overlap_mask, ["symbol", "ts", "p_up", "exp_ret", "is_effective"]]
+            .sort_values(["symbol", "ts"]).reset_index(drop=True)
+        )
 
     out = pd.concat([v8, tail_all], ignore_index=True)
     out["ts"] = pd.to_datetime(out["ts"])
@@ -527,11 +533,20 @@ def main() -> None:
     ap.add_argument("--only", type=str, default="", help="只跑指定组（逗号分隔）")
     ap.add_argument("--skip-train", action="store_true", help="跳过重建，仅合并 checkpoint + 评估")
     ap.add_argument("--skip-eval", action="store_true", help="仅重建缓存，跳过评估")
+    ap.add_argument("--force", action="store_true",
+                   help="重建前清空已有 checkpoint（夜间刷新用，确保尾折随最新数据延伸）")
     args = ap.parse_args()
+
+    if args.force:
+        if CKPT_DIR.exists():
+            import shutil
+            for _ck in CKPT_DIR.glob("*.parquet"):
+                _ck.unlink()
+            print(f"[FORCE] 已清空 checkpoint：{CKPT_DIR}")
 
     print("=" * 72)
     print("P22-1 尾折扩展研究实验（研究性变体，非 v8 生产口径）")
-    print("  方案：末折训练窗不变（与 v8 逐字节一致）+ 仅延长评估窗至 2026-08-21")
+    print("  方案：末折训练窗不变（与 v8 逐字节一致）+ 仅延长评估窗至最新交易日（动态）")
     print("  输出：signals_cache18_grouped_v8_tail_ext.parquet（绝不覆盖 v8）")
     print("=" * 72)
 

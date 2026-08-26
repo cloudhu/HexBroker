@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
@@ -71,6 +72,8 @@ class RiskGate:
         self._cost_gate_min_ratio = float(cost_gate_min_ratio)
         # R3：往返成本口径是否纳入滑点（min_tick×slippage_ticks×multiplier×2 边）
         self._slippage_in_cost = bool(slippage_in_cost)
+        # P2：成本门禁拦截警告去重指纹持久化跨 tick（仅条件变化/交易日边界重置），避免 60s tick 重复刷屏。
+        self._last_cost_reject_fp: dict[str, tuple] = {}
 
     def set_cost(
         self,
@@ -117,16 +120,28 @@ class RiskGate:
             if not ok:
                 cost_rejected = True
                 intent = 0.0
-                log.warning(
-                    "成本门禁拦截开仓 symbol={} price={:.2f} p_up={:.4f} exp_ret={:.4f} "
-                    "expected_pnl={:.2f} round_trip_cost={:.2f} notional={:.2f} min_ratio={:.1f}",
-                    signal.symbol,
-                    quote.price if quote is not None else 0.0,
-                    float(signal.p_up),
-                    float(signal.exp_ret),
-                    exp_pnl, rt_cost, notional,
-                    self._cost_gate_min_ratio,
+                # P2：同品种同拒绝条件（p_up/exp_ret/min_ratio）去重，避免 60s tick 重复打印
+                # 完全一致的成本门禁警告（如 08-25 上午 ag0 同信号刷屏 128 次）。
+                symbol = signal.symbol
+                day_iso = datetime.now().date().isoformat()
+                fp = (
+                    round(float(signal.p_up), 4),
+                    round(float(signal.exp_ret), 4),
+                    round(self._cost_gate_min_ratio, 2),
+                    day_iso,
                 )
+                if self._last_cost_reject_fp.get(symbol) != fp:
+                    self._last_cost_reject_fp[symbol] = fp
+                    log.warning(
+                        "成本门禁拦截开仓 symbol={} price={:.2f} p_up={:.4f} exp_ret={:.4f} "
+                        "expected_pnl={:.2f} round_trip_cost={:.2f} notional={:.2f} min_ratio={:.1f}",
+                        symbol,
+                        quote.price if quote is not None else 0.0,
+                        float(signal.p_up),
+                        float(signal.exp_ret),
+                        exp_pnl, rt_cost, notional,
+                        self._cost_gate_min_ratio,
+                    )
         state = self.build_state(quote, acct, pos_ctx)
         # 新开仓前重置 ATR ratchet / 止损记忆（仅本品种），避免沿用上一笔持仓的旧止损
         if abs(pos_ctx.position) < 1e-12 and abs(intent) > 1e-12:

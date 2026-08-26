@@ -119,6 +119,20 @@ class TradingScheduler:
         # ---- P0-3 主源信号陈旧运行时告警（每品种每交易日仅一次，避免 60s 刷屏） ----
         self._stale_warn: dict[tuple[str, Optional[date]], bool] = {}
 
+        # ---- P0-2 行情缺失熔断（HALT） ----
+        # 行情拉取连续失败（网络异常 getaddressinfo / 全部品种 price<=0 或无报价）达到阈值
+        # → 进入 HALT 态：停止开仓 + 告警 + 禁止用缓存价撮合；任意一次成功取数（≥1 有效品种）即复位解除。
+        self._halt = False
+        self._halt_reason = ""
+        self._consecutive_quote_fail = 0
+        self._quote_fail_halt_threshold = int(cfg.get("quote_fail_halt_threshold", 5))
+        # P2-3 报价时效阈值（秒）：单报价年龄 = now - quote.ts 超此值视为过期，拒绝撮合（与 P0-2 HALT 互补）。
+        self._quote_max_age_sec = float(cfg.get("quote_max_age_sec", 3.0 * self._poll_interval))
+        self._halt_entered_at: Optional[datetime] = None
+        self._halt_last_warn_ts: Optional[datetime] = None
+        # P2-2 最小持仓时长（分钟）：持仓不足 N 分钟且为今平（当日新开）时拦截平今，从节奏降今平频率；0=关闭。
+        self._min_hold_minutes = int(cfg.get("min_hold_minutes", 0))
+
     # ------------------------------------------------------------------
     # 主循环
     # ------------------------------------------------------------------
@@ -175,7 +189,10 @@ class TradingScheduler:
             if day not in self._active_days:
                 self._active_days.add(day)
                 self._day_start[day] = now
-            quotes = self._quotes.fetch_quotes(self._symbols)
+            # ---- P0-2 行情熔断：拉取失败计数 + HALT 判定 ----
+            quotes = self._fetch_quotes_with_halt(now)
+            if self._halt:
+                self._halt_warn(now)
             marks = self._build_marks(quotes)
             for symbol in self._symbols:
                 try:
@@ -192,6 +209,14 @@ class TradingScheduler:
     def _process_symbol(self, symbol: str, now: datetime, quote: Optional[Quote], marks: dict[str, float]) -> None:
         if quote is None or not quote.valid():
             log.warning("品种 {} 无有效行情，跳过", symbol)
+            return
+        # P2-3 报价时效校验：单报价年龄 = now - quote.ts 超阈值视为过期，拒绝撮合（与 P0-2 HALT 互补）。
+        age = (now - quote.ts).total_seconds()
+        if age > self._quote_max_age_sec:
+            log.warning(
+                "品种 {} 行情过期（age={:.0f}s > max={:.0f}s），跳过撮合",
+                symbol, age, self._quote_max_age_sec,
+            )
             return
         if not self._session.is_tradable(symbol, now):
             return
@@ -214,6 +239,9 @@ class TradingScheduler:
         self._warn_stale_signal_once(symbol, sig, day)
         bars = self._cached_bars(symbol, day)
         if sig is None or not sig.is_effective:
+            # 主源过期/缺失 → 技术兜底仅作降级方向提示（is_effective=False，不构成 edge）。
+            # 配合 P0-3「无持仓禁开」硬约束：RiskGate._intent 对 is_effective=False 返回 0，
+            # 不会触发成本门禁、不会新开仓（审计 P1-1/P1-2 闭合）；有持仓则仅风控管理。
             sig = self._signals.technical_fallback(symbol, bars)
         if sig is None:
             if abs(self._broker.position(symbol)) > 1e-12:
@@ -248,6 +276,41 @@ class TradingScheduler:
                 )
                 decision.target_position = 0.0
                 decision.reason = "signal_cooldown"
+
+        # ---- P0-2 熔断态：停止开仓（防御性） ----
+        # HALT 期间禁止新开仓；已有持仓的风控平仓（止损/止盈/S1-S5）仍按有效报价执行，
+        # 但若行情缺失则本品种 quote 无效 → _process_symbol 早返回，天然禁止用缓存价撮合。
+        if self._halt and abs(pos_ctx.position) < 1e-12 and abs(decision.target_position) > 1e-9:
+            log.info(
+                "HALT 态：拦截新开仓 symbol={}（原因：{}）", symbol, self._halt_reason
+            )
+            decision.target_position = 0.0
+            decision.reason = "halt_no_open"
+
+        # ---- P2-2 最小持仓时长（今平节奏门，不拦风控强平） ----
+        cur = pos_ctx.position
+        new_pos = decision.target_position
+        if (
+            self._min_hold_minutes > 0
+            and abs(cur) > 1e-12
+            and not getattr(decision, "liquidate", False)
+            and abs(new_pos) < abs(cur)                     # 减仓/平仓/反手（缩小持仓=今平动作）
+            and pos_ctx.open_ts is not None
+            and pos_ctx.open_ts.date() == now.date()         # 今开
+            and (now - pos_ctx.open_ts).total_seconds() / 60.0 < self._min_hold_minutes
+        ):
+            log.info(
+                "品种 {} 持仓不足 {} 分钟（今平），min_hold 拦截平今",
+                symbol, self._min_hold_minutes,
+            )
+            # P2-2 修正：PositionCtx.position 为「手数」，decision.target_position 为「仓位比例
+            # [-1,1]」（PlanManager._size_qty 按 比例=手数×价×乘数/权益 换算）。若直接令
+            # target_position=cur（手数）会被当作 100% 满仓比例→计划放大到多手，违背「维持持仓」
+            # 本意。故换算回维持当前持仓手数对应的比例（即 _size_qty 的逆），保持仓位不变。
+            multiplier = float(self._broker.cost._multiplier(symbol))
+            maintain_ratio = (abs(cur) * quote.price * multiplier / acct.equity) if acct.equity > 0 else 0.0
+            decision.target_position = maintain_ratio if cur >= 0 else -maintain_ratio
+            decision.reason = "min_hold"
 
         # ---- 计划 ----
         plan = self._planner.update_from_signal(sig, decision, quote=quote, equity=acct.equity)
@@ -438,6 +501,89 @@ class TradingScheduler:
             "[告警] 信号陈旧 fd={} 品种={}，主源过期，已降级/禁开（技术兜底接手）", fd, symbol
         )
         return True
+
+    # ------------------------------------------------------------------
+    # P0-2 行情缺失熔断（HALT）
+    # ------------------------------------------------------------------
+    def _fetch_quotes_with_halt(self, now: datetime) -> dict[str, "Quote"]:
+        """拉取行情并在连续失败时进入 HALT 态。
+
+        行为（P0-2 / P1-3 修复：26 次 getaddrinfo 失败后系统用陈旧价继续交易）：
+        - 拉取抛异常（网络层失败）→ 连续失败 +1；达阈值且未熔断 → 进入 HALT。
+        - 拉取成功但**全部品种行情无效**（price<=0 或无报价）→ 同样计为行情缺失 +1；
+          达阈值且未熔断 → 进入 HALT（覆盖数据源返回全 0 的失真场景）。
+        - 至少一个有效品种 → 连续失败清零；若此前在 HALT → 解除（行情恢复）。
+        - 返回 quotes 字典；异常/全无效时仍返回原始结果（``_process_symbol`` 按 ``valid()`` 跳过）。
+        """
+        try:
+            quotes = self._quotes.fetch_quotes(self._symbols)
+        except Exception:
+            self._consecutive_quote_fail += 1
+            log.exception(
+                "行情拉取异常（连续第 {} 次 / 阈值 {}）",
+                self._consecutive_quote_fail, self._quote_fail_halt_threshold,
+            )
+            if self._consecutive_quote_fail >= self._quote_fail_halt_threshold and not self._halt:
+                self._enter_halt(
+                    "行情连续拉取失败 {} 次（阈值 {}）".format(
+                        self._consecutive_quote_fail, self._quote_fail_halt_threshold
+                    )
+                )
+            return {}
+        # 拉取成功：统计有效品种
+        valid_count = sum(1 for q in quotes.values() if q is not None and q.valid())
+        if valid_count == 0 and len(self._symbols) > 0:
+            self._consecutive_quote_fail += 1
+            log.warning(
+                "行情拉取成功但全部品种无效（price<=0 或无报价），计为行情缺失（连续第 {} 次 / 阈值 {}）",
+                self._consecutive_quote_fail, self._quote_fail_halt_threshold,
+            )
+            if self._consecutive_quote_fail >= self._quote_fail_halt_threshold and not self._halt:
+                self._enter_halt(
+                    "全部品种行情无效（连续 {} 次）".format(self._consecutive_quote_fail)
+                )
+            return quotes  # 含无效行情，_process_symbol 会按 valid() 跳过（禁止缓存价撮合）
+        # 至少一个有效品种 → 复位 + 解除 HALT
+        self._consecutive_quote_fail = 0
+        if self._halt:
+            self._exit_halt("行情恢复（有效品种数 {}）".format(valid_count))
+        return quotes
+
+    def _enter_halt(self, reason: str) -> None:
+        """进入 HALT 态：停止开仓 + 告警 + 禁止用缓存价撮合。"""
+        self._halt = True
+        self._halt_reason = reason
+        self._halt_entered_at = datetime.now()
+        self._halt_last_warn_ts = self._halt_entered_at
+        log.warning(
+            "[熔断] 进入 HALT 态：停止开仓，禁止用缓存价撮合。原因：{}", reason
+        )
+
+    def _exit_halt(self, reason: str) -> None:
+        """解除 HALT 态（行情恢复）。"""
+        was = self._halt
+        self._halt = False
+        self._halt_reason = ""
+        self._halt_entered_at = None
+        if was:
+            log.info("[熔断] 解除 HALT 态：{}", reason)
+
+    def _halt_warn(self, now: datetime) -> None:
+        """熔断态周期提醒（避免每 tick 刷屏，约每 5 分钟一条）。"""
+        if self._halt_last_warn_ts is None:
+            self._halt_last_warn_ts = now
+            return
+        if (now - self._halt_last_warn_ts).total_seconds() >= 300:
+            self._halt_last_warn_ts = now
+            duration = int((now - (self._halt_entered_at or now)).total_seconds())
+            log.warning(
+                "[熔断] 仍处于 HALT 态：停止开仓，禁止用缓存价撮合。原因：{}（已持续 {} 秒）",
+                self._halt_reason, duration,
+            )
+
+    def halt_state(self) -> tuple[bool, str, int]:
+        """外部监测接口：返回 ``(是否熔断, 原因, 连续失败计数)``。"""
+        return (self._halt, self._halt_reason, self._consecutive_quote_fail)
 
     # ------------------------------------------------------------------
     # P0-2 信号指纹（无变化冷却）

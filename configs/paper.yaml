@@ -17,7 +17,7 @@ paper:
 
   # ---- 信号（多源级联，按优先序；主源缺失信号时自动回退下一源） ----
   signal_caches:
-    - artifacts/signals_cache18_grouped_v8_tail_ext.parquet   # 主源：P22 末折评估窗延长变体，覆盖至 2026-08-21（修复信号过期）
+    - artifacts/signals_cache18_grouped_v8_tail_ext.parquet   # 主源：P22 末折评估窗延长变体，覆盖至 2026-08-24（修复信号过期；隔夜过期阈值0下仅信号当日有效）
     - artifacts/signals_cache18_grouped_v8.parquet            # 兜底：v8 生产基线（止 2026-06-29，fold 边界限制）
   freshness_threshold_days: 0      # 信号新鲜度阈值（交易日；过期→技术兜底/禁开+告警，§8.2）
                                    # P0-3：0=隔夜过期，仅当天（同一交易日）信号有效；
@@ -63,6 +63,10 @@ paper:
     cost_gate_min_ratio: 2.0
     slippage_in_cost: true           # R3：往返成本口径纳入滑点（默认 true）
 
+  # ---- P2-2 最小持仓时长（今平节奏控制，不改动费率模型 fee_rate_close_today） ----
+  # 持仓不足 N 分钟且为今平（当日新开）时拦截平今，从节奏降今平频率；0=关闭(默认)
+  min_hold_minutes: 0
+
   # ---- P0-2 信号无变化冷却（消除 60s 开-平-开-平循环） ----
   # 信号指纹 (p_up, exp_ret, source) 与上一轮实际开仓相同 → 即使风控返回开仓意图也跳过；
   # 已有持仓的风控动作（止损/止盈/S1-S5）不受影响；source 不同即视为信号变化。
@@ -85,6 +89,11 @@ paper:
   quote_timeout_sec: 10
   bar_freq: 1d                     # 技术兜底 K 线频率
   bar_days: 120                    # 技术兜底 K 线天数
+  # P0-2 行情缺失熔断阈值：行情拉取连续失败（网络异常 getaddrinfo / 全部品种 price<=0 或无报价）
+  # 达到该次数 → 进入 HALT 态（停止开仓 + 告警 + 禁止用缓存价撮合）；任意一次成功取数（≥1 有效品种）即复位解除。
+  quote_fail_halt_threshold: 5
+  # P2-3 报价时效（秒）：单报价年龄=now-ts 超此值视为过期拒绝撮合（与 P0-2 HALT 互补）
+  quote_max_age_sec: 180        # 默认 3×poll_interval
 
   # ---- 品种（主力连续 + 换月；c0 参数显式声明，不在 CONTRACTS18 内） ----
   symbols:

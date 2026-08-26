@@ -106,6 +106,7 @@ class RealTimeQuoteClient:
             high=_f(fields, 7) or price,
             low=_f(fields, 10) or price,
             pre_settle=_f(fields, 8) or price,
+            timestamp=datetime.now(),
         )
 
     @staticmethod
@@ -134,6 +135,7 @@ class RealTimeQuoteClient:
                 high=price * 1.01,
                 low=price * 0.99,
                 pre_settle=price,
+                timestamp=datetime.now(),
             )
         return out
 

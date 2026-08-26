@@ -197,7 +197,14 @@ class SignalEngine:
     # 技术指标兜底（双均线 + ATR 通道）
     # ------------------------------------------------------------------
     def technical_fallback(self, symbol: str, bars: pd.DataFrame) -> Optional[SignalFrame]:
-        """基于日线计算双均线/ATR 通道信号；数据不足返回 None。"""
+        """技术指标兜底（双均线 + ATR 通道），仅作**降级方向提示**。
+
+        返回 ``is_effective=False`` 的帧：技术指标只能给出方向（p_up），
+        无法校准「预期日收益率」(exp_ret)，因此不构成模型验证过的 edge。
+        配合 P0-3 隔夜过期「无持仓禁开」硬约束，兜底信号不会驱动新开仓
+        （``RiskGate._intent`` 对 ``is_effective=False`` 返回 0），
+        仅保留 p_up 供人工参考 / 有持仓时风控管理。数据不足返回 None。
+        """
         if bars is None or bars.empty:
             return None
         close = pd.to_numeric(bars["close"], errors="coerce").dropna()
@@ -231,8 +238,12 @@ class SignalEngine:
             p_up = 0.45
         else:
             return None
-        prev = close.iloc[-2]
-        exp_ret = float((last / prev - 1.0) * 100.0) if prev > 0 else 0.0
+        # exp_ret 不提供真实期望收益估计：技术指标仅给出方向，无法校准「预期日收益率」。
+        # 若把「上一日已实现涨跌幅」当 exp_ret 喂给成本门禁，会在「昨日跌+弱多」时误拦、
+        # 「昨日涨+弱多」时误放，完全取决于历史噪音，与未来期望无关（审计 P1-1）。
+        # 故 exp_ret 置中性 0.0，并令 is_effective=False（降级 substitute，不构成 edge）：
+        # 配合 P0-3 隔夜过期「无持仓禁开」硬约束，不会驱动任何新开仓（审计 P1-2）。
+        exp_ret = 0.0
         ts = bars.index[-1]
         if not isinstance(ts, datetime):
             ts = pd.Timestamp(ts).to_pydatetime()
@@ -241,7 +252,7 @@ class SignalEngine:
             ts=ts,
             p_up=float(p_up),
             exp_ret=exp_ret,
-            is_effective=True,
+            is_effective=False,
             source="technical",
             freshness_days=0,
         )

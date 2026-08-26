@@ -82,6 +82,10 @@ class PaperBroker:
         self._trading_day_count = 0
         self._last_trading_day: Optional[date] = None
         self._trade_seq = 0
+        # 每品种实际止损/止盈（P0-1 修复：平仓事件须读持仓实际档位，而非 plan
+        # 派生值；SimBroker.positions 仅存数量无档位，故 PaperBroker 自维护）
+        self._stops: dict[str, float | None] = {}
+        self._take_profits: dict[str, float | None] = {}
 
     # ------------------------------------------------------------------
     # 执行（核心新增接口，§3.2）
@@ -121,6 +125,26 @@ class PaperBroker:
         if trade is None:
             return None
         self._trade_seq += 1
+
+        # P0-1 修复：平仓/减仓事件 stop/take_profit 必须读「持仓实际档位」，
+        # 禁止复用 plan.stop_price / plan.take_profit（原写法导致 ag0 平仓错显
+        # rb0 止损等跨品种污染）。SimBroker.positions 仅存数量，故 PaperBroker 自维护。
+        new_pos = current + trade.qty
+        if trade.is_open:
+            stop_value = plan.stop_price
+            tp_value = plan.take_profit
+            if abs(current) < 1e-12:
+                # 首次建仓：以 plan 档位作为持仓实际止损/止盈（加仓沿用，不覆盖）
+                self._stops[symbol] = plan.stop_price
+                self._take_profits[symbol] = plan.take_profit
+        else:
+            stop_value = self._stops.get(symbol, plan.stop_price)
+            tp_value = self._take_profits.get(symbol, plan.take_profit)
+            if abs(new_pos) > 1e-12 and ((new_pos > 0) != (current > 0)):
+                # 反手：本次平仓事件用原持仓止损；反转后新仓止损以 plan 写入
+                self._stops[symbol] = plan.stop_price
+                self._take_profits[symbol] = plan.take_profit
+
         event = TradeEvent(
             trade_id=f"T{self._trade_seq:06d}",
             ts=ts,
@@ -128,8 +152,8 @@ class PaperBroker:
             direction=1 if trade.qty > 0 else -1,
             qty=trade.qty,
             entry=self._broker.avg_entry.get(symbol, trade.fill_price),
-            stop=plan.stop_price,
-            take_profit=plan.take_profit,
+            stop=stop_value,
+            take_profit=tp_value,
             price=trade.fill_price,
             fee=trade.fee,
             is_open=trade.is_open,
@@ -235,6 +259,7 @@ class PaperBroker:
             bars_in_position=bars,
             highest_since_entry=hi,
             lowest_since_entry=lo,
+            open_ts=self._broker.open_dates.get(symbol),
         )
 
     def trades(self) -> list[Any]:
@@ -281,6 +306,8 @@ class PaperBroker:
             "trading_day_count": self._trading_day_count,
             "last_trading_day": self._last_trading_day.isoformat() if self._last_trading_day else None,
             "trade_seq": self._trade_seq,
+            "stops": self._stops,
+            "take_profits": self._take_profits,
         }
         tmp = path.with_suffix(".tmp")
         tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -315,6 +342,8 @@ class PaperBroker:
             self._trading_day_count = 0
             self._last_trading_day = None
             self._trade_seq = 0
+            self._stops = {}
+            self._take_profits = {}
             return False
         self._broker = SimBroker(self._cost, initial_capital=float(payload.get("initial_capital", 100_000.0)))
         self._broker.positions = {str(k): float(v) for k, v in payload.get("positions", {}).items()}
@@ -322,6 +351,10 @@ class PaperBroker:
         self._broker.realized = {str(k): float(v) for k, v in payload.get("realized", {}).items()}
         self._broker.open_dates = {
             str(k): datetime.fromisoformat(v) for k, v in payload.get("open_dates", {}).items() if v
+        }
+        self._stops = {str(k): (float(v) if v is not None else None) for k, v in payload.get("stops", {}).items()}
+        self._take_profits = {
+            str(k): (float(v) if v is not None else None) for k, v in payload.get("take_profits", {}).items()
         }
         self._peak_equity = float(payload.get("peak_equity", self._broker.initial_capital))
         self._trading_day_count = int(payload.get("trading_day_count", 0))

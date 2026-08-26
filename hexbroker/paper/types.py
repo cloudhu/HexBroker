@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import Any, Optional
 
 # ---------------------------------------------------------------------------
 # 符号规范（§7.1）：内部统一 ag0/rb0/c0（小写品种 + 0 主力连续）
@@ -55,6 +55,8 @@ class Quote:
     high: float = 0.0
     low: float = 0.0
     pre_settle: float = 0.0  # 昨结算
+    # P2-3：诊断保留字段（接收时刻，tz-naive 本地时间）；时效校验统一用 ``ts``（交易所行情时间）。
+    timestamp: datetime = field(default_factory=dt_now)
 
     def valid(self) -> bool:
         """行情可用性：价格为正。"""
@@ -185,3 +187,5 @@ class PositionCtx:
     bars_in_position: int = 0
     highest_since_entry: float = 0.0
     lowest_since_entry: float = 0.0
+    # P2-2：开仓时刻（取自 SimBroker.open_dates，tz-naive 本地时间）；今平门判定用。
+    open_ts: Optional[datetime] = None
