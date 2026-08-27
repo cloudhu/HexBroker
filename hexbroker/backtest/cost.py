@@ -8,7 +8,10 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
+
+from ..market.rule import MarketRuleTable
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +70,8 @@ class CostModel:
     multiplier: float = 10.0
     min_tick: float = 10.0
     contracts: dict[str, dict] | None = None
+    # P1-9：分品种中国市场规则表；None → 保证金回退字段 margin_rate（现状 0.12），行为不变。
+    market_rules: "MarketRuleTable | None" = None
 
     def _multiplier(self, symbol: str | None) -> float:
         if symbol and self.contracts and symbol in self.contracts:
@@ -95,15 +100,21 @@ class CostModel:
         if bc is None:
             return cls()
         contracts = getattr(bc, "contracts", None)
+        margin_rate = getattr(bc, "margin_rate", 0.12)
+        # P1-9：若配置显式给出市场规则 yaml 路径（cfg.market_rules），则加载分品种规则表；
+        # 否则不建表（market_rules=None → margin() 回退字段 margin_rate，行为不变，549 全绿）。
+        mr_path = getattr(cfg, "market_rules", None)
+        market_rules = MarketRuleTable.from_yaml(mr_path) if mr_path else None
         return cls(
             fee_open=getattr(bc, "fee_rate_open", 0.00005),
             fee_close=getattr(bc, "fee_rate_close", 0.00005),
             fee_close_today=getattr(bc, "fee_rate_close_today", 0.00010),
             slippage_ticks=getattr(bc, "slippage_ticks", 1.0),
-            margin_rate=getattr(bc, "margin_rate", 0.12),
+            margin_rate=margin_rate,
             multiplier=getattr(bc, "multiplier", 10.0),
             min_tick=getattr(bc, "min_tick", 10.0),
             contracts=dict(contracts) if contracts else None,
+            market_rules=market_rules,
         )
 
     # ---- 复权成交价（含滑点） ----
@@ -135,4 +146,6 @@ class CostModel:
 
     # ---- 保证金占用 ----
     def margin(self, fill_price: float, qty: float, symbol: str | None = None) -> float:
-        return float(fill_price * self._multiplier(symbol) * abs(qty) * self.margin_rate)
+        # P1-9：若配置了分品种规则表，用分品种保证金率；否则回退字段 margin_rate（现状 0.12）。
+        rate = self.market_rules.margin_rate(symbol) if self.market_rules else self.margin_rate
+        return float(fill_price * self._multiplier(symbol) * abs(qty) * rate)

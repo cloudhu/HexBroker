@@ -28,7 +28,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "ruff>=0.6", "black>=24.1", "mypy>=1.11"]
 # torch 上限 <3：env 实测 torch 2.11（RTX 5070 底座）跑 Kronos 微调正常，旧 <2.6 上限过时
 torch = ["torch>=2.1,<3"]
 # gymnasium 为 stable-baselines3 传递依赖（RL 环境为自研 futures_env，不直接引用）
@@ -50,9 +50,28 @@ filterwarnings = ["ignore::DeprecationWarning"]
 line-length = 100
 target-version = "py310"
 
+# P1-10 渐进式 lint：首轮仅启用「安全子集」，避免存量代码噪声导致 CI 失败；
+# 后续可逐步收紧 select / 收窄 ignore。
+[tool.ruff.lint]
+select = ["E9", "F", "I001"]
+ignore = ["F401", "F811", "F841"]
+
 [tool.black]
 line-length = 100
 target-version = ["py310"]
 
 [tool.mypy]
 ignore_missing_imports = true
+
+# P1-10 渐进 strict：
+# - 全部 hexbroker.* 先全局忽略错误（存量代码不阻断 CI）；
+# - 本批新增模块（factor / market）再开启 --strict 并显式 ignore_errors=false，
+#   使增量代码接受严格类型检查，存量代码豁免。后续批次（live/ml/risk）按需纳入 strict 列表。
+[[tool.mypy.overrides]]
+module = "hexbroker.*"
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = ["hexbroker.factor", "hexbroker.factor.*", "hexbroker.market", "hexbroker.market.*"]
+ignore_errors = false
+strict = true

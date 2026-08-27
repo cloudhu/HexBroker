@@ -1,0 +1,47 @@
+# 因子 DSL 配置（P1-6 / 可选）
+#
+# 注意：本文件【不被】pipeline 自动加载，须显式传参：
+#   FeaturePipeline(cfg, factor_registry=FactorRegistry.from_yaml("configs/factors.yaml"))
+# 未注入 → 仅用 25 个硬编码特征（现状），行为零变化。
+#
+# 以下因子均可用 DSL 精确复刻 technical.py 语义（与硬编码特征 <1e-9 对齐）。
+# 新增自定义因子（如 custom_mom_10）与硬编码特征并存，受 keep_features 白名单统一裁剪。
+
+factors:
+  - name: ret_1
+    expr: "Log(Div(Close, Ref(Close, 1)))"
+    category: momentum
+  - name: ret_acc_5
+    expr: "Sum(Log(Div(Close, Ref(Close, 1))), 5)"
+    category: momentum
+  - name: ret_acc_20
+    expr: "Sum(Log(Div(Close, Ref(Close, 1))), 20)"
+    category: momentum
+  - name: vol_5
+    expr: "Std(Log(Div(Close, Ref(Close, 1))), 5)"
+    category: volatility
+  - name: vol_20
+    expr: "Std(Log(Div(Close, Ref(Close, 1))), 20)"
+    category: volatility
+  - name: ma_spread
+    expr: "Div(Sub(MA(Close, 5), MA(Close, 20)), MA(Close, 20))"
+    category: momentum
+  - name: rsi
+    expr: "RSI(Close, 14)"
+    category: momentum
+  - name: macd
+    expr: "Sub(EMA(Close, 12), EMA(Close, 26))"
+    category: momentum
+  - name: macd_hist
+    expr: "Sub(MACD(Close), EMA(MACD(Close), 9))"
+    category: momentum
+  - name: vol_ratio
+    expr: "Div(Volume, MA(Volume, 20))"
+    category: liquidity
+  - name: boll_width
+    expr: "Div(Mul(Std(Close, 20), 2.0), MA(Close, 20))"
+    category: volatility
+  # 自定义新增因子（演示 DSL 扩展能力，不影响 25 个硬编码特征）
+  - name: custom_mom_10
+    expr: "Div(Close, Ref(Close, 10))"
+    category: custom

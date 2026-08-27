@@ -40,3 +40,33 @@ jobs:
         run: |
           python -m hexbroker.tools.lookahead_analysis hexbroker/feature hexbroker/backtest hexbroker/pipeline.py
           python -m hexbroker.tools.recursive_analysis hexbroker/feature hexbroker/backtest hexbroker/pipeline.py
+
+  lint:
+    name: lint (ruff / black / mypy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -e . --no-deps   # 验证打包配置
+          pip install ruff black mypy  # P1-10 静态检查工具（dev extra：pip install -e .[dev] 亦可）
+
+      # P1-10：渐进 strict——本批新增模块（factor / market）严格检查，
+      # 存量代码经 pyproject [[tool.mypy.overrides]] 豁免；后续批次按需纳入 scope。
+      - name: ruff
+        run: ruff check hexbroker/factor hexbroker/market
+
+      - name: black
+        run: black --check hexbroker/factor hexbroker/market
+
+      - name: mypy
+        run: mypy hexbroker/factor hexbroker/market
+

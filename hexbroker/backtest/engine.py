@@ -34,6 +34,9 @@ class BacktestEngine:
         # P0-1：撮合假设开关（execution=None → 从 cfg.backtest 读取；
         # 默认 next_bar_execution=False / volume_cap=None 时与原代码逐语句等价）
         self.execution = execution if execution is not None else ExecutionConfig.from_cfg(cfg)
+        # P1-9：分品种中国市场规则表（交割月禁开仓 / 分品种涨跌停幅度）。
+        # 默认 CostModel.market_rules=None → 不启用，回退现状口径。
+        self.market_rules = getattr(self.cost, "market_rules", None)
 
     def run(self, prices: pd.DataFrame, targets: pd.DataFrame) -> Portfolio:
         """运行回测。
@@ -87,6 +90,10 @@ class BacktestEngine:
         # P8 修复：涨跌停拦截开关（config.backtest.limit_trade_allowed）
         allow_limit = bool(getattr(getattr(self.cfg, "backtest", None), "limit_trade_allowed", True))
         has_limit_cols = "limit_up" in prices.columns or "limit_down" in prices.columns
+        # P1-9：分品种市场规则表（默认 None → 不启用，回退现状涨跌停/开仓口径）
+        market_table = self.market_rules
+        # 维护每个品种上一 bar 收盘价（仅在规则表配置了涨跌停幅度时使用）
+        prev_close: dict[str, float] = {}
 
         for ts in all_ts:
             marks: dict[str, float] = {}
@@ -98,10 +105,24 @@ class BacktestEngine:
                     row = sub_p.loc[ts]
                     marks[sym] = float(row["close"])
                     # P8 修复：判定本 bar 是否涨跌停（缺流动性，禁止以该价成交）
+                    limit_hit = False
                     if has_limit_cols:
                         lu = bool(row.get("limit_up", False))
                         ld = bool(row.get("limit_down", False))
-                        limit_flags[sym] = lu or ld
+                        limit_hit = lu or ld
+                    # P1-9：规则表覆盖的涨跌停幅度（无覆盖 → 不变）
+                    if market_table is not None:
+                        ru, rd = market_table.limit(sym)
+                        if ru is not None or rd is not None:
+                            prev = prev_close.get(sym)
+                            if prev is not None:
+                                close = float(row["close"])
+                                if ru is not None and close >= prev * (1.0 + ru):
+                                    limit_hit = True
+                                if rd is not None and close <= prev * (1.0 - rd):
+                                    limit_hit = True
+                    limit_flags[sym] = limit_hit
+                    prev_close[sym] = float(row["close"])
                 # 更新目标仓位（前向填充）
                 tgt_series = fwd_targets[sym]
                 if len(tgt_series) and ts >= tgt_series.index.min():
@@ -110,6 +131,10 @@ class BacktestEngine:
                     # P8 修复：涨跌停且未允许 → 跳过成交（不再以 close 乐观成交）
                     if limit_flags.get(sym, False) and not allow_limit:
                         _log.debug("bar %s @ %s 触发涨跌停，limit_trade_allowed=False 跳过成交", sym, ts)
+                        continue
+                    # P1-9：交割月禁开仓（规则表 allows_open；默认无规则 → 允许，行为不变）
+                    if market_table is not None and not market_table.allows_open(sym, ts):
+                        _log.debug("bar %s @ %s 交割月禁开仓，跳过成交", sym, ts)
                         continue
                     ref_price = marks[sym]
                     target_qty = cur_target[sym]

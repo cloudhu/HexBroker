@@ -1,0 +1,32 @@
+# 中国市场规则表（P1-9 / 分品种覆盖）
+#
+# 读取点：
+#   - CostModel.from_config(cfg) 在 cfg.market_rules 指向本文件时，构造 MarketRuleTable；
+#   - 未配置 cfg.market_rules（默认）→ 不建表 → 回退统一保证金率 0.12 / 无幅度覆盖 / 无交割限制。
+#
+# 字段说明（单品种 MarketRule）：
+#   margin_rate   : 保证金率（比例）；缺省 0.12
+#   limit_up      : 涨停幅度（比例）；null=不覆盖（沿用现状 price 列 limit_up/limit_down 布尔拦截）
+#   limit_down    : 跌停幅度（比例）；null=不覆盖
+#   delivery_rule : "none"（默认，始终允许开仓）| "no_open"（交割月禁开仓）
+#   delivery_months : no_open 模式下的交割月集合（如 [1,5,9]）；未声明则保守地始终禁止开仓
+#
+# 注意：本文件【不被】pipeline 自动加载，须显式传参（cfg.market_rules=路径）才生效。
+# 清空 rules: 即回到"统一 0.12 / 无限制"现状。以下为示例覆盖（演示用，可按实盘调整）。
+
+rules:
+  # 示例：黄金/铜保证金率低于默认 0.12（演示分品种差异；实际请以交易所公告为准）
+  au:
+    margin_rate: 0.10
+  cu:
+    margin_rate: 0.10
+  # 示例：ag/rb 保持默认 0.12 显式声明（也可不列，回退默认）
+  ag:
+    margin_rate: 0.12
+  rb:
+    margin_rate: 0.12
+  # 示例：IF（股指期货）演示交割月禁开仓（仅 3/6/9/12 月为交割月）
+  IF:
+    margin_rate: 0.12
+    delivery_rule: no_open
+    delivery_months: [3, 6, 9, 12]

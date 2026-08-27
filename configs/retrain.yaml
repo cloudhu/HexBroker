@@ -1,0 +1,10 @@
+# P1-7 滚动重训调度配置（可选；默认不被自动加载，须显式传参）
+# 字段语义见 hexbroker/ml/schedule.py 的 RetrainConfig
+retrain_freq: walk_forward   # walk_forward | calendar
+train_period: 0              # 0 = 用 data.train_len
+backtest_period: 0
+train_len: 250
+test_len: 60
+purge: 5
+embargo: 2
+mode: rolling

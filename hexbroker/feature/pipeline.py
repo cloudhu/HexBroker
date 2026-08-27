@@ -69,10 +69,13 @@ class FeaturePipeline:
         cfg: Any,
         global_close: dict[str, pd.Series] | None = None,
         fundamental_data: dict[str, pd.DataFrame | pd.Series] | None = None,
+        factor_registry: Any = None,
     ) -> None:
         self.cfg = cfg
         self.global_close = global_close or {}
         self.fundamental_data = fundamental_data or {}  # {品种短名: 基差 DataFrame/Series}
+        # P1-6：可选 DSL 因子注册表；None → 不注入 DSL 因子（默认行为零变化，549 全绿）。
+        self.factor_registry = factor_registry
         self.close_panel: pd.DataFrame | None = None  # datetime × sym_short 宽表
         fc = getattr(cfg, "feature", None)
         self.transformers = list(getattr(fc, "transformers", ["technical", "microstructure", "normalize"]))
@@ -110,6 +113,11 @@ class FeaturePipeline:
             df.index = df.index.get_level_values(1)
         else:
             df = raw.copy()
+        # P1-6：DSL 因子预计算（在 OHLCV 仍完整时求值；稍后并入特征帧）。默认无 registry → 跳过。
+        dsl_series: list[pd.Series] = []
+        if self.factor_registry is not None:
+            for name in self.factor_registry.names():
+                dsl_series.append(self.factor_registry.compute(df, name))
         sym_label = str(getattr(self, "_sym_label", df.index.name or "sym")).lower()
         if "technical" in self.transformers:
             df = add_technical(df, self.technical_params)
@@ -149,6 +157,10 @@ class FeaturePipeline:
                 df = pd.concat([df, normed], axis=1)
         # 最终只保留特征列（可选：特征级白名单裁剪）
         df = df[[c for c in df.columns if c.startswith("f_")]]
+        # P1-6：并入 DSL 因子列（f_<name>）
+        if dsl_series:
+            dsl_df = pd.concat(dsl_series, axis=1)
+            df = pd.concat([df, dsl_df], axis=1)
         if self.keep_features:
             df = df[[c for c in df.columns if c in self.keep_features]]
         return df

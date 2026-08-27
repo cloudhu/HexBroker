@@ -14,6 +14,7 @@ from datetime import date, datetime, time, timedelta
 from typing import Any, Optional
 
 from ..data.calendar import FuturesCalendar, Session
+from ..market.session import day_label as _shared_day_label
 
 
 def _to_date(ts: Any) -> Optional[date]:
@@ -133,16 +134,11 @@ class TradingSession:
         return False
 
     def day_label(self, ts: Any) -> Optional[date]:
-        """交易日标签：夜盘（>= night_boundary）归属下一交易日，跳过周末/节假日。"""
-        d = _to_date(ts)
-        if d is None:
-            return None
-        t = pd_time(ts)
-        if t >= self.night_boundary:
-            d = d + timedelta(days=1)
-        while not self.is_trading_day(d):
-            d = d + timedelta(days=1)
-        return d
+        """交易日标签：夜盘（>= night_boundary）归属下一交易日，跳过周末/节假日。
+
+        委托 ``hexbroker.market.session.day_label`` 共享实现（P1-9 消除重复）。
+        """
+        return _shared_day_label(ts, self.night_boundary, self.holidays)
 
     def day_close_threshold(self, buffer_min: int = 10) -> time:
         """全部品种日盘收盘时刻的最大值 + 缓冲（P1-3 收盘复盘触发阈值）。

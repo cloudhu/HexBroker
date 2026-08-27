@@ -13,11 +13,16 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+from .gateway import BrokerGateway, Position, Account
 from ..risk.manager import RiskManager
 
 
 class CTPGuardError(RuntimeError):
     """CTP 启动守卫错误。"""
+
+
+class CTPCapabilityPrepOnly(NotImplementedError):
+    """能力准备占位：真实 CTP/SimNow 接入为后续业务授权项（穿透式监管报备）。"""
 
 
 @dataclass
@@ -45,8 +50,8 @@ class CTPCredentials:
         )
 
 
-class CTPLiveGateway:
-    """受控实盘网关骨架。
+class CTPLiveGateway(BrokerGateway):
+    """受控实盘网关骨架（P1-5：实现 BrokerGateway 抽象，零依赖 vnpy_ctp）。
 
     用法（仅示例，勿在无凭证时运行）::
 
@@ -78,11 +83,34 @@ class CTPLiveGateway:
         self._connect_gateway()
 
     def _connect_gateway(self) -> None:
-        """连接占位：接入 vn.py CTP 网关时在此实现（含穿透式监管）。"""
+        """连接占位：接入 vn.py CTP 网关时在此实现（含穿透式监管）。
+
+        注：保持既有 549 测试 ``test_present_appid_authcode_allows_start`` 绿，
+        ``start()`` 在校验通过后不抛异常、置 ``_connected=True``（仅能力准备，不建真实连接）。
+        真实连接逻辑（含 vnpy_ctp 接入）为后续业务授权项，由 ``CTPCapabilityPrepOnly`` 表达。
+        """
         # TODO(实盘): 引入 vnpy_ctp，加载 CTP 网关并连接；加载前先完成监管报备。
         # 骨架阶段不建立真实连接，只打印校验通过。
-        print("[CTP] 凭证校验通过（骨架阶段，未建立真实连接）。")
+        print("[CTP] 凭证校验通过（能力准备阶段：未建立真实连接；真实 CTP 接入为后续业务授权项）。")
         self._connected = True
+
+    # ------------------------------------------------------------------
+    # BrokerGateway 抽象实现（骨架阶段均拒绝真实动作）
+    # ------------------------------------------------------------------
+    def connect(self) -> None:
+        self.start()
+
+    def disconnect(self) -> None:
+        self._connected = False
+
+    def query_position(self, symbol: str) -> Position:
+        raise CTPGuardError("骨架阶段未建立真实连接，无法查询持仓")
+
+    def query_account(self) -> Account:
+        raise CTPGuardError("骨架阶段未建立真实连接，无法查询账户")
+
+    def cancel_order(self, order_id: str) -> bool:
+        raise CTPGuardError("骨架阶段禁止撤单（未建立真实连接）")
 
     def submit_order(self, symbol: str, direction: int, qty: float) -> None:
         """下单占位：骨架阶段拒绝真实下单。"""

@@ -1,0 +1,28 @@
+# P1-8 风控规则配置（可选；默认不被自动加载，须显式传参）
+# 规则名映射到 hexbroker/risk/rules.py 中的 concrete rule 类；
+# 默认顺序复刻 RiskManager.evaluate 现状代码路径（数值一致）。
+#
+# 支持增删 / 重排规则（如插入自定义规则类），manager 按此顺序遍历。
+rules:
+  - name: hard_stop      # 硬止损（最高优先级，veto 后续规则）
+  - name: rl_intent      # RL 意图基线
+  - name: recovery       # 回撤恢复分级缩放
+  - name: budget         # 风险预算封顶
+  - name: sell_engine    # S1–S5 卖出信号否决归零
+
+# 各规则参数（缺省回退 RiskConfig 冻结默认阈值）
+params:
+  hard_stop:
+    threshold: 0.25
+  recovery:
+    dd_r1: 0.05
+    dd_r2: 0.10
+    dd_r3: 0.15
+    s_r1: 0.5
+    s_r2: 0.0
+    s_r3: 0.2
+    s_r4: 1.0
+  budget:
+    vol_target: 0.20
+    kelly_cap: 0.25
+    max_position_pct: 0.30
