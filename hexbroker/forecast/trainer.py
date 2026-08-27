@@ -52,8 +52,14 @@ class ForecastTrainer:
         fwd = np.concatenate([fwd, np.full(horizon, np.nan)])
         return pd.Series(fwd, index=close.index)
 
-    def run(self, barframe: Any, feature_frame: Any) -> TrainResult:
-        """对 feature_frame 每个标的做 walk-forward 训练，产出 OOS 信号。"""
+    def run(self, barframe: Any, feature_frame: Any,
+            fingerprint: Any = None) -> TrainResult:
+        """对 feature_frame 每个标的做 walk-forward 训练，产出 OOS 信号。
+
+        ``fingerprint`` 可选（``FourLayerFingerprint`` 或 dict，默认 None）：
+        None 时由 trainer 内部计算（指纹计算在 ``utils/fingerprint``，不引入模型），
+        并随 ``store.put`` 写入 SignalStore sidecar（P0-3）。
+        """
         from ..data.splitter import WalkForwardSplitter
 
         dc = self.cfg.data
@@ -130,7 +136,18 @@ class ForecastTrainer:
 
         if all_signals:
             result.model_id = all_signals[0].model_id
-            result.n_oos_signals = self.store.put(all_signals)
+            if fingerprint is None:
+                try:
+                    from ..utils.fingerprint import compute_four_layer
+
+                    m0 = result.models[0]
+                    fingerprint = compute_four_layer(
+                        self.cfg, barframe, m0.model_id,
+                        all_signals[0].train_end, dict(getattr(m0, "_params", {}) or {}),
+                    )
+                except Exception:
+                    fingerprint = None
+            result.n_oos_signals = self.store.put(all_signals, fingerprint=fingerprint)
         _log.info(f"训练完成：model={result.model_id} folds={result.n_folds} oos={result.n_oos_signals}")
         return result
 

@@ -28,6 +28,7 @@ class WalkForwardBacktester:
         prices: pd.DataFrame,
         targets: pd.DataFrame,
         n_folds: int = 3,
+        execution: Any = None,
     ) -> dict:
         """逐时段回测。
 
@@ -36,6 +37,8 @@ class WalkForwardBacktester:
         prices  : MultiIndex(symbol, datetime)，含 close。
         targets : MultiIndex(symbol, datetime)，含 target。
         n_folds : 把时间轴等分为多少段。
+        execution : 可选 P0-1 撮合假设开关（``ExecutionConfig``），透传给每段
+            ``BacktestEngine``；None 时各段引擎从 cfg.backtest 读取（默认口径零变化）。
 
         返回
         ----
@@ -61,7 +64,7 @@ class WalkForwardBacktester:
             t_sub = targets[(tlvl >= lo) & (tlvl <= hi)]
             if len(p_sub) < 5:
                 continue
-            eng = BacktestEngine(self.cfg)
+            eng = BacktestEngine(self.cfg, execution=execution)
             pf = eng.run(p_sub, t_sub)
             do_annualize = len(p_sub) >= annualize_min_bars
             reports.append(

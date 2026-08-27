@@ -35,3 +35,8 @@ jobs:
       - name: Run test suite
         run: |
           python -m pytest
+
+      - name: Static lookahead / recursive self-check (P0-2)
+        run: |
+          python -m hexbroker.tools.lookahead_analysis hexbroker/feature hexbroker/backtest hexbroker/pipeline.py
+          python -m hexbroker.tools.recursive_analysis hexbroker/feature hexbroker/backtest hexbroker/pipeline.py

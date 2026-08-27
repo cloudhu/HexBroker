@@ -198,6 +198,22 @@ class ComboConfig(BaseModel):
     vol_ewma_halflife: int = 10
 
 
+class BootstrapConfig(BaseModel):
+    """P0-4 block bootstrap 绩效区间配置（Q5 裁决默认值）。
+
+    - ``block_len=20``：循环块长度（日频月度自相关尺度，PyBroker 同款量级）；
+    - ``n_boot=1000``：重采样次数（numpy 向量化，18 品种日频组合口径 <60s）；
+    - ``seed=None``：None → 取 ``cfg.seed``（保证可复现）；
+    - ``by_symbol=False``：双闸门是组合口径，默认不分组；True 输出截面 CI 作研究辅助。
+    """
+
+    model_config = _MODEL_CFG
+    block_len: int = 20
+    n_boot: int = 1000
+    seed: int | None = None
+    by_symbol: bool = False
+
+
 class BacktestConfig(BaseModel):
     model_config = _MODEL_CFG
     fee_rate_open: float = 0.00005
@@ -217,6 +233,21 @@ class BacktestConfig(BaseModel):
     engine_b: EngineBConfig = Field(default_factory=EngineBConfig)  # 引擎 B（基差收敛）
     combo: ComboConfig = Field(default_factory=ComboConfig)         # 组合权重
     engine_a: EngineAConfig = Field(default_factory=EngineAConfig)  # 引擎 A（截面 rank，v4 缓存）
+    # P0-1 撮合假设开关（默认关闭 = 生产基线口径零变化，Q1/Q4 裁决）
+    next_bar_execution: bool = Field(
+        default=False,
+        description="True：成交价取下一 bar open ± 滑点；False：同 bar close 成交（生产基线）",
+    )
+    volume_cap: float | dict[str, float] | None = Field(
+        default=None,
+        description="成交量约束：None=不启用；float=统一比例；dict[symbol, ratio]=per-symbol 覆盖（Q4 裁决默认 0.05）",
+    )
+    volume_cap_mode: str = Field(
+        default="partial",
+        description="超量处理：partial=按比例部分成交（剩余丢弃不追单）；reject=整单拒绝",
+    )
+    # P0-4 bootstrap 绩效区间（并列输出，不参与闸门判定）
+    bootstrap: BootstrapConfig = Field(default_factory=BootstrapConfig)
 
 
 class RLConfig(BaseModel):

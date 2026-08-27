@@ -75,3 +75,66 @@ def fast_cfg(n_bars: int = 300):
     cfg.evolution.examm_n_generations = 3
     cfg.evolution.examm_n_islands = 2
     return cfg
+
+
+def fast_execution_cfg(n_bars: int = 300, *, next_bar: bool = False,
+                       volume_cap=None, mode: str = "partial"):
+    """快速撮合口径测试配置（P0-1：next_bar_execution / volume_cap 开关）。"""
+    cfg = fast_cfg(n_bars=n_bars)
+    cfg.backtest.next_bar_execution = bool(next_bar)
+    cfg.backtest.volume_cap = volume_cap
+    cfg.backtest.volume_cap_mode = mode
+    return cfg
+
+
+# ---------------------------------------------------------------------------
+# P0-2 缺陷样本夹具生成器（注入已知前视/递归缺陷，供静态分析检出率测试）
+# ---------------------------------------------------------------------------
+def make_leaky_features() -> list[str]:
+    """生成含已知前视缺陷的源码片段列表（每段注入一种危险原语）。
+
+    对应 lookahead 检测的 6 类模式：shift_negative / rolling_center / ewm /
+    asof_without_reindex / iloc_forward / np_roll。
+    """
+    return [
+        # 1. shift(-n)：同 bar 使用未来 n 根收益（未来函数）
+        'def leaky_momentum(df):\n'
+        '    df["f_mom"] = df["close"].shift(-5) / df["close"] - 1.0\n'
+        '    return df\n',
+        # 2. rolling(center=True)：窗口中心化引入未来
+        'def leaky_center_ma(df):\n'
+        '    df["f_ma"] = df["close"].rolling(20, center=True).mean()\n'
+        '    return df\n',
+        # 3. ewm 时序错位（时间衰减基准与信号时点不一致）
+        'def leaky_ewm(df):\n'
+        '    df["f_ewm"] = df["close"].ewm(span=12, adjust=False).mean()\n'
+        '    return df\n',
+        # 4. asof 前缺 reindex（跨时区对齐未锁列）
+        'def leaky_asof(df, ref):\n'
+        '    df["f_global"] = df["ts"].asof(ref["ts"])\n'
+        '    return df\n',
+        # 5. iloc 直接索引未来行
+        'def leaky_iloc(df):\n'
+        '    i = len(df) - 1\n'
+        '    df["f_next"] = df["close"].iloc[i + 1]\n'
+        '    return df\n',
+        # 6. np.roll 未来搬移
+        'def leaky_roll(df):\n'
+        '    import numpy as np\n'
+        '    df["f_rolled"] = np.roll(df["close"].to_numpy(), -1)\n'
+        '    return df\n',
+    ]
+
+
+def make_recursive_features() -> list[str]:
+    """生成含 A→B→A 递归依赖的源码片段（P0-2 recursive 检出夹具）。"""
+    return [
+        'def compute_a(df):\n'
+        '    df["f_a"] = compute_b(df)["f_b"] + 1\n'
+        '    return df\n'
+        '\n'
+        'def compute_b(df):\n'
+        '    df["f_b"] = compute_a(df)["f_a"] * 2\n'
+        '    return df\n',
+    ]
+

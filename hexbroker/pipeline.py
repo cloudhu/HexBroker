@@ -64,7 +64,11 @@ def _load_global_context(cfg, barframe) -> dict[str, pd.Series]:
 
 
 def _signal_eval(barframe, features, cfg, model_name: str, store_dir: str) -> tuple[pd.DataFrame, dict]:
-    """walk-forward 训练并落 OOS 信号，返回 (signals_df, train_result_dict)。"""
+    """walk-forward 训练并落 OOS 信号，返回 (signals_df, train_result_dict)。
+
+    P0-3：train_result 追加 ``fingerprints``（SignalStore 四层指纹 sidecar 列表），
+    trainer 内部已计算四层指纹并随 ``store.put`` 落盘。
+    """
     store = SignalStore(store_dir)
     trainer = ForecastTrainer(cfg, store, model_name=model_name)
     result = trainer.run(barframe, features)
@@ -74,6 +78,7 @@ def _signal_eval(barframe, features, cfg, model_name: str, store_dir: str) -> tu
         "n_folds": result.n_folds,
         "n_oos_signals": result.n_oos_signals,
         "calibration_errors": [float(x) for x in result.calibration_errors],
+        "fingerprints": store.fingerprints(model_id=result.model_id),
     }
 
 
@@ -396,7 +401,8 @@ def _gate_report(cfg, signals, fwd, baselines: dict, rl: Optional[dict], prices:
 # ---------------------------------------------------------------------------
 def run_pipeline(cfg, *, source=None, model=None, store_dir=None, skip_rl=False,
                  skip_evolution=False, rl_steps: Optional[int] = None,
-                 report_dir: Optional[str] = None) -> dict:
+                 report_dir: Optional[str] = None,
+                 enable_dual_caliber: bool = True) -> dict:
     t0 = time.time()
     init_logging("pipeline", Path("artifacts"))
 
@@ -423,6 +429,40 @@ def run_pipeline(cfg, *, source=None, model=None, store_dir=None, skip_rl=False,
         evolution = _run_evolution(cfg, signals, prices, fwd, scale=scale)
     gates = _gate_report(cfg, signals, fwd, baselines, rl, prices)
 
+    # P0-1 双口径对照（Q2 裁决：默认输出进生产报告，--no-dual-caliber 可关；只增不改）
+    dual_caliber = None
+    if enable_dual_caliber:
+        try:
+            from .backtest.execution import run_dual_caliber
+
+            use_rl_cand = rl is not None and bool(rl.get("better_than_threshold", False))
+            cand_targets = (
+                rl["targets"] if use_rl_cand else baselines["signal_threshold"]["targets"]
+            )
+            dual_caliber = run_dual_caliber(prices, cand_targets, cfg)
+        except Exception as e:
+            dual_caliber = {"error": str(e)}
+
+    # P0-4 bootstrap 绩效区间（并列输出，不参与闸门判定；DSR/PBO 逻辑零改动）
+    bootstrap = None
+    try:
+        from .evaluation.bootstrap import bootstrap_metrics_ci, bootstrap_report_block
+
+        use_rl_cand = rl is not None and bool(rl.get("better_than_threshold", False))
+        cand_eq = (
+            rl["equity"] if use_rl_cand else baselines["signal_threshold"]["metrics"]["equity"]
+        )
+        bcfg = cfg.backtest.bootstrap
+        boot_seed = bcfg.seed if bcfg.seed is not None else int(cfg.seed)
+        boot_res = bootstrap_metrics_ci(
+            cand_eq, freq=str(cfg.data.freq),
+            block_len=int(bcfg.block_len), n_boot=int(bcfg.n_boot),
+            seed=int(boot_seed), by_symbol=bool(bcfg.by_symbol),
+        )
+        bootstrap = bootstrap_report_block(boot_res)
+    except Exception as e:
+        bootstrap = {"error": str(e)}
+
     summary = {
         "run_id": _run_id(cfg),
         "config": cfg.model_dump(),
@@ -436,6 +476,10 @@ def run_pipeline(cfg, *, source=None, model=None, store_dir=None, skip_rl=False,
         },
         "evolution": evolution,
         "gates": gates,
+        # P0 新增三块（既有 key 一律不动，旧消费方按既有 key 读取不受影响）
+        "dual_caliber": dual_caliber,
+        "fingerprints": train_info.get("fingerprints") or [],
+        "bootstrap": bootstrap,
         "elapsed_seconds": round(time.time() - t0, 1),
     }
 
@@ -510,6 +554,41 @@ def _render_markdown(summary: dict) -> str:
         "- 本报告是研究型输出，非投资建议；实盘需经 CTP 受控骨架并完成穿透式监管报备。",
         "",
     ]
+
+    # ---- P0 新增章节（追加在既有章节之后，既有章节零改动）----
+    dc = summary.get("dual_caliber")
+    if dc and "error" not in dc:
+        lines += [
+            "",
+            "## 7. 撮合双口径对照（P0-1）",
+            f"- 同 bar 成交: Sharpe {dc['same_bar']['sharpe']:.3f} ｜ Calmar {dc['same_bar']['calmar']:.3f} ｜ "
+            f"MaxDD {dc['same_bar']['max_drawdown']*100:.2f}% ｜ 胜率 {dc['same_bar']['win_rate']*100:.1f}%",
+            f"- next_bar 成交: Sharpe {dc['next_bar']['sharpe']:.3f} ｜ Calmar {dc['next_bar']['calmar']:.3f} ｜ "
+            f"MaxDD {dc['next_bar']['max_drawdown']*100:.2f}% ｜ 胜率 {dc['next_bar']['win_rate']*100:.1f}%",
+            f"- Δ%: Sharpe {dc['delta_pct'].get('sharpe')} ｜ Calmar {dc['delta_pct'].get('calmar')} ｜ "
+            f"MaxDD {dc['delta_pct'].get('max_drawdown')} ｜ 胜率 {dc['delta_pct'].get('win_rate')}",
+            f"- {dc['note']}",
+        ]
+    fps = summary.get("fingerprints") or []
+    if fps:
+        lines += ["", "## 8. 四层指纹（P0-3）"]
+        for fp in fps[:10]:
+            lines.append(
+                f"- {fp.get('model_id')}/{fp.get('train_end')}: "
+                f"data={fp.get('data_version')} feature={fp.get('feature_version')} "
+                f"model={fp.get('model_version')} param={fp.get('param_hash')} config={fp.get('config_version')}"
+            )
+    bs = summary.get("bootstrap")
+    if bs and "error" not in bs:
+        lines += [
+            "",
+            "## 9. Bootstrap 绩效区间（P0-4）",
+            f"- Sharpe: {bs['sharpe']['point']:.3f} [95% CI {bs['sharpe']['ci_low']:.3f}–{bs['sharpe']['ci_high']:.3f}]",
+            f"- Calmar: {bs['calmar']['point']:.3f} [95% CI {bs['calmar']['ci_low']:.3f}–{bs['calmar']['ci_high']:.3f}]",
+            f"- MaxDD: {bs['max_drawdown']['point']*100:.2f}% [95% CI {bs['max_drawdown']['ci_low']*100:.2f}%–{bs['max_drawdown']['ci_high']*100:.2f}%]",
+            f"- 参数: block_len={bs['params']['block_len']} n_boot={bs['params']['n_boot']} "
+            f"seed={bs['params']['seed']} by_symbol={bs['params']['by_symbol']}",
+        ]
     return "\n".join(lines)
 
 
@@ -526,6 +605,7 @@ def main() -> None:
     ap.add_argument("--skip-evolution", action="store_true")
     ap.add_argument("--rl-steps", type=int, default=None, help="RL 训练步数（demo 建议 20000）")
     ap.add_argument("--report-dir", type=str, default=None)
+    ap.add_argument("--no-dual-caliber", action="store_true", help="关闭双口径对照（默认输出，Q2 裁决）")
     ap.add_argument("--i-understand-the-risk", action="store_true", help="仅实盘骨架使用，声明理解风险")
     args = ap.parse_args()
 
@@ -539,7 +619,7 @@ def main() -> None:
     summary = run_pipeline(
         cfg, source=args.source, model=args.model, skip_rl=args.skip_rl,
         skip_evolution=args.skip_evolution, rl_steps=args.rl_steps,
-        report_dir=args.report_dir,
+        report_dir=args.report_dir, enable_dual_caliber=not args.no_dual_caliber,
     )
     print("=" * 64)
     print(f"报告已生成: {summary['report_path']}")

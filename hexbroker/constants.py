@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from enum import IntEnum, StrEnum
+from typing import Any
 
 
 class Freq(StrEnum):
@@ -81,3 +82,38 @@ IS_ROLLOVER = "is_rollover"
 
 # 标准 OHLCV 列名（小写，§8.4）
 OHLCV_COLS = ["open", "high", "low", "close", "volume", "amount", "open_interest"]
+
+# ---------------------------------------------------------------------------
+# P0-1 撮合假设默认值（与 configs/base.yaml / hexbroker/config.py 单一事实源对齐）
+# ---------------------------------------------------------------------------
+#: 撮合假设开关默认值（默认 = 生产基线口径，零变化）
+EXECUTION_DEFAULTS: dict[str, Any] = {
+    "next_bar_execution": False,   # False：同 bar close 成交（生产基线）；True：下一 bar open 成交
+    "volume_cap": None,            # None：无成交量约束；启用默认比例 0.05（5%）
+    "volume_cap_mode": "partial",  # partial：按比例部分成交；reject：整单拒绝
+}
+#: Q4 裁决：volume_cap 启用时的默认比例（5%，日频期货流动性经验起点）
+VOLUME_CAP_DEFAULT_RATIO: float = 0.05
+
+# ---------------------------------------------------------------------------
+# P0-4 block bootstrap 默认值（Q5 裁决）
+# ---------------------------------------------------------------------------
+#: bootstrap 参数默认值（block_len=20 / n_boot=1000 / seed=None→cfg.seed / by_symbol=False）
+BOOTSTRAP_DEFAULTS: dict[str, Any] = {
+    "block_len": 20,
+    "n_boot": 1000,
+    "seed": None,       # None → cfg.seed（组合口径与双闸门一致）
+    "by_symbol": False, # False：组合口径；True：截面 CI 研究辅助
+}
+
+# ---------------------------------------------------------------------------
+# P0-3 四层指纹 / sidecar 约定
+# ---------------------------------------------------------------------------
+#: 指纹摘要长度（sha1 前 12 位，与 model_id / config_fingerprint 一致）
+FINGERPRINT_LENGTH: int = 12
+#: 指纹哈希算法
+FINGERPRINT_ALGO: str = "sha1"
+#: DataLake sidecar manifest 文件名（data/{layer}/{symbol}/{freq}/manifest.json）
+SIDECAR_MANIFEST_NAME: str = "manifest.json"
+#: SignalStore 分片指纹 sidecar 后缀（{root}/{model_id}/{train_end}.manifest.json）
+SIGNAL_SIDECAR_SUFFIX: str = ".manifest.json"

@@ -44,3 +44,13 @@ backtest:
     vol_target: false
     vol_target_ann: 0.175
     vol_ewma_halflife: 10
+  # P0-1 撮合假设开关（默认关闭，保证生产基线口径零变化；Q1/Q4 裁决）
+  next_bar_execution: false      # False：同 bar close 成交；True：成交价取下一 bar open ± 滑点
+  volume_cap: null               # None：无成交量约束；启用默认比例 0.05（5%），支持 dict[symbol, ratio]
+  volume_cap_mode: partial       # partial：按比例部分成交（剩余丢弃不追单）；reject：整单拒绝
+  # P0-4 block bootstrap 绩效区间（Q5 裁决：block_len=20 / n_boot=1000 / seed=cfg.seed / by_symbol=False）
+  bootstrap:
+    block_len: 20
+    n_boot: 1000
+    seed: null
+    by_symbol: false
