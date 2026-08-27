@@ -34,8 +34,8 @@ HexBroker 是**研究型（research-grade）纯 Python 期货研究框架**，�
 | 定位 | 中国商品期货**高胜率预测 + RL 双层 + 自回归进化**研究框架（README）；实际生产主线为 **Sentinel-2 双引擎组合**（引擎 A 趋势 LGBM 截面 + 引擎 B 基差时序） |
 | 语言 | **纯 Python ~2.1 万行**（README），numpy/pandas/scikit-learn/lightgbm/optuna 为核心，无编译内核、无 Numba |
 | 依赖 | pyproject.toml 单一事实源：核心 15 项 + dev/torch/sb3/sources/optional 5 组 extra；**optional 组已声明 pyqlib/rqalpha/vnpy/mlflow**（未启用） |
-| 测试 | **315 项全绿**，覆盖防泄漏/风控优先级/成本/一致性/RL/进化/漂移/管线/实盘守卫 |
-| CI | `.github/workflows/ci.yml`：py3.11/3.12 × pytest；**未跑 ruff/black/mypy 静态检查**（配置已声明） |
+| 测试 | **549 项全绿**，覆盖防泄漏/风控优先级/成本/一致性/RL/进化/漂移/管线/实盘守卫 |
+| CI | `.github/workflows/ci.yml`：py3.11/3.12 × pytest + 并行 `lint` job（ruff/black/mypy，P1-10 新增） |
 | 文档 | README + `docs/system_design.md`（模拟盘设计）+ `docs/developer-guide.md`（v3.29，含 40+ 轮实验史与"幻觉拆穿清单"）——质量明显高于多数开源项目 |
 | 实盘状态 | CTP **受控骨架**（仅凭证校验 + 下单占位）；paper 模拟盘（新浪实时价 + SimBroker 簿记）；生产节奏 p23_daily_run（T+1 计划-入账） |
 
@@ -196,11 +196,11 @@ HexBroker 是**研究型（research-grade）纯 Python 期货研究框架**，�
 **借鉴对象**：WonderTrader（资金/流控/账户三级 + 紧急离合器 + 组合盘防自成交）、freqtrade（四层风控漏斗）、LEAN（可插拔风控模型）、NautilusTrader（pre-trade 检查）。
 
 **建议动作**：
-- **P1-8 风控规则接口化（借鉴 LEAN 可插拔模型，自研轻量）**：定义 `RiskRule` ABC（evaluate(state, intent) → adjustment），把现有硬止损/S1-S5/预算/恢复重写为规则列表（默认顺序不变，保证与 315 项测试兼容），支持 yaml 增删。
+- **P1-8 风控规则接口化（借鉴 LEAN 可插拔模型，自研轻量）**：定义 `RiskRule` ABC（evaluate(state, intent) → adjustment），把现有硬止损/S1-S5/预算/恢复重写为规则列表（默认顺序不变，保证与 549 项测试兼容），支持 yaml 增删。
 - **P1-8b 组合/通道级风控（借鉴 WonderTrader 组合盘）**：在引擎 A/B 目标之上加"组合目标仓位合并层"（现有 combo_plan 已是雏形），实现自成交防护（同一品种多引擎目标合并）与下单流控。
 - **P2-15 紧急离合器（借鉴 WonderTrader）**：一键全局断信号/平仓通道（现有 hard_stop 已接近，补"人工可触发"）。
 
-**收益/成本/风险**：P1-8 收益中高（风控从"改代码"变"改配置"，且为实盘落地做准备）；成本中（重构 risk/ 需保住 315 项测试全绿）；风险低-中（重构回归风险，建议增量式：先加接口层，再逐个迁移规则）。
+**收益/成本/风险**：P1-8 收益中高（风控从"改代码"变"改配置"，且为实盘落地做准备）；成本中（重构 risk/ 需保住 549 项测试全绿）；风险低-中（重构回归风险，建议增量式：先加接口层，再逐个迁移规则）。
 
 ### 2.7 中国市场规则内建（保证金/涨跌停/夜盘/交割月/T+0）
 
@@ -228,7 +228,7 @@ HexBroker 是**研究型（research-grade）纯 Python 期货研究框架**，�
 
 **现状（代码佐证）**：
 - CI：`.github/workflows/ci.yml` pytest（py3.11/3.12），**无 ruff/black/mypy 步骤**（配置已声明，未接线）。
-- 测试：315 项全绿，覆盖维度广（防泄漏/风控/成本/一致性/RL/进化/漂移/管线/实盘守卫/paper）；`pyproject.toml` pytest 配置齐。
+- 测试：549 项全绿，覆盖维度广（防泄漏/风控/成本/一致性/RL/进化/漂移/管线/实盘守卫/paper）；`pyproject.toml` pytest 配置齐。
 - 文档：README + system_design + developer-guide v3.29（40+ 轮实验史）——**优于多数开源项目**。
 - 性能：纯 Python；日频/分钟级 CTA 够用（README 自述"中低频够用"）；**无编译内核**（对比 NautilusTrader Rust / WonderTrader C++ / Hikyuu C++）；**无 Numba/向量化**（对比 PyBroker/vectorbt）；Kronos 推理 CPU 可跑（fallback 设计）。
 - 依赖治理：pyproject 单一事实源 + extra 分组 + 懒加载降级——工程习惯好。
@@ -241,7 +241,7 @@ HexBroker 是**研究型（research-grade）纯 Python 期货研究框架**，�
 **借鉴对象**：freqtrade（Docker 一键 + 高频发版 + 文档体系）、NautilusTrader/WonderTrader（编译内核）、vectorbt（向量化）。
 
 **建议动作**：
-- **P1-10 CI 补静态检查（低成本立刻做）**：CI 增加 `ruff check` + `black --check` + `mypy`（可选 strict 渐进），与 315 项测试并行。
+- **P1-10 CI 补静态检查（低成本立刻做）**：CI 增加 `ruff check` + `black --check` + `mypy`（可选 strict 渐进），与 549 项测试并行。
 - **P2-16 性能分层（借鉴 vectorbt 研究/执行分工）**：保留事件驱动回测为执行权威，新增"研究扫描向量化引擎"（targets 生成路径用 numpy 批量，供参数网格快速预筛），验证与事件引擎一致性后用于大规模扫描。
 - **P2-17 编译内核（借鉴 NautilusTrader，长线）**：仅当演进到 Tick/高频或性能成为瓶颈时评估；日频 CTA 现状不建议投入。
 
@@ -288,7 +288,7 @@ HexBroker 是**研究型（research-grade）纯 Python 期货研究框架**，�
 | P1-5 | CTP/SimNow 通道 | ctp_skeleton.py `_connect_gateway` 为 TODO；paper 用新浪行情；无 SimNow | 无法真实下单；无 Gateway 抽象 | vn.py（vnpy_ctp + SimNow + Gateway 插件化） | `_connect_gateway` 接 vnpy_ctp；`BrokerGateway` ABC 统一 Sim/Paper/CTP；先 SimNow 后实盘 | 高/中/中（合规门槛） |
 | P1-6 | 因子库资产化 + 表达式引擎 | feature/pipeline.py 特征代码硬编码；25 特征白名单 | 无表达式 DSL、无因子注册/IC 档案 | qlib（ExpressionEngine + Alpha158/360） | 因子表达式 DSL（复用现有原语）+ 注册表 + IC 缓存；按需启用 pyqlib optional | 中/中/低 |
 | P1-7 | ML/RL 滚动重训调度 + 实验记录 | ForecastTrainer 逐折重训；p23 手工调度；无 recorder | 非自动滑动窗口；无模型版本/回滚；无四层实验库 | freqtrade FreqAI、qlib（MLflow recorder） | 重训调度配置化（retrain_freq/model_registry）；启用 mlflow 或自研轻量 recorder | 中/中/低 |
-| P1-8 | 风控规则接口化 + 组合/通道级风控 | RiskManager 优先级链代码写死；group_cap 已有雏形 | 不可热插拔；无自成交防护/流控 | LEAN（可插拔风控）、WonderTrader（组合盘防自成交） | `RiskRule` ABC 重构（保 315 测试绿）；组合目标合并层 + 自成交防护 | 中/中/中（回归风险） |
+| P1-8 | 风控规则接口化 + 组合/通道级风控 | RiskManager 优先级链代码写死；group_cap 已有雏形 | 不可热插拔；无自成交防护/流控 | LEAN（可插拔风控）、WonderTrader（组合盘防自成交） | `RiskRule` ABC 重构（保 549 测试绿）；组合目标合并层 + 自成交防护 | 中/中/中（回归风险） |
 | P1-9 | 中国市场规则内建为规则引擎 | cost.py/engine.py/calendar.py 零散内建；统一 12% 保证金 | 无分品种保证金率/涨跌停幅度/交割月限制 | rqalpha（规则默认内建）、NautilusTrader（合约生命周期） | `MarketRule` 配置表 + 首批落保证金率/涨跌停幅度/交割月禁开仓 | 中/中/低 |
 | P1-10 | CI 补静态检查 | ci.yml 只跑 pytest；ruff/black/mypy 已配置未接线 | 质量门禁不完整 | 通用实践 | CI 加 ruff/black/mypy 步骤 | 低/极低/低 |
 
@@ -328,7 +328,7 @@ HexBroker 是**研究型（research-grade）纯 Python 期货研究框架**，�
 
 ## 5. 最值得立即动手的排序结论（Top 3-5）
 
-综合"收益/成本/风险"与项目现状（315 项测试全绿、生产基线 v8+A10/B90 已固化的研究型系统），建议按以下顺序立即立项：
+综合"收益/成本/风险"与项目现状（549 项测试全绿、生产基线 v8+A10/B90 已固化的研究型系统），建议按以下顺序立即立项：
 
 1. **P0-1 撮合可信度加固（撮合假设文档化 + 双口径回测）**
    —— 理由：P18 multiplier 修复曾让历史绩效 Sharpe 系统性 -68%，**撮合假设是同等级的可信度风险**（固定 1 tick 滑点 + 同 bar 成交使绩效系统性偏乐观且未量化）。成本极低（纯 Python 增量 + 报告输出），收益是全部历史数字的可信度。
@@ -347,7 +347,7 @@ HexBroker 是**研究型（research-grade）纯 Python 期货研究框架**，�
 
 ## 6. 假设与局限
 
-1. **成熟度判断基于代码走读而非运行**：本报告未执行 `pytest` 或端到端运行验证（315 项测试绿为 README/pyproject 与文档声明口径），若运行结果与声明不符需复核。
+1. **成熟度判断基于代码走读而非运行**：本报告未执行 `pytest` 或端到端运行验证（549 项测试绿为 README/pyproject 与文档声明口径），若运行结果与声明不符需复核。
 2. **性能结论为定性判断**：未做基准测试；"日频够用、Tick 需编译内核"基于纯 Python 事件驱动架构的常识判断。
 3. **开源项目对比以 PM 调研报告为唯一数据源**：未对 vn.py/WonderTrader/NautilusTrader/qlib/freqtrade 做源码级验证（PM 调研已声明此局限），建议落地 P0-2/P1-5 前对其关键机制（lookahead 分析实现、vnpy_ctp 接口）做一次源码核对。
 4. **生产基线口径**：README 与 developer-guide 对生产组合权重（A30/B70 vs A10/B90）表述存在版本差异，本报告以"双引擎组合"为架构事实，不介入具体权重终裁。

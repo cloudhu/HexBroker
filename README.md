@@ -7,7 +7,7 @@
 
 ## 版本
 
-- **v0.1.0**（2026-08-23）：代码审计 v2 收官——31 项缺陷定点修复（P0/P1/P2 全闭环，315 项测试全绿）；pyproject 依赖声明补齐；CI 干净环境稳定
+- **v0.1.0**（2026-08-23）：代码审计 v2 收官——31 项缺陷定点修复（P0/P1/P2 全闭环，549 项测试全绿）；pyproject 依赖声明补齐；CI 干净环境稳定
 - **2026-08-22**：P25 影子基线 v2→v8（生产基线对照）升级
 - **2026-08-16**：LightGBM 冠军 v4（方向准确率 70.23%）终报 + 首轮代码审计（4 项 P1 修复）
 
@@ -109,7 +109,7 @@ pytest -q
 - **防泄漏（L1–L9）**：winsorize/tokenizer 全样本未来函数（改 rolling/expanding 因果）、尾部标签伪造看涨（np.nan 剔除）、跨品种归一锁列、外盘 reindex→asof、pivot 短名静默均值、splitter 非幂等、pytdx 主力/市场硬编码（跨市场枚举 + 实时持仓量选主力）、Kronos 配对绕过、SignalStore 无 OOS 校验
 - **评估口径（E1–E4）**：缺盈亏比（补 profit_factor + PF 行）、DSR/PBO 文档混淆、RL 单品种 vs 基线全品种口径不可比、walkforward 短折年化 + ddof=0
 - **进化/实盘（V1–V5）**：EXAMM LSTM 单元记忆重置 + 训练集选种（改验证集）、Optuna 剪枝失效（MedianPruner + report）、PSI 空箱爆炸、CTP 缺凭证仅 print（改 raise）、contracts=None 乘数规格回退
-- 全部附回归测试（315/315 绿），提交链可溯源（`deliverables/code_audit_recheck_20260823.md` 含问题级提交映射）
+- 全部附回归测试（549/549 绿），提交链可溯源（`deliverables/code_audit_recheck_20260823.md` 含问题级提交映射）
 
 ## 关键设计（防泄漏红线）
 
@@ -135,7 +135,7 @@ hexbroker/            # 主包
   evaluation/         # 评估：指标/基线/DSR-PBO诊断/报告
   pipeline.py         # 端到端一条命令
 configs/              # OmegaConf 实验配置（base + 各层默认 + e01_cu_daily 示例）
-tests/                # 315 项测试（防泄漏/风控优先级/成本/一致性/RL/进化/漂移/管线/实盘守卫）
+tests/                # 549 项测试（防泄漏/风控优先级/成本/一致性/RL/进化/漂移/管线/实盘守卫）
 docs/                 # 架构设计（system_design.md 等）
 ```
 
