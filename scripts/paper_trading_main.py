@@ -71,6 +71,34 @@ def _load_paper_config(config_path: str) -> Any:
     return OmegaConf.create(paper_dict)
 
 
+def _run_governance_selfcheck() -> None:
+    """P2-4 启动期治理自检（防误开联锁落地）：仅 WARNING + 强制 SHADOW，零侵入 tick。
+
+    fail-safe：任何异常（配置缺失/解析失败/校验不通过）均降级为 WARNING 日志，
+    绝不抛异常、绝不阻断交易启动、绝不进入主循环。
+    """
+    try:
+        from hexbroker.governance import SchemeRegistry, resolve_scheme_mode, ResolvedMode
+
+        cfg_path = "configs/scheme_governance.yaml"
+        if not Path(cfg_path).exists():
+            print(f"[GOV] 治理配置缺失（{cfg_path}），跳过自检（不阻断启动）")
+            return
+        reg = SchemeRegistry.load(cfg_path)  # 内部 verify_all：PASS 须有校准记录
+        live, shadow = [], []
+        for sid in reg.ids():
+            mode, reason = resolve_scheme_mode("live", sid, reg)
+            if mode is ResolvedMode.LIVE:
+                live.append(sid)
+            else:
+                shadow.append(sid)
+                if reason:
+                    print(f"[GOV][警告] 方案 {sid} 未过治理联锁({reason})，强制 SHADOW_ONLY")
+        print(f"[GOV] 治理自检完成：可实盘={live or '无'}，强制影子={shadow or '无'}")
+    except Exception as exc:  # noqa: BLE001 — fail-safe：自检失败不阻断交易
+        print(f"[GOV][警告] 治理自检异常（已忽略，不阻断启动）：{exc}")
+
+
 def _validate(paper_cfg: Any, symbols: list[str]) -> None:
     """启动期致命校验：信号缓存存在 / 品种配置合法 / 节假日表加载。"""
     # 多信号源级联（signal_caches 列表优先；兼容旧单键 signal_cache）
@@ -315,6 +343,9 @@ def main() -> int:
         print(f"[模拟盘] 已有存活实例（PID 锁 {pid_path}），拒绝重复启动以避免 trades.log 会话重放叠加。")
         print(f"[模拟盘]   如需强制重启，请先结束该实例或删除 PID 锁文件后重试。")
         return 1
+
+    # P2-4 启动期治理自检（防误开联锁落地）：仅 WARNING + 强制 SHADOW，零侵入 tick
+    _run_governance_selfcheck()
 
     try:
         scheduler.run()

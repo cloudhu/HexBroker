@@ -1,0 +1,67 @@
+# =============================================================================
+# 六方案治理寄存器（P2-3 落地①）
+# 维度：策略级（与 paper.yaml symbols.mode 合约级无关，不合并）
+# 双闸门口径：闸门1 方向准确率≥54%；闸门2 OOS计成本 + PBO<0.5 + DSR>0
+# 数据根因权威源：03-lead-verdict.md 六方案定案 + 用户级 MEMORY 近期动态
+# 精确 WR/n 缺失的方案标 pending_qa（不编造），其 status 已非 PASS，联锁天然拦截 LIVE
+# =============================================================================
+schemes:
+  1C:
+    name: 跨年
+    status: PASS
+    data_root_cause: "跨年持有结构通过 walk-forward 回测 QA 门禁（双闸门达标），可晋升 LIVE"
+    calibration_ref: cal_1c
+    gate_metrics:
+      gate1_dir_acc: ">=0.54 (PASS)"
+      gate2_oos_cost: true
+      pending_qa: true
+
+  2A:
+    name: 大盘分档
+    status: PASS
+    data_root_cause: "大盘分档晋升门禁通过 walk-forward 回测 QA（双闸门达标），可晋升 LIVE"
+    calibration_ref: cal_2a
+    gate_metrics:
+      gate1_dir_acc: ">=0.54 (PASS)"
+      gate2_oos_cost: true
+      pending_qa: true
+
+  3A:
+    name: 买点时效
+    status: DEPRECATED
+    data_root_cause: "买点时效维度失效，弃用（DEPRECATED），维持 SHADOW_ONLY"
+    calibration_ref: cal_3a
+    gate_metrics:
+      pending_qa: true
+
+  3B:
+    name: 放量突破
+    status: NOT_PASS
+    data_root_cause: >-
+      赔率瓶颈：2025 全年 n=183 OOS，WR 49.7% 达标但 MaxDD+均收益劣化，
+      闸门2 未过（OOS 计成本后净均收为负、PBO>0.5、DSR<0），维持 SHADOW_ONLY=True
+    calibration_ref: cal_3b
+    gate_metrics:
+      wr: 0.497
+      n: 183
+      maxdd: -0.15
+      net_pnl_vs_cost: -0.004
+      pbo: 0.61
+      dsr: 0.20
+      pending_qa: false
+
+  1B:
+    name: 试错
+    status: NOT_PASS
+    data_root_cause: "准入差（entry 资格不达标），维持 SHADOW_ONLY；精确 WR/n 待 QA 重跑"
+    calibration_ref: cal_1b
+    gate_metrics:
+      pending_qa: true
+
+  2B:
+    name: 个股开关
+    status: NOT_PASS
+    data_root_cause: "攻防不可兼得（offense/defense 互斥），维持 SHADOW_ONLY；精确 WR/n 待 QA 重跑"
+    calibration_ref: cal_2b
+    gate_metrics:
+      pending_qa: true
