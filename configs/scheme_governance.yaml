@@ -1,35 +1,44 @@
 # =============================================================================
-# 六方案治理寄存器（P2-3 落地①）
+# 六方案治理寄存器（P2-3 落地①；定量补全批次 2026-08-28 同步）
 # 维度：策略级（与 paper.yaml symbols.mode 合约级无关，不合并）
-# 双闸门口径：闸门1 方向准确率≥54%；闸门2 OOS计成本 + PBO<0.5 + DSR>0
-# 数据根因权威源：03-lead-verdict.md 六方案定案 + 用户级 MEMORY 近期动态
-# 精确 WR/n 缺失的方案标 pending_qa（不编造），其 status 已非 PASS，联锁天然拦截 LIVE
+# 门槛口径：云侠 A 股方案红线 = would_allow WR≥45% ∧ n≥20/30（非期货双闸门 54%）
+# 定量数据源：云侠 temp/ 深快照 walk-forward 产物（bt_*_out.json / *_report.md）
+# pending_qa=true 的方案：2A（ΔWR/ΔMaxDD 待影子期完整 fwd5 结算）、3A（DEPRECATED 无需）
 # =============================================================================
 schemes:
   1C:
     name: 跨年
     status: PASS
-    data_root_cause: "跨年持有结构通过 walk-forward 回测 QA 门禁（双闸门达标），可晋升 LIVE"
+    data_root_cause: >-
+      追击分档分层单调有效（walk-forward 深快照 IS2024/OOS2025）：
+      OOS2025 would_allow n=2077/WR 58.69%/均收 +1.30%，would_reject WR 42.4%；
+      IS2024 allow n=2379/WR 50.02%；08-11 复核 8月段 n=483/WR 60.25%/均收 +2.05%，
+      红线 WR≥45%∧n≥30 全过
     calibration_ref: cal_1c
     gate_metrics:
-      gate1_dir_acc: ">=0.54 (PASS)"
-      gate2_oos_cost: true
-      pending_qa: true
+      gate1_dir_acc: 0.5869
+      n_oos: 2077
+      avg_return_pct: 1.3046
+      aug_wr: 0.6025
+      aug_n: 483
+      pending_qa: false
 
   2A:
     name: 大盘分档
     status: PASS
-    data_root_cause: "大盘分档晋升门禁通过 walk-forward 回测 QA（双闸门达标），可晋升 LIVE"
+    data_root_cause: >-
+      市态 fail-open 分档重判：开仓资格 pass 率 Δ=+14.89pp（日级重判 boxRange→oscillatingUp）；
+      08-11 复核要求完整 fwd5 结算的 ΔWR/ΔMaxDD，08-04~08-07 仅部分结算（fwd_avail=3~0），
+      后续无完整结算产物 → ΔWR/ΔMaxDD 定量待影子期补全（诚实保留 pending_qa）
     calibration_ref: cal_2a
     gate_metrics:
-      gate1_dir_acc: ">=0.54 (PASS)"
-      gate2_oos_cost: true
+      delta_pass_rate_pp: 14.89
       pending_qa: true
 
   3A:
     name: 买点时效
     status: DEPRECATED
-    data_root_cause: "买点时效维度失效，弃用（DEPRECATED），维持 SHADOW_ONLY"
+    data_root_cause: "买点时效维度失效，弃用（DEPRECATED，2026-08-07 产品决策记录），维持 SHADOW_ONLY"
     calibration_ref: cal_3a
     gate_metrics:
       pending_qa: true
@@ -38,30 +47,45 @@ schemes:
     name: 放量突破
     status: NOT_PASS
     data_root_cause: >-
-      赔率瓶颈：2025 全年 n=183 OOS，WR 49.7% 达标但 MaxDD+均收益劣化，
-      闸门2 未过（OOS 计成本后净均收为负、PBO>0.5、DSR<0），维持 SHADOW_ONLY=True
+      赔率瓶颈（2025 全年 OOS 终裁，fwd5 结算率 100%）：①组合 MaxDD 18.85% > 原逆向 17.34%
+      （不劣化铁律违反）；②突破组均收 +0.31% < 原逆向 +1.47%（收益劣化）；
+      WR 49.73%（91/183）≥45% 红线通过；追高防线成立（极端组 0 笔）。
+      更正 P2 误录：PBO/DSR 无计算证据（置空）；maxdd 实为组合口径 0.1885；均收实为 +0.31%
     calibration_ref: cal_3b
     gate_metrics:
-      wr: 0.497
+      wr: 0.4973
       n: 183
-      maxdd: -0.15
-      net_pnl_vs_cost: -0.004
-      pbo: 0.61
-      dsr: 0.20
+      combo_maxdd: 0.1885
+      baseline_maxdd: 0.1734
+      avg_return_pct: 0.31
+      baseline_avg_return_pct: 1.47
       pending_qa: false
 
   1B:
     name: 试错
     status: NOT_PASS
-    data_root_cause: "准入差（entry 资格不达标），维持 SHADOW_ONLY；精确 WR/n 待 QA 重跑"
+    data_root_cause: >-
+      准入差实锤（veto 反事实，深快照）：被否决组 OOS n=134，fwd5 WR 40.3%<45% 红线
+      且均收 -0.98%<0 → 放行不可行，否决是保护（judgement_oos=veto_correct）；
+      IS 段 n=53/WR 90.57% 为 2026-04 单月段不可外推（2026-05 WR 17.65%）
     calibration_ref: cal_1b
     gate_metrics:
-      pending_qa: true
+      gate1_dir_acc: 0.403
+      n_oos: 134
+      avg_return_pct: -0.9805
+      pending_qa: false
 
   2B:
     name: 个股开关
     status: NOT_PASS
-    data_root_cause: "攻防不可兼得（offense/defense 互斥），维持 SHADOW_ONLY；精确 WR/n 待 QA 重跑"
+    data_root_cause: >-
+      攻防不可兼得实锤（2025 全年 OOS，walk-forward IS2024/OOS2025，2025 数据此前从未用于 2B）：
+      dualA 五项 checks 全败（总收益 1284.57%<0.95×门槛 1613.19%、MaxDD 41.23%>旧轨 34.63%、
+      防御段 DD 降 -7.0% 未达门槛、进攻段 80.19%<94.95%、1 cell REGRESSION）；
+      dualB1 总收益持平但防御段 DD 0 改善；verdicts: dualA/dualB1 均 NOT_PASS
     calibration_ref: cal_2b
     gate_metrics:
-      pending_qa: true
+      gate1_dir_acc: 0.5877
+      n_oos: 815
+      maxdd: 0.3463
+      pending_qa: false
