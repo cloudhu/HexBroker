@@ -193,6 +193,42 @@ def build_components_safe(paper_cfg: Any, offline: bool = False) -> dict[str, tu
     return results
 
 
+def _check_signal_freshness(paper_cfg: Any) -> None:
+    """B+C 防再发：启动期信号新鲜度硬告警 + 可选自动刷新（默认关，绝不阻断启动）。
+
+    背景 2026-08-28 停摆事故：阈值=0 的隔夜过期门禁要求每天刷新缓存，漏跑则
+    「系统照常运行但不交易」。本函数在启动期把该状态变成**醒目横幅**；仅当配置
+    ``signal_refresh.auto_enabled=true`` 时才自动跑 p22_tail_ext.py --skip-eval。
+    """
+    try:
+        from hexbroker.diagnostics.signal_refresh import (
+            format_banner,
+            maybe_auto_refresh,
+            probe,
+        )
+
+        sect = paper_cfg.get("signal_refresh", {}) if hasattr(paper_cfg, "get") else {}
+        threshold = int(sect.get("threshold", 0))
+        auto_enabled = bool(sect.get("auto_enabled", False))
+        timeout_sec = int(sect.get("timeout_sec", 900))
+        cache_dir = str(sect.get("cache_dir", "data/signal_caches"))
+
+        probes = probe(cache_dir, threshold=threshold)
+        banner = format_banner(probes)
+        if not banner:
+            print(f"[模拟盘] 信号缓存新鲜度检查通过（fd<={threshold}）")
+            return
+        print(banner)
+        refreshed, msg = maybe_auto_refresh(
+            probes, enabled=auto_enabled, timeout_sec=timeout_sec
+        )
+        print(f"[模拟盘] 信号刷新：{msg}")
+        if refreshed and not format_banner(probe(cache_dir, threshold=threshold)):
+            print("[模拟盘] 刷新后信号新鲜度已达标（可正常交易）")
+    except Exception:  # noqa: BLE001
+        print("[模拟盘] 信号新鲜度检查异常（已隔离，不阻断启动）")
+
+
 def build_components(paper_cfg: Any, offline: bool = False) -> dict[str, Any]:
     """组装全部组件（§4.1 组件工厂）。任一组件失败则抛出首个异常。"""
     safe = build_components_safe(paper_cfg, offline=offline)
@@ -373,6 +409,9 @@ def main() -> int:
 
     # P2-4 启动期治理自检（防误开联锁落地）：仅 WARNING + 强制 SHADOW，零侵入 tick
     _run_governance_selfcheck()
+
+    # B+C 防再发：信号新鲜度硬告警（陈旧→醒目横幅；自动刷新默认关）
+    _check_signal_freshness(paper_cfg)
 
     try:
         scheduler.run()

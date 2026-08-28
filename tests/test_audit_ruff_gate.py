@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 GATED_FILES = [
     "scripts/paper_trading_main.py",
     "scripts/gov_scheme_signals.py",
+    "hexbroker/diagnostics/signal_refresh.py",   # B+C 防再发批次
     "hexbroker/governance/degrade.py",
     "hexbroker/governance/ledger.py",
     "hexbroker/governance/scheme.py",

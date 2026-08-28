@@ -77,6 +77,8 @@ class TradingScheduler:
         self._run_days = run_days
         self._degrader = degrader
         self._degrade_signals = degrade_signals
+        self._block_reasons: dict[Any, dict[str, int]] = {}   # C2：day → {拦截原因: 次数}
+        self._last_zero_open_alert: Optional[tuple] = None    # C2：0 开仓汇总去重指纹
 
         # 运行状态
         self._current_day: Optional[date] = None
@@ -336,6 +338,12 @@ class TradingScheduler:
             maintain_ratio = (abs(cur) * quote.price * multiplier / acct.equity) if acct.equity > 0 else 0.0
             decision.target_position = maintain_ratio if cur >= 0 else -maintain_ratio
             decision.reason = "min_hold"
+
+        # ---- C2 可观测性：无持仓且未开仓 → 累计拦截原因（供「0 开仓」显性汇总）----
+        if abs(pos_ctx.position) < 1e-12 and abs(decision.target_position) < 1e-9:
+            _reason = str(getattr(decision, "reason", "") or "no_intent")
+            _bucket = self._block_reasons.setdefault(day, {})
+            _bucket[_reason] = _bucket.get(_reason, 0) + 1
 
         # ---- 计划 ----
         plan = self._planner.update_from_signal(sig, decision, quote=quote, equity=acct.equity)
@@ -674,6 +682,7 @@ class TradingScheduler:
                 self._trades_log, day, account_json_path=str(self._account_file)
             )
             if not result["filtered_count"]:
+                self._warn_zero_open(day)   # C2：无成交时明确说明「为什么不交易」
                 return
             log.info("[统计] 盘中当日统计：{}", summarize_daily(result))
             alerts = daily_stats_alerts(result)
@@ -687,6 +696,25 @@ class TradingScheduler:
                 self._last_stats_alert = None  # 状态恢复，下次异常可再次提醒
         except Exception:
             log.exception("当日统计输出失败（已隔离）")
+
+    def _warn_zero_open(self, day: Any) -> None:
+        """C2：当日 0 开仓时输出拦截原因分布（让"静默停摆"显性化，去重防刷屏）。"""
+        try:
+            reasons = self._block_reasons.get(day) or {}
+            if not reasons:
+                return
+            ranked = sorted(reasons.items(), key=lambda kv: kv[1], reverse=True)
+            text = "、".join(f"{k}={v}" for k, v in ranked[:5])
+            fingerprint = (day, tuple(ranked))
+            if fingerprint == self._last_zero_open_alert:
+                return
+            self._last_zero_open_alert = fingerprint
+            hint = ""
+            if any(k in ("no_intent", "cost_gate_reject") for k in reasons):
+                hint = "（no_intent 主因通常为主源信号过期→技术兜底禁开，请检查信号新鲜度 fd）"
+            log.warning("[统计] 今日开仓 0 笔，未开仓原因分布：{} {}", text, hint)
+        except Exception:
+            log.exception("0 开仓原因汇总失败（已隔离）")
 
     # ------------------------------------------------------------------
     # 收盘复盘（A5）
