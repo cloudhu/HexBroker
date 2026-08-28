@@ -204,26 +204,30 @@ def _check_signal_freshness(paper_cfg: Any) -> None:
         from hexbroker.diagnostics.signal_refresh import (
             format_banner,
             maybe_auto_refresh,
-            probe,
+            probe_files,
+            resolve_cache_paths,
         )
 
         sect = paper_cfg.get("signal_refresh", {}) if hasattr(paper_cfg, "get") else {}
         threshold = int(sect.get("threshold", 0))
         auto_enabled = bool(sect.get("auto_enabled", False))
         timeout_sec = int(sect.get("timeout_sec", 900))
-        cache_dir = str(sect.get("cache_dir", "data/signal_caches"))
+        # D2 修复：按**显式文件列表**探测（与 SignalEngine 同口径）。
+        # cache_paths 留空 → 继承 paper.signal_caches；旧键 cache_dir 已废弃
+        # （目录不存在时 probe 返回空列表 → 恒"通过"的假绿，见 2026-08-28 缺陷）。
+        paths = list(sect.get("cache_paths") or []) or resolve_cache_paths(paper_cfg)
 
-        probes = probe(cache_dir, threshold=threshold)
+        probes = probe_files(paths, threshold=threshold)
         banner = format_banner(probes)
         if not banner:
-            print(f"[模拟盘] 信号缓存新鲜度检查通过（fd<={threshold}）")
+            print(f"[模拟盘] 信号缓存新鲜度检查通过（fd<={threshold}，共 {len(probes)} 个缓存）")
             return
         print(banner)
         refreshed, msg = maybe_auto_refresh(
             probes, enabled=auto_enabled, timeout_sec=timeout_sec
         )
         print(f"[模拟盘] 信号刷新：{msg}")
-        if refreshed and not format_banner(probe(cache_dir, threshold=threshold)):
+        if refreshed and not format_banner(probe_files(paths, threshold=threshold)):
             print("[模拟盘] 刷新后信号新鲜度已达标（可正常交易）")
     except Exception:  # noqa: BLE001
         print("[模拟盘] 信号新鲜度检查异常（已隔离，不阻断启动）")

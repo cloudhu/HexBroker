@@ -6,6 +6,8 @@ TradingScheduler 构造之后（degrader 未定义即引用），全量 pytest 6
 """
 from __future__ import annotations
 
+import importlib.util
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -27,16 +29,39 @@ GATED_FILES = [
 ]
 
 
+def _ruff_cmd() -> list[str] | None:
+    """定位可用的 ruff 可执行方式（PATH 二进制优先，回退 ``python -m ruff``）。
+
+    2026-08-28 发现：托管 venv 装了 ruff 包但**未随包附带二进制**，
+    ``python -m ruff`` 抛 RuffNotFound（exit 1），而 PATH 上的 ruff 正常。
+    门禁若只认模块方式，会随解释器不同假失败——CI 信号必须稳定。
+    """
+    exe = shutil.which("ruff")
+    if exe:
+        return [exe]
+    if importlib.util.find_spec("ruff") is not None:
+        return [sys.executable, "-m", "ruff"]
+    return None
+
+
 def test_ruff_f821_gate(tmp_path: Path):
     """ruff 必须全过（重点 F821 未定义名 / F811 重复定义 / E9 语法错误）。"""
-    pytest.importorskip("ruff", reason="ruff 未安装（可选依赖）")
+    cmd = _ruff_cmd()
+    if cmd is None:
+        pytest.skip("ruff 不可用（PATH 与当前解释器均无）")
     files = [str(ROOT / f) for f in GATED_FILES]
     r = subprocess.run(
-        [sys.executable, "-m", "ruff", "check", "--select", "F821,F811,E9",
-         "--output-format=concise", *files],
+        [*cmd, "check", "--select", "F821,F811,E9", "--output-format=concise", *files],
         capture_output=True, text=True, cwd=str(ROOT),
     )
+    if r.returncode != 0 and "RuffNotFound" in (r.stderr or ""):
+        pytest.skip(f"ruff 二进制缺失（{' '.join(cmd)}）：{r.stderr.strip().splitlines()[-1]}")
     assert r.returncode == 0, f"ruff 门禁失败（作用域/语法）:\n{r.stdout}\n{r.stderr}"
+
+
+def test_ruff_gate_is_interpreter_agnostic():
+    """回归锁：门禁不得依赖单一解释器的 ruff 安装方式（至少一种可用）。"""
+    assert _ruff_cmd() is not None, "当前环境无任何可用 ruff，门禁将静默失效"
 
 
 def test_main_script_compiles():

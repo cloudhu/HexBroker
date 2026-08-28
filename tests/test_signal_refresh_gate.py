@@ -14,7 +14,10 @@ from hexbroker.diagnostics.signal_refresh import (
     format_banner,
     maybe_auto_refresh,
     probe,
+    probe_files,
+    resolve_cache_paths,
     stale_of,
+    unknown_of,
 )
 from hexbroker.paper.scheduler import TradingScheduler
 
@@ -56,7 +59,8 @@ def test_banner_lists_stale_and_fix_command():
 
 def test_banner_empty_when_fresh():
     assert format_banner([FreshnessProbe("a", "2026-08-28 00:00", fd=0, threshold=0)]) == ""
-    assert format_banner([]) == ""
+    # 空列表 ≠ 通过（D2 修复：未探测到文件属"无法判定"，必须出横幅）
+    assert format_banner([]) != ""
 
 
 # ---- 自动刷新 ----
@@ -101,8 +105,53 @@ def test_auto_refresh_failure_and_timeout_never_raise(monkeypatch, tmp_path: Pat
 def test_real_config_auto_refresh_disabled():
     """仓库真实配置必须默认关自动刷新（生产数据操作需人工确认）。"""
     cfg = yaml.safe_load(Path("configs/paper.yaml").read_text(encoding="utf-8"))
-    assert cfg["signal_refresh"]["auto_enabled"] is False
-    assert cfg["signal_refresh"]["threshold"] == 0
+    assert cfg["paper"]["signal_refresh"]["auto_enabled"] is False
+    assert cfg["paper"]["signal_refresh"]["threshold"] == 0
+
+
+# ---- 2026-08-28 缺陷 D1/D2 回归锁（假绿防护，P0） ----
+def test_signal_refresh_lives_under_paper_section():
+    """D1：signal_refresh 必须位于 paper: 段内。
+
+    _load_paper_config 只把 paper 子段传给下游，顶层同键**永远读不到** →
+    配置静默失效（自动刷新/阈值全部回退默认）。
+    """
+    cfg = yaml.safe_load(Path("configs/paper.yaml").read_text(encoding="utf-8"))
+    assert "signal_refresh" not in cfg, "signal_refresh 误置于顶层（paper_cfg 读不到）"
+    assert "signal_refresh" in cfg["paper"]
+
+
+def test_probe_files_missing_path_is_unknown_not_silent(tmp_path: Path):
+    """D2：缺失文件必须产出"无法判定"探测项，不得静默丢弃（空列表=假绿）。"""
+    ok = _mk_cache(tmp_path, "ok.parquet", datetime.now())
+    probes = probe_files([str(ok / "ok.parquet"), str(tmp_path / "ghost.parquet")], threshold=0)
+    assert len(probes) == 2, "缺失路径被静默丢弃 → 会退化成假绿"
+    ghost = [p for p in probes if p.name == "ghost.parquet"][0]
+    assert ghost.exists is False and ghost.unknown is True
+    assert unknown_of(probes) == [ghost]
+
+
+def test_banner_flags_unknown_and_empty():
+    """无法判定（含探测结果为空）必须出横幅——"没查到"≠"通过"。"""
+    assert "无法判定" in format_banner([FreshnessProbe("a", None, None, 0, exists=False)])
+    assert "无法判定" in format_banner([])
+    # 全部新鲜且可判定 → 无横幅
+    assert format_banner([FreshnessProbe("a", "2026-08-28 00:00", 0, 0)]) == ""
+
+
+def test_production_paths_are_probeable():
+    """D2 端到端锁：真实 paper.yaml 解析出的缓存路径必须**全部可探测**。
+
+    缺陷原状：接线用 cache_dir=data/signal_caches（目录不存在）→ probe 返回 []
+    → 打印"检查通过"。本用例确保解析口径与 SignalEngine 一致且文件真实存在。
+    """
+    cfg = yaml.safe_load(Path("configs/paper.yaml").read_text(encoding="utf-8"))
+    paths = resolve_cache_paths(cfg["paper"])
+    assert paths, "paper.signal_caches 解析为空"
+    probes = probe_files(paths, threshold=0)
+    assert len(probes) == len(paths)
+    missing = [p.name for p in probes if not p.exists or p.fd is None]
+    assert not missing, f"存在无法判定的生产缓存：{missing}"
 
 
 # ---- C2：0 开仓显性汇总 ----
