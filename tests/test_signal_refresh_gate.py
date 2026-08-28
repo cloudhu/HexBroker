@@ -140,18 +140,39 @@ def test_banner_flags_unknown_and_empty():
 
 
 def test_production_paths_are_probeable():
-    """D2 端到端锁：真实 paper.yaml 解析出的缓存路径必须**全部可探测**。
+    """D2 端到端锁：真实 paper.yaml 解析出的缓存路径必须**可被探测，且缺失必告警**。
 
     缺陷原状：接线用 cache_dir=data/signal_caches（目录不存在）→ probe 返回 []
-    → 打印"检查通过"。本用例确保解析口径与 SignalEngine 一致且文件真实存在。
+    → 打印"检查通过"。
+
+    2026-08-28 二次修订（CI 假失败修复）：原实现强断言"文件必须存在"，但
+    ``artifacts/`` 与 ``*.parquet`` 均被 .gitignore 排除（数据产物本就不该入库），
+    CI 全新 checkout 里必然不存在 → 假失败。改为三段式：
+
+      A 常量断言（CI / 本地均成立）：解析非空；probe_files 绝不静默丢弃路径。
+      B 文件齐备（本地）：全部可判定新鲜度。
+      C 文件缺失（CI）：**不 skip** —— 正面验证"缺失被判为 unknown 且出横幅"。
+        这恰是 D2 反假绿的内核（"没查到" ≠ "通过"），在 CI 上反而锁得更死。
     """
     cfg = yaml.safe_load(Path("configs/paper.yaml").read_text(encoding="utf-8"))
     paths = resolve_cache_paths(cfg["paper"])
     assert paths, "paper.signal_caches 解析为空"
+
+    # A：解析口径与 SignalEngine 一致，且 probe_files 绝不静默丢弃路径
     probes = probe_files(paths, threshold=0)
-    assert len(probes) == len(paths)
-    missing = [p.name for p in probes if not p.exists or p.fd is None]
-    assert not missing, f"存在无法判定的生产缓存：{missing}"
+    assert len(probes) == len(paths), "probe_files 静默丢弃路径 → 会退化成 D2 假绿"
+    assert all(p.name for p in probes)
+
+    if all(p.exists for p in probes):
+        # B（本地）：文件齐备 → 必须全部可判定新鲜度
+        missing = [p.name for p in probes if not p.exists or p.fd is None]
+        assert not missing, f"存在无法判定的生产缓存：{missing}"
+    else:
+        # C（CI：数据产物未入库）：缺失必须显性告警，绝不能当成"通过"
+        assert all(p.unknown for p in probes if not p.exists), "缺失文件未被判为 unknown"
+        banner = format_banner(probes)
+        assert "无法判定" in banner, "缓存缺失却未告警 → D2 假绿复现"
+        assert "检查通过" not in banner
 
 
 # ---- C2：0 开仓显性汇总 ----

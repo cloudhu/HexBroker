@@ -7,6 +7,7 @@ TradingScheduler 构造之后（degrader 未定义即引用），全量 pytest 6
 from __future__ import annotations
 
 import importlib.util
+import os
 import shutil
 import subprocess
 import sys
@@ -60,8 +61,27 @@ def test_ruff_f821_gate(tmp_path: Path):
 
 
 def test_ruff_gate_is_interpreter_agnostic():
-    """回归锁：门禁不得依赖单一解释器的 ruff 安装方式（至少一种可用）。"""
-    assert _ruff_cmd() is not None, "当前环境无任何可用 ruff，门禁将静默失效"
+    """回归锁：门禁不得依赖单一解释器的 ruff 安装方式（至少一种可用）。
+
+    2026-08-28 二次修订（CI 假失败修复）：CI 的 ``test`` 与 ``lint`` 是**两个独立
+    job**，ruff 原本只装在 lint job（ci.yml）。最初本用例无条件硬断言，导致 test
+    job 报红——但那只是"该 job 没装工具"的环境差异，并非代码缺陷。故按环境分治：
+
+      · **CI**（env ``CI`` / ``GITHUB_ACTIONS``）→ 硬失败。
+        CI 上没有 ruff 意味着 ``test_ruff_f821_gate`` 整条 skip、F821 门禁静默失效，
+        这正是本锁要防的情形，必须红。
+      · **本地** → skip。开发机可能没装 ruff，不应为此阻断本地开发。
+
+    配套：ci.yml 的 test job 已补装 ruff，使 CI 上本锁真实生效而非仅兜底。
+    """
+    if _ruff_cmd() is not None:
+        return
+    if os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"):
+        pytest.fail(
+            "CI 环境无可用 ruff —— test_ruff_f821_gate 将整条 skip，"
+            "F821 门禁静默失效（须在 ci.yml 的 test job 安装 ruff）"
+        )
+    pytest.skip("本地无可用 ruff（PATH 与当前解释器均无），F821 门禁跳过")
 
 
 def test_main_script_compiles():

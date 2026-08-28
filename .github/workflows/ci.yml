@@ -31,6 +31,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install -e . --no-deps   # 验证打包配置
+          # test job 同样需要 ruff：tests/test_audit_ruff_gate.py 的 F821/F811/E9 门禁
+          # 属于 pytest 套件的一部分。此前只在 lint job 安装 → test job 上该门禁整条
+          # skip（静默失效），且 test_ruff_gate_is_interpreter_agnostic 直接失败。
+          pip install ruff
 
       - name: Run test suite
         run: |
