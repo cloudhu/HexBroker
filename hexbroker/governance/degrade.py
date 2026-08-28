@@ -21,11 +21,10 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import yaml
 
+from ..utils.logging import get_logger
 from .interlock import ResolvedMode, resolve_scheme_mode
 from .ledger import CalibrationLedger
 from .scheme import SchemeRegistry
-
-from ..utils.logging import get_logger
 
 log = get_logger("GOV")
 

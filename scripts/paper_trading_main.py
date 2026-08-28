@@ -20,7 +20,7 @@ import sys
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -78,7 +78,7 @@ def _run_governance_selfcheck() -> None:
     绝不抛异常、绝不阻断交易启动、绝不进入主循环。
     """
     try:
-        from hexbroker.governance import SchemeRegistry, resolve_scheme_mode, ResolvedMode
+        from hexbroker.governance import ResolvedMode, SchemeRegistry, resolve_scheme_mode
 
         cfg_path = "configs/scheme_governance.yaml"
         if not Path(cfg_path).exists():
@@ -291,6 +291,31 @@ def main() -> int:
     signal.signal(signal.SIGINT, _on_signal)
     signal.signal(signal.SIGTERM, _on_signal)
 
+    # P2-D：运行时降级器（默认关；enabled=false → None，零行为变更）
+    degrader = None
+    degrade_signals = None
+    try:
+        from hexbroker.governance import CalibrationLedger, RuntimeDegrader
+
+        _gov_ledger = CalibrationLedger.load("data/governance/calibration_ledger.json")
+        degrader = RuntimeDegrader.load_from_config(
+            "configs/scheme_degrade.yaml", ledger=_gov_ledger
+        )
+        if degrader is not None:
+            import yaml as _yaml
+
+            _dcfg = _yaml.safe_load(
+                Path("configs/scheme_degrade.yaml").read_text(encoding="utf-8")
+            ) or {}
+            degrade_signals = (
+                str(_dcfg.get("signals_file", "data/governance/scheme_signals.json")),
+                int(_dcfg.get("signal_max_age_sec", 900)),
+            )
+            print("[模拟盘] 治理运行时降级器已启用（仅降不升，事件留痕 ledger history）")
+    except Exception:
+        degrader, degrade_signals = None, None
+        print("[模拟盘] 治理运行时降级器初始化失败（按未启用处理）")
+
     from hexbroker.paper.scheduler import TradingScheduler
 
     scheduler = TradingScheduler(
@@ -343,36 +368,11 @@ def main() -> int:
     pid_path = Path(paper_cfg.get("data_dir", "data/paper")) / "paper.pid"
     if not _try_acquire_pid_lock(pid_path):
         print(f"[模拟盘] 已有存活实例（PID 锁 {pid_path}），拒绝重复启动以避免 trades.log 会话重放叠加。")
-        print(f"[模拟盘]   如需强制重启，请先结束该实例或删除 PID 锁文件后重试。")
+        print("[模拟盘]   如需强制重启，请先结束该实例或删除 PID 锁文件后重试。")
         return 1
 
     # P2-4 启动期治理自检（防误开联锁落地）：仅 WARNING + 强制 SHADOW，零侵入 tick
     _run_governance_selfcheck()
-
-    # P2-D：运行时降级器（默认关；enabled=false → None，零行为变更）
-    degrader = None
-    degrade_signals = None
-    try:
-        from hexbroker.governance import CalibrationLedger, RuntimeDegrader
-
-        _gov_ledger = CalibrationLedger.load("data/governance/calibration_ledger.json")
-        degrader = RuntimeDegrader.load_from_config(
-            "configs/scheme_degrade.yaml", ledger=_gov_ledger
-        )
-        if degrader is not None:
-            import yaml as _yaml
-
-            _dcfg = _yaml.safe_load(
-                Path("configs/scheme_degrade.yaml").read_text(encoding="utf-8")
-            ) or {}
-            degrade_signals = (
-                str(_dcfg.get("signals_file", "data/governance/scheme_signals.json")),
-                int(_dcfg.get("signal_max_age_sec", 900)),
-            )
-            print("[模拟盘] 治理运行时降级器已启用（仅降不升，事件留痕 ledger history）")
-    except Exception:
-        degrader, degrade_signals = None, None
-        print("[模拟盘] 治理运行时降级器初始化失败（按未启用处理）")
 
     try:
         scheduler.run()

@@ -9,14 +9,13 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .scheme import SchemeStatus
-
 from ..utils.logging import get_logger
+from .scheme import SchemeStatus
 
 log = get_logger("GOV")
 

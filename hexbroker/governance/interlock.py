@@ -10,9 +10,8 @@ from __future__ import annotations
 from enum import Enum
 from typing import Optional, Tuple
 
-from .scheme import SchemeRegistry, SchemeStatus
-
 from ..utils.logging import get_logger
+from .scheme import SchemeRegistry, SchemeStatus
 
 log = get_logger("GOV")
 
