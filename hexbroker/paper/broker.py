@@ -246,6 +246,11 @@ class PaperBroker:
         if abs(pos) < 1e-12:
             return PositionCtx(symbol=symbol, position=0.0, entry_price=0.0, atr=atr)
         d_entry = _to_date(self._broker.open_dates.get(symbol))
+        # ⚠️ 语义锁定（③语义债评估 24-bars-semantics-assessment.md）：
+        # bars_in_position 此处 = 自然日天数（含周末，min 1），非 bar 数；
+        # RL/回测侧（rl/futures_env）为真实 bar 数。bar_freq=1d 生产配置下
+        # 实盘口径 ≥ 回测口径（偏保守，S1/S4 更晚触发，无实害）。
+        # 护栏：bar_freq 改非日线前必须同步改为 session 交易日感知并过 walk-forward QA。
         bars = 1
         if d_entry is not None:
             bars = max(1, (datetime.now().date() - d_entry).days)

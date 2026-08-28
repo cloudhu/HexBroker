@@ -43,6 +43,8 @@ def detect_sell_signals(
     # S1 趋势破坏：价格 < 均线（多头）或 > 均线（空头）。
     # P0 修复（避免「开仓后 60s 秒平」的贴线穿越循环）：
     #   ① 开仓缓冲：bars_in_position < s1_min_bars 时跳过 S1，给新仓保护期；
+    #      （⚠️ 语义提示：bars_in_position 三端口径不同——RL/回测=bar 数，paper 实盘=自然日
+    #       天数，详见 24-bars-semantics-assessment.md；S4 同字段，bar_freq 改频前须对齐）
     #   ② 带宽死区：须跌破 ma − band（多头）/ 升破 ma + band（空头）才判趋势破坏，
     #      band = s1_band_atr × ATR，过滤价格贴均线微幅往返的误触发。
     if (
