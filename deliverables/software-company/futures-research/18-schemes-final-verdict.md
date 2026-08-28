@@ -129,9 +129,16 @@ P2 提交的 `data/governance/calibration_ledger.json` 中每个方案的 `sourc
 
 ## 六、留项（非阻断）
 
-1. **定量补全**：1C / 2A / 1B / 2B 精确 WR/n（及 MaxDD/净均收/PBO/DSR）待 walk-forward QA 重跑，写入 `calibration_ledger.json` 对应 `CalibrationRecord`（解除 `pending_qa`）。
-2. **ledger 引用更正**：`calibration_ledger.json` 六个方案的 `source_doc` 字段由 `03-lead-verdict.md` 更正为用户级 MEMORY 六方案定案框架表述（纯溯源标注，不影响运行时，低优先）。
+> **2026-08-28 定量补全批次更新**：留项①②已闭环（见 `19-quant-backfill-qa.md`）。
+> 1C/1B/2B/3B `pending_qa` 已解除（精确定量自云侠深快照产物回填）；2A 保留
+> `pending_qa=true`（ΔWR/ΔMaxDD 需影子期完整 fwd5 结算，无产物不编造）；
+> `source_doc` 已统一更正为云侠产物路径；3B 数值口径诚实更正（maxdd 0.1885 组合口径 /
+> 均收 +0.31% / PBO·DSR 无证据置 null，状态 NOT_PASS 不翻转，history 留痕）。
+
+1. ~~**定量补全**：1C / 2A / 1B / 2B 精确 WR/n~~ → **已闭环**（19 文档；2A ΔWR/ΔMaxDD 转影子期待办）。
+2. ~~**ledger 引用更正**~~ → **已闭环**（19 文档；source_doc → 云侠产物路径）。
 3. **运行时动态降级（P2 Q5）**：当前仅静态登记 + 启动自检；运行时按绩效/数据质量动态降级后续批次立项。
+4. （新增）2A 影子期 ΔWR/ΔMaxDD 完整 fwd5 结算补全。
 
 ---
 
