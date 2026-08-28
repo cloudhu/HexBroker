@@ -111,7 +111,7 @@ ruff 门禁分支取证（强制 `_ruff_cmd()` 返回 None）：
 
 ## 六、主理人裁决与教训
 
-- **裁决**：按修复方案执行，CI 复跑后转绿即结案。
+- **裁决**：按修复方案执行，CI 复跑后转绿即结案 → **已转绿，结案**（证据见第七章）。
 - **教训（已写入 SOP skill）**：**回归锁不得隐式假设本地开发环境**。
   本次是「接线校验门禁」的反面 —— 上一条教训是「测试用 tmp 假数据，抓不到接线缺陷」，
   这一条是「测试依赖本地真实产物，在 CI 上必然假失败」。
@@ -123,8 +123,43 @@ ruff 门禁分支取证（强制 `_ruff_cmd()` 返回 None）：
 
 ---
 
-## 七、遗留
+## 七、推送与 CI 实证复跑（结案证据）
 
-- CI 复跑确认（推送后由 GitHub Actions 自动触发）。
+### 7.1 推送
+
+```
+ead70a9..02472ee  main -> main        （EXIT=0）
+本地 HEAD = 02472ee2d603c36e718d77ca060c800e28b4cce7
+远端 HEAD = 02472ee2d603c36e718d77ca060c800e28b4cce7   （一致）
+git fsck --no-dangling  →  无输出     （对象库完好）
+```
+
+本批次 2 提交 / 4 文件，+182 −7；`hexbroker/` 零改动，`.gitignore` 未动。
+
+### 7.2 GitHub Actions 实证复跑
+
+推送后自动触发 run **33171426617**（sha `02472ee`），与修复前 run **33163600208**
+（sha `ead70a9`）形成对照：
+
+| Job | 修复前 ead70a9 | 修复后 02472ee |
+|---|---|---|
+| `lint (ruff / black / mypy)` | ✅ success | ✅ success |
+| `test (py3.11)` | ❌ failure（失败步骤：`Run test suite`） | ✅ success |
+| `test (py3.12)` | ❌ failure（失败步骤：`Run test suite`） | ✅ success |
+
+**关键反证**：`test_ruff_gate_is_interpreter_agnostic` 在 CI 环境无 ruff 时会
+`pytest.fail`（硬失败，不再是 skip）。既然 `Run test suite` 步骤由 ❌ 转 ✅，
+即证明 **ruff 在 test job 上确实已可用、F821 门禁未静默失效** —— 修复是真生效，
+而非"用例被跳过导致的假绿"。
+
+同时 `lint` job 在修复前后**一直绿**，与根因判定完全吻合：ruff 原本只装在 lint job。
+
+> 附注：run 33171426617 的 job 日志 API 返回空体（GitHub 侧日志已归档），
+> 故改用 job steps 结论 + 上述反证链完成取证，未依赖日志正文。
+
+### 7.3 遗留
+
 - 先前遗留项仍未决：**P1-b** 配额重置后自动补刷；**P1-c** 数据源冗余；
   **P1-d** 08-27 日盘任务为何 0 落盘。
+- 手动项：`C:\Users\Administrator\.workbuddy\plugins\marketplaces\_BACKUPS_STAGED_FOR_DELETION_20260828`
+  （492MB）由用户确认后删除。
