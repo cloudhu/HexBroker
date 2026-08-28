@@ -44,6 +44,8 @@ class TradingScheduler:
         reporter: Any,
         stop_event: Optional[threading.Event] = None,
         run_days: Optional[int] = None,
+        degrader: Optional[Any] = None,          # P2-D 运行时降级器（默认 None=零行为变更）
+        degrade_signals: Optional[tuple] = None,  # (signals_file, max_age_sec)
     ) -> None:
         self._cfg = cfg
         self._session = session
@@ -73,6 +75,8 @@ class TradingScheduler:
 
         self._stop_event = stop_event if stop_event is not None else threading.Event()
         self._run_days = run_days
+        self._degrader = degrader
+        self._degrade_signals = degrade_signals
 
         # 运行状态
         self._current_day: Optional[date] = None
@@ -202,6 +206,27 @@ class TradingScheduler:
 
         self._maybe_poll_intel(now)
         self._maybe_snapshot(now)
+        self._maybe_degrade(now)   # P2-D：治理运行时降级评估（默认关，节流+异常隔离）
+
+    def _maybe_degrade(self, now: datetime) -> None:
+        """P2-D 运行时降级：读信号文件→规则评估（触发=LIVE 方案降 SHADOW 并留痕）。
+
+        degrader 未启用（None）时直接返回；节流/新鲜度/异常全部在此隔离，绝不影响交易 tick。
+        """
+        if self._degrader is None:
+            return
+        try:
+            if not self._degrader.should_evaluate(now):
+                return
+            if self._degrade_signals is None:
+                return
+            from hexbroker.governance import read_signals_file  # 懒加载（红线纪律）
+
+            path, max_age = self._degrade_signals
+            signals = read_signals_file(path, max_age)
+            self._degrader.observe_and_evaluate(signals)
+        except Exception:
+            log.exception("治理降级评估异常（已隔离，不影响交易 tick）")
 
     # ------------------------------------------------------------------
     # 单品种管道：quote → signal → risk → plan → execute → log

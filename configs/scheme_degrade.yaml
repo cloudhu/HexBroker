@@ -1,0 +1,20 @@
+# =============================================================================
+# 运行时动态降级配置（P2-D，Q5 留项落地）
+# 默认关闭（enabled: false）→ RuntimeDegrader.load_from_config 返回 None，零行为变更。
+# 信号文件：data/governance/scheme_signals.json（外部写入者：云侠侧/人工）
+#   格式：{"generated_at": "2026-08-28T14:00:00", "signals": {"1C": {"rolling_wr": 0.40, "n": 25}}}
+# 规则语义：signals[sid][metric] < threshold 且 n >= min_n 才触发（样本护栏，无证据不裁决）。
+# 仅降不升：触发后生效模式 LIVE→SHADOW，信号恢复不自动升回（升回走联锁+校准记录，主理人拍板）。
+# 降级不热改本文件/寄存器 status；事件留痕 calibration_ledger.json history，重启后由主理人固化。
+# =============================================================================
+enabled: false
+signals_file: data/governance/scheme_signals.json
+signal_max_age_sec: 900        # 信号文件超过 15 分钟视为无信号，不评估
+min_interval_sec: 300          # 评估节流（与轮询解耦）
+
+rules: []                      # 示例（启用时参考）：
+# - scheme_id: "1C"
+#   metric: rolling_wr         # 信号字段
+#   threshold: 0.45            # 跌破红线触发
+#   min_n: 30                  # 样本护栏
+#   rule_id: 1c_rolling_wr     # 留痕标识（可选）

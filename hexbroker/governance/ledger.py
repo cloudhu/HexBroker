@@ -106,5 +106,9 @@ class CalibrationLedger:
     def ids(self):
         return list(self._current.keys())
 
+    def append_history(self, scheme_id: str, event: Dict[str, Any]) -> None:
+        """向 history[sid] 追加任意留痕事件（P2-D 运行时降级用，append-only）。"""
+        self._history.setdefault(scheme_id, []).append(dict(event))
+
     def has(self, scheme_id: str) -> bool:
         return scheme_id in self._current

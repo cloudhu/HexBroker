@@ -306,6 +306,8 @@ def main() -> int:
         reporter=comp["reporter"],
         stop_event=stop_event,
         run_days=args.days,
+        degrader=degrader,
+        degrade_signals=degrade_signals,
     )
 
     if args.smoke:
@@ -346,6 +348,31 @@ def main() -> int:
 
     # P2-4 启动期治理自检（防误开联锁落地）：仅 WARNING + 强制 SHADOW，零侵入 tick
     _run_governance_selfcheck()
+
+    # P2-D：运行时降级器（默认关；enabled=false → None，零行为变更）
+    degrader = None
+    degrade_signals = None
+    try:
+        from hexbroker.governance import CalibrationLedger, RuntimeDegrader
+
+        _gov_ledger = CalibrationLedger.load("data/governance/calibration_ledger.json")
+        degrader = RuntimeDegrader.load_from_config(
+            "configs/scheme_degrade.yaml", ledger=_gov_ledger
+        )
+        if degrader is not None:
+            import yaml as _yaml
+
+            _dcfg = _yaml.safe_load(
+                Path("configs/scheme_degrade.yaml").read_text(encoding="utf-8")
+            ) or {}
+            degrade_signals = (
+                str(_dcfg.get("signals_file", "data/governance/scheme_signals.json")),
+                int(_dcfg.get("signal_max_age_sec", 900)),
+            )
+            print("[模拟盘] 治理运行时降级器已启用（仅降不升，事件留痕 ledger history）")
+    except Exception:
+        degrader, degrade_signals = None, None
+        print("[模拟盘] 治理运行时降级器初始化失败（按未启用处理）")
 
     try:
         scheduler.run()

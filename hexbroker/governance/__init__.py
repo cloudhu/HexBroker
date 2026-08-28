@@ -11,6 +11,7 @@ from .interlock import (
     resolve_scheme_mode,
 )
 from .ledger import CalibrationRecord, CalibrationLedger
+from .degrade import DegradeEvent, DegradeRule, RuntimeDegrader, read_signals_file
 
 __all__ = [
     "SchemeStatus",
@@ -23,4 +24,8 @@ __all__ = [
     "resolve_scheme_mode",
     "CalibrationRecord",
     "CalibrationLedger",
+    "DegradeRule",
+    "DegradeEvent",
+    "RuntimeDegrader",
+    "read_signals_file",
 ]
