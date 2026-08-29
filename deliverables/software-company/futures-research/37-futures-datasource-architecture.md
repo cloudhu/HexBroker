@@ -726,7 +726,7 @@ enrich_raw_close(df, sym0, *, fetcher=None, min_coverage=0.9)
 
 ---
 
-### 4.17 P0-11 rb0/2020 真值重建驱动器（真值拉取待会话重载）
+### 4.17 P0-11 rb0/2020 真值重建驱动器（✅ 已执行完毕）
 
 **前提变化**：pandadata 连接器已恢复 connected（2026-08-29 16:39 实测 UI
 状态），但 **pandadata MCP 工具未注册进本会话**（会话启动时连接器仍是
@@ -752,7 +752,7 @@ python scripts/p11_truth_rebuild.py --persisted ... --apply
 `p6_4.load_persisted_rows` + `normalize_new_df`（含 RAW_SCALE_FIX）→
 P1-c `enrich_raw_close`（重建分区**直接带真名义价**）→
 P0-9 `rebuild_partition`（missing 路径：整分区新建 + 自动清
-`_MISSING_2020.json` + manifest `source=truth-rebuild`）→
+`_MISSING_2020.json`）→
 重建后自动验证（全量行数 / quality_notes 洞消除 / 2019→2020→2021
 adj 边界连续性，>10% 假跳变即红牌）。
 跨界保险：真值非目标年度行先过滤，`rebuild_partition` 跨界拒绝兜底。
@@ -761,9 +761,39 @@ adj 边界连续性，>10% 假跳变即红牌）。
 跨界行过滤 / 文件缺失 rc=2 / 年度无交集 rc=1 零写盘）；全量
 **858 passed**（853 + 5）；ruff 全过；生产 `data/` 零写盘。
 
-**剩余动作（待会话重载）**：①新会话确认 pandadata 工具注册 + `auth_status`
-→ ②拉 RB 2020 全年 close_pcr → ③跑驱动器 `--apply` → ④QA 复核
-（fsck / 全量回归 / load_processed 行数 ~1855+242）。
+**剩余动作（待会话重载）**：~~①新会话确认 pandadata 工具注册 + `auth_status`
+→ ②拉 RB 2020 全年 close_pcr → ③跑驱动器 `--apply` → ④QA 复核~~
+→ **全部已执行，见 §4.18。**
+
+### 4.18 P0-11 执行记录（2026-08-29 17:19，rb0/2020 真值重建 ✅）
+
+**环境刷新确认**：新会话启动后 `ToolSearch` 实测 `mcp__pandadata__*` 五工具
+（`auth_status` / `call_pandadata` / `get_method_doc` / `list_methods` /
+`search_methods`）**已全部注册**；`auth_status` 返回
+`ok=true, data_mode=gateway, token 剩余有效期 ~28 天`——上一段的
+401/未注册阻塞正式解除。
+
+**执行链（与 §4.17 预案逐步对应）**：
+
+| 步骤 | 动作 | 结果 |
+|---|---|---|
+| ①真值拉取 | `get_future_daily_post`，`underlying_symbol="RB"`，`20200101~20201231`，`method=close_pcr` | 243 行落盘 `artifacts/p11_rb0_2020_truth.json`（gitignored，仅本地留痕）；预检：区间 20200102→20201231、无重复日期、close 无 NaN、RB 单品种 |
+| ②dry-run | 默认零写盘 | 解析 243 行 → `enrich_raw_close` 名义价回填 **sina 243/243（100%）**；预览 `raw_close=3547.0 ≠ adj_close=3822.93`，两列语义分离；计划动作=新建 2020.parquet + 清 `_MISSING_2020.json` |
+| ③--apply | 落盘 | `status=OK rows 0→243 appended=243 marker_cleared=True`；rb0 全量 **2098 行**（2018-01-02 ~ 2026-08-28）；quality_notes hole=0 |
+| ④边界验证 | 自动 | 2019→2020 adj 跳变 **0.6164%**、2020→2021 **0.1139%**，均远低于 10% 红牌 |
+| ⑤零污染 QA | mtime diff + sha256 | 恰好 3 处预期变化（+2020.parquet 24998B / manifest 重写 / `_MISSING_2020.json` 移除）；其余 8 个年度 parquet 尺寸逐字节与 apply 前基线一致 |
+| ⑥全量回归 | pytest | 858 passed（见 §8 验证链） |
+
+**🔴 实测发现（P0-9 遗留，代码-文档不一致，建议 P2 跟进）**：
+`rebuild.py` L249 docstring 声称 manifest `source="truth-rebuild"`，但
+missing 路径经 `DataLake.save_processed(...)`（L312-314）落盘，manifest 由
+save_processed 按"最近一次写入"语义重算 → 实际 `source="lake"`，
+`n_rows=243`、`date_range=[2020-01-02, 2020-12-31]` 只描述新分区而非整个
+freq 目录（与 §4.15 记录的 save_processed 语义一致）。**数据本体无影响**
+（2020.parquet 243 行正确、边界连续、标记清除），仅 manifest 字段语义与
+docstring 不符。按范围纪律未在执行中改动 P0-9 模块，留待主理人裁决：
+(A) 修正 docstring（承认 save_processed 语义）；或 (B) rebuild_partition
+在 save_processed 后回写 `source="truth-rebuild"`（需新增测试）。
 
 
 ## 7. 待办（按优先级）
@@ -782,9 +812,11 @@ adj 边界连续性，>10% 假跳变即红牌）。
 - [x] ~~**🔴 P0-10 年度口径一致性审计**（§6.5.7）~~ → **审计完成，见 §4.12**：
       缺陷确认且仅限 cu0/rb0 的 2023 年度（外部 k 校准 + 内部边界跳变交叉定罪）；
       检测器已固化为 `caliber`（12 测试）。**处置待拍板**（隔离/备案/真值重建）。
-- [ ] **P0-11 `rb0/2020` 重建**：pandadata 已恢复连接但 MCP 工具需**会话重载**
-      才注册；重建驱动器已就绪（§4.17），真值到位后一条命令完成
-      （dry-run → --apply，自动清标 + 边界验证）。
+- [x] ~~**P0-11 `rb0/2020` 重建**~~ → **已完成，见 §4.17/§4.18**：pandadata
+      MCP 工具在新会话注册成功；真值 243 行（close_pcr）→ dry-run →
+      `--apply`：2020.parquet 新建（243 行，raw_close 名义价 100% 覆盖）、
+      `_MISSING_2020.json` 清除、全量 2098 行、边界跳变 0.61%/0.11%；
+      零污染 QA 通过；遗留：manifest `source` 语义与 docstring 不符（§4.18）。
 - [x] ~~**P0-12 缺失年度显式化**~~ → **已完成，见 §4.13**：`load_processed`
       洞/标记逐条告警（数据行为不变），`quality_notes` 结构化三类提示；
       `MISSING_GLOB` 收口 store 定义。

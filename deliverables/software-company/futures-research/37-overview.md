@@ -68,7 +68,7 @@
 | **P0-12** | 缺失年度显式化：`load_processed` 洞/标记逐条告警（数据行为不变）+ `quality_notes` 三类结构化提示 | ✅ |
 | **P1-c** | 🆕 `raw_close` 列语义修复：parse 阶段 `enrich_raw_close` 备源名义价回填（失败大声降级），实测 raw_close ≠ adj_close | ✅ 新写入 / 🟡 存量回填待拍板 |
 | **P1-b** | 🆕 生产 manifest 增量回填 16 品种（`skip_existing` 防触碰盘中自动化 manifest），processed 层覆盖 2 → 18 | ✅ |
-| **P0-11** | 🆕 `rb0/2020` 真值重建驱动器就绪（dry-run/--apply + 自动清标 + 边界验证）；**真值拉取待会话重载注册 pandadata 工具** | 🟡 驱动器 ✅ / 执行阻断 |
+| **P0-11** | 🆕 `rb0/2020` 真值重建**执行完毕**：pandadata MCP 新会话注册成功 → 真值 243 行（close_pcr）→ dry-run → --apply：2020.parquet 新建（raw_close 名义价 100% 覆盖）、`_MISSING_2020.json` 清除、全量 2098 行、边界跳变 0.61%/0.11%、零污染 QA 通过；遗留：manifest `source` 语义与 rebuild.py docstring 不符（P2 跟进） | ✅ |
 | **P0-12** | 缺失年度显式化（`load_processed` 静默跳过） | ✅（重复行，上为准） |
 | **P0-13** | `hc0`/`ni0` OHLC 包络校验失败：根源端毛刺 bar（各 1 根）；`schema.repair_envelope` 收口三源修复，akshare 补缺失步骤 + 大声告警 | ✅ |
 
@@ -157,6 +157,18 @@
     名义价回填 + P0-9 rebuild_partition，dry-run 默认），重建分区将
     **直接携带真名义价**。新会话执行：拉真值 → --apply → 自动清标 +
     边界连续性验证。
+20. **🆕 P0-11 执行闭环（2026-08-29 17:19）**：新会话 pandadata 五工具注册
+    成功（gateway，token 剩 ~28 天）→ RB 2020 真值 243 行（close_pcr，
+    无重复无 NaN）→ dry-run 预览名义价回填 sina 243/243（100%）→
+    --apply：2020.parquet 新建 243 行（`raw_close=3547 ≠ adj_close=3822.93`
+    两列语义分离直接生效于重建分区）、`_MISSING_2020.json` 清除、
+    rb0 全量 **2098 行**、边界跳变 2019→2020 **0.6164%** / 2020→2021
+    **0.1139%**、零污染 QA（除预期 3 处变化外 8 个年度 parquet 逐字节
+    未动）、全量回归 858 passed。
+    ⚠️ 实测发现：rebuild.py missing 路径经 `save_processed` 落盘，manifest
+    实际 `source="lake"`（"最近一次写入"语义），与 L249 docstring 声称的
+    `source="truth-rebuild"` 不符 —— 数据本体无影响，P2 跟进
+    （改 docstring 或 rebuild 后回写 source）。
 
 ---
 
@@ -232,7 +244,7 @@
 2. **Q6**：收盘价 vs 结算价 —— 实测两者同口径可任选，选哪个？
 3. **🔴 pandadata 连接器 token 失效**，是否现在恢复授权？（主源不可用期间，
    整个备源链路的优先级建议上调；`rb0/2020` 的重拉也卡在这里）
-4. **下一步优先级**：P0-9 ✅、编排器 ✅、P0-10 审计 ✅（处置待拍板）、P0-12 ✅、P0-13 ✅、P1-b ✅、P1-c ✅（存量回填待拍板）、P0-11 驱动器 ✅（执行待会话重载）。剩余拍板项 = cu0/rb0 2023 处置 / raw_close 存量回填；剩余执行 = 新会话拉真值跑 P0-11 --apply、扁平层 manifest 另案。
+4. **下一步优先级**：P0-9 ✅、编排器 ✅、P0-10 审计 ✅（处置待拍板）、P0-12 ✅、P0-13 ✅、P1-b ✅、P1-c ✅（存量回填待拍板）、P0-11 ✅（rb0/2020 真值重建执行闭环）。剩余拍板项 = cu0/rb0 2023 处置 / raw_close 存量回填 / rebuild manifest source 语义（P2）；剩余执行 = 扁平层 manifest 另案。
 5. **🔴 cu0/rb0 2023 处置拍板**：①隔离 + `_MISSING_2023.json`（留 1 年洞，需 P0-12 配套）②保留 + 备案 ③等授权恢复后真值重建？
 5. **🔴 新增 · 2023 年度口径断裂**（rb0/cu0 存未复权名义价，跨年约 35% 假跳空）：
    是否立 P0-10 优先处理？影响所有跨 2023 年的回测与训练，且数据"看起来完全正常"。
