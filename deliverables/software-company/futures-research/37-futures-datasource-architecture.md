@@ -458,6 +458,46 @@ schema 全对、串扰解除；manifest 同步为 `n_rows=156`。
 
 ---
 
+### 4.10 P0-9 provisional 标记与真值重建流水线（`rebuild`）
+
+**落地模块**：`hexbroker/data/rebuild.py`（约 330 行）+ `hexbroker/data/test_rebuild.py`（22 测试）。
+
+**契约设计**（三点关键决策）：
+
+1. **标记用独立 sidecar `_provisional.json`，不进 manifest**。理由：manifest
+   会被 `DataLake.save_processed` 在每次常规写入时整份重建，provisional
+   状态挂在那里会被冲掉；sidecar 生命周期独立、可幂等合并日期、损坏时
+   重建（标记丢失方向是保守的——未标记即当真值用，挂标操作方负责及时挂）。
+2. **重建 = 逐行替换 + 追加，只清被真值覆盖的日期**。真值未覆盖到的
+   临时日期**保留挂标**——绝不静默把临时值转正（专项回归测试
+   `test_no_overlap_keeps_all_marks`：真值一行没对上时全标记保留、分区不动）。
+   这是对"零告警也有 21.35 bp 误差"教训的直接落地：**宁可长期挂标，不可静默转正**。
+3. **真值来源注入（`truth_fetcher`），模块不绑定任何数据源**；拉取异常逐对象
+   隔离（单点失败不中断整批，进 `report.skipped`）；schema 列集合不一致直接
+   SKIPPED（宁可跳过，不可部分写入）。
+
+**API 一览**：
+
+```
+mark_provisional(root, layer, symbol, freq, year, dates, *, method, anchored_at, reason)
+clear_provisional(root, layer, symbol, freq, year=None, dates=None) -> bool
+scan_rebuild_needed(root, layer="processed") -> list[RebuildNeeded]
+    # 同时扫 _provisional.json 与 _MISSING_*.json（后者含 2026-08-29 事故的
+    # rb0/2020 隔离标记），同 (symbol,freq,year) 双标记合并为一条
+rebuild_partition(root, item, truth) -> RebuildResult   # replaced/appended/uncovered
+rebuild_pipeline(root, truth_fetcher, *, layer, symbols=None) -> RebuildReport
+```
+
+**与 P0-12 的衔接**：`_MISSING_*.json` 标记由本模块负责"重建后清除"；
+但 `load_processed` 读路径对缺失年度的**告警**仍归 P0-12（本模块不改编
+读行为）。
+
+**验证**：22 测试全过（含静默转正回归门禁）；全量 **796 passed**；ruff 全过；
+`data/` 零改动（护栏在线）。
+
+---
+
+
 ## 7. 待办（按优先级）
 
 ### P0（未完）
@@ -466,7 +506,8 @@ schema 全对、串扰解除；manifest 同步为 `n_rows=156`。
 - [x] ~~**P0-6 换月检测与告警**~~ → **部分完成**：前向预测路线实测不可靠（持仓量拐点
       命中率约一半），已改为 **事后对账 + `provisional` 标记**（§4.9）。
       真正的重建流水线归 P0-9。
-- [ ] **P0-9 provisional 标记与重建流水线**（§6 约束 6 的落地）
+- [x] ~~**P0-9 provisional 标记与重建流水线**~~ → **已完成，见 §4.10**
+      （sidecar 挂标 + scan + 真值重建 + 只清覆盖日期，22 测试）
 - [ ] **故障切换编排器**：主 → 备1 → 备2 三级降级，按 §4.1 的异常类型差异化路由
 - [ ] **🔴 P0-10 年度口径一致性审计**（§6.5.7）：rb0/cu0 的 2023 分区为未复权
       名义价，跨年拼接产生约 35% 假跳空。需全品种全年度扫描 + 修复或标记。
