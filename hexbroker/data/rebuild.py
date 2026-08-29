@@ -33,13 +33,13 @@ import pandas as pd
 from .. import HexDataError
 from ..utils.io import read_parquet, write_json, write_parquet
 from .manifest import build_manifest, write_manifest
-from .store import DataLake
+from .store import MISSING_GLOB, DataLake
 
 #: provisional sidecar 文件名（与分区 manifest.json 同目录）
 PROVISIONAL_SIDECAR = "_provisional.json"
 
-#: 显式缺失标记的通配（2026-08-29 事故引入，rebuild_condition 满足后重建）
-MISSING_GLOB = "_MISSING_*.json"
+#: ``MISSING_GLOB``（"_MISSING_*.json"）自 P0-12 起定义于 :mod:`.store`
+#: 并在此转出（保持既有公共名兼容；store 是本模块的被依赖方）。
 
 #: 必须存在的最小列集合（missing 分区重建时校验真值用）
 _MIN_TRUTH_COLS = ("datetime", "symbol")
