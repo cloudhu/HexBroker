@@ -919,6 +919,45 @@ appended=0**，分区行数不变。
    raw_close 本已是真值 → 与回填无因果，**不定罪、不处置**；
 4. 全量回归 **869 passed**（864 + 5），EXIT=0。
 
+### 4.22 交易所官方源接入：CZCE ✅ / SHFE-INE ⛔ 本环境不可达（P1）
+
+**SHFE/INE 取证（2026-08-29 复测，推翻"路径修正即可用"预期）**：
+- `dailystock/dailydata/dailytrade/dayquotes.dat` 与 `.json` 变体在
+  `/data/tradedata/future/dailydata/` 下**全部 404**（20260828 交易日）；
+- `tsite.shfe.com.cn` DNS 不通（000）；
+- 官网 `dailydata.html` 返回**WAF 人机识别页**（"当前正在对访问请求进行
+  人机识别检测"）—— HTML 页面被拦，数据端点文件名不明 → **本环境不可达**
+  （与 DCE 412 同类，需换网络环境/浏览器指纹，降级 P2）。
+
+**CZCE 端点确认（主理人 08-28 验证 + 本轮复测）**：
+`https://www.czce.com.cn/cn/DFSStaticFiles/Future/{yyyy}/{yyyymmdd}/
+FutureDataDaily.txt` → 200 / ~37.6 KB（`http://` 301 → https；`.htm` 页面 412）。
+
+**实现（`hexbroker/data/sources/czce_source.py`）**：
+- 管道分隔 14 列，表头文字定位（不依赖列序）；千分位逗号清洗；
+  `小计/合计` 行跳过；GBK 解码；
+- **主力连续语义差异（大声声明）**：官方只有分合约行情 → `cf0` 解析为
+  品种 `CF`，**逐日取 OI 最大合约**近似主力 —— 切换日可能与新浪规则不同日，
+  交叉校验容差应放宽预期；单合约（`CF701`）直取；
+- 仅覆盖郑商所品种，其它品种明确 `HexEmptyDataError`（备源链据此归因降级）；
+- 非交易日/未发布 → 404 跳过；网络异常 → `HexNetworkError`（不静默）；
+  全部日期无数据 → `HexEmptyDataError`；
+- `amount` 万元 → 元（×1e4）；保留 `settlement`（今结算，与 sina 先例一致）；
+  包络修复委托 `repair_envelope`（第四源收口）。
+
+**备源接线**：`DEFAULT_BACKUP_SOURCES`/`KNOWN_BACKUP_SOURCES` =
+`("sina", "akshare", "czce")`（第三优先级——语义差异 + 品种覆盖最窄），
+`_build_source` 新增分支。
+
+**验证（证据链）**：
+- +10 测试（真实样例固化：解析/千分位/小计跳过/主力 OI 选择/单合约直取/
+  404 跳日/全 404 空错/非郑商所品种干净报错/网络异常大声/freq 门禁）；
+- **真实联网冒烟（fresh eyes）**：CF/SR/TA × 5 交易日（2026-08-24~28）
+  **15/15 与 sina 完全一致（diff=0.00e+00）** —— 当日 OI 最大主力近似与
+  新浪规则在这 5 天内一致；`p36` 冒烟脚本接入 czce（郑商所品种子集），
+  三源全绿 `sina OK / akshare OK / czce OK rows=15`；
+- 全量回归 **879 passed**（869 + 10），EXIT=0。
+
 
 ## 7. 待办（按优先级）
 
@@ -966,8 +1005,10 @@ appended=0**，分区行数不变。
   保留为常态化防线。
 
 ### P1
-- [ ] SHFE / INE 官方源路径修正（`/data/tradedata/future/dailydata/`）
-- [ ] CZCE `.txt` 官方源接入（已验证 24 合约）
+- [x] ~~SHFE / INE 官方源路径修正~~ → **复测不可达（§4.22）**：数据端点全 404 +
+      官网 WAF 人机识别拦截，降级 P2（与 DCE 同类，需换环境）
+- [x] ~~CZCE `.txt` 官方源接入（已验证 24 合约）~~ → **已完成，见 §4.22**：
+      第三备源接线 + 10 测试 + 真实冒烟 15/15 与 sina 一致 + 879 passed
 - [x] ~~`p6_4_apply_persisted_dir.py --trading-day` 语义缺口~~ → **已完成，见 §4.7**
 - [ ] dominant 日历本地快照化（§3）
 
@@ -1035,6 +1076,10 @@ appended=0**，分区行数不变。
 | `tests/test_p11_truth_rebuild.py` | +2 整年替换测试（脏值清零 / 未覆盖中止，§4.20） |
 | `scripts/p37_raw_close_backfill.py` | 🆕 任务 ①：存量 raw_close 离线批量回填驱动器（§4.21） |
 | `tests/test_p37_raw_close_backfill.py` | 🆕 5 测试（含 BackupExhaustedError 根因回归门禁，§4.21） |
+| `hexbroker/data/sources/czce_source.py` | 🆕 CZCE 官方源（第三备源，主力=当日 OI 最大近似，§4.22） |
+| `tests/test_czce_source.py` | 🆕 10 测试（真实样例契约固化，§4.22） |
+| `hexbroker/data/backup.py` | `DEFAULT/KNOWN_BACKUP_SOURCES` += czce，`_build_source` 分支 |
+| `scripts/p36_smoke_sources.py` | 接入 czce 冒烟（郑商所品种子集） |
 | `artifacts/p0_13_probe_20260829.log` | 🆕 探针证据存档 |
 | `hexbroker/data/manifest.py` | P1-b：`backfill_manifests` 新增 `skip_existing` 增量模式（防覆盖生产 manifest，幂等）；§4.19：`backfill_flat_manifests` 扁平面板回填 + `build_manifest` 单层 DatetimeIndex date_range |
 | `scripts/backfill_manifests.py` | 新增 `--skip-existing` 旗标 |
