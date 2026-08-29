@@ -38,7 +38,7 @@
 
 | 项 | 结果 |
 |---|---|
-| 测试 | **895 passed**（677 → … → 879 → 888 → 895，+9 dominant 日历快照，+7 p42 对账探针） |
+| 测试 | **901 passed**（677 → … → 888 → 895 → 901，+9 dominant 日历快照，+7 p42 对账探针，+6 p43 修复驱动器） |
 | 静态门禁 | 改动文件 ruff **全通过** |
 | 真实联网 | 18/18 品种双源（sina / akshare）末日 **2026-08-28** |
 | 仓库完整性 | `git fsck --no-dangling` **无输出**，对象库完整 |
@@ -255,7 +255,7 @@
 2. **Q6**：收盘价 vs 结算价 —— 实测两者同口径可任选，选哪个？
 3. **🔴 pandadata 连接器 token 失效**，是否现在恢复授权？（主源不可用期间，
    整个备源链路的优先级建议上调；`rb0/2020` 的重拉也卡在这里）
-4. **下一步优先级**：**P0 全清、P1 全清**（CZCE 第三备源 + dominant 日历快照化均落地）；P2 剩 DCE/pytdx/东财/SHFE-INE（均需换网络环境）。**三大拍板项全部裁决并执行完毕（cu0/rb0 2023 真值重建 / raw_close 存量批量 / rebuild source 语义 docstring 修正）**。生产湖 raw_close 全量 162 分区均为真名义价，备份 `data/p37_backup_processed_20260829T101345` 可回滚；dominant 首个快照 `data/raw/interim/dominant/rb0.parquet`（242 行）已落盘。
+4. **下一步优先级**：**P0 全清、P1 全清**（CZCE 第三备源 + dominant 日历快照化均落地）；P2 剩 DCE/pytdx/东财/SHFE-INE（均需换网络环境）+ **🔴 raw_close 单日残留 --apply 待拍板**（p43 工具就绪：dry-run 161 处 / 0 拦截 / 数学精确 / 独立验证，§4.25）。**三大拍板项全部裁决并执行完毕（cu0/rb0 2023 真值重建 / raw_close 存量批量 / rebuild source 语义 docstring 修正）**。生产湖 raw_close 全量 162 分区均为真名义价，备份 `data/p37_backup_processed_20260829T101345` 可回滚；dominant 快照 `data/raw/interim/dominant/{rb0,cu0}.parquet`（485/242 行）已落盘。
 5. **🔴 cu0/rb0 2023 处置拍板**：①隔离 + `_MISSING_2023.json`（留 1 年洞，需 P0-12 配套）②保留 + 备案 ③等授权恢复后真值重建？
 5. **🔴 新增 · 2023 年度口径断裂**（rb0/cu0 存未复权名义价，跨年约 35% 假跳空）：
    是否立 P0-10 优先处理？影响所有跨 2023 年的回测与训练，且数据"看起来完全正常"。
