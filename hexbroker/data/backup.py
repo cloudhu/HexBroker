@@ -34,11 +34,11 @@ from .sources import AkshareSource, SinaSource
 
 #: 默认优先级。新浪在前（直连、无第三方依赖），akshare 在后（同一上游的
 #: 另一层解析，仅防接口格式变更）。
-DEFAULT_BACKUP_SOURCES = ("sina", "akshare")
+DEFAULT_BACKUP_SOURCES = ("sina", "akshare", "czce")
 
 #: 已知备源名。**构造时即校验** —— 配置错误应在建对象时炸，
 #: 而不是伪装成"全部备源失败"这种误导性信息。
-KNOWN_BACKUP_SOURCES = ("sina", "akshare")
+KNOWN_BACKUP_SOURCES = ("sina", "akshare", "czce")
 
 
 @dataclass
@@ -79,6 +79,10 @@ def _build_source(name: str, root: str | None, save: bool) -> DataSource:
         return SinaSource(root=root, save=save)
     if name == "akshare":
         return AkshareSource(root=root, save=save)
+    if name == "czce":
+        from .sources.czce_source import CzceSource
+
+        return CzceSource(root=root, save=save)
     raise HexDataError(f"未知备源名：{name}（可选：{KNOWN_BACKUP_SOURCES}）")
 
 

@@ -13,7 +13,7 @@
 ----
     python scripts/p36_smoke_sources.py                    # 冒烟全部品种
     python scripts/p36_smoke_sources.py --symbols rb0,cu0  # 指定品种
-    python scripts/p36_smoke_sources.py --sources sina,akshare
+    python scripts/p36_smoke_sources.py --sources sina,akshare,czce
     python scripts/p36_smoke_sources.py --lookback-days 10 --fresh-days 5
 
 退出码
@@ -64,7 +64,18 @@ def _build(sources: list[str]):
             built["akshare"] = AkshareSource()
         except Exception as exc:  # noqa: BLE001
             built["akshare"] = exc
+    if "czce" in sources:
+        try:
+            from hexbroker.data.sources.czce_source import CzceSource
+
+            built["czce"] = CzceSource(save=False)
+        except Exception as exc:  # noqa: BLE001
+            built["czce"] = exc
     return built
+
+
+#: CZCE 官方源仅覆盖郑商所品种（其余品种 fetch_bars 明确空错误）
+CZCE_SYMBOLS = ["cf0", "sr0", "ta0"]
 
 
 def probe(src, symbols: list[str], start: str, end: str, fresh_days: int) -> dict:
@@ -111,7 +122,7 @@ def pd_Timestamp(x):  # noqa: N802 - 局部小工具，避免顶层 import panda
 def main() -> int:
     ap = argparse.ArgumentParser(description="P36 数据源真实联网冒烟")
     ap.add_argument("--symbols", default=",".join(ALL_SYMBOLS), help="逗号分隔的品种列表")
-    ap.add_argument("--sources", default="sina,akshare", help="逗号分隔的源列表")
+    ap.add_argument("--sources", default="sina,akshare,czce", help="逗号分隔的源列表")
     ap.add_argument("--lookback-days", type=int, default=10, help="请求窗口回看天数")
     ap.add_argument("--fresh-days", type=int, default=5, help="新鲜判定容忍天数")
     ap.add_argument("--end", default=None, help="请求结束日，默认今天")
@@ -147,7 +158,8 @@ def main() -> int:
             )
             print(f"  [{name}] SKIP 构造失败: {src}")
             continue
-        rec = probe(src, symbols, start, end, args.fresh_days)
+        rec = probe(src, CZCE_SYMBOLS if name == "czce" else symbols,
+                    start, end, args.fresh_days)
         results.append(rec)
         flag = "OK  " if rec["ok"] and rec["fresh"] else ("STALE" if rec["ok"] else "FAIL")
         print(
