@@ -45,7 +45,7 @@ import sys
 from collections import Counter
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import pandas as pd
 from dateutil.relativedelta import relativedelta
@@ -511,6 +511,72 @@ def coerce_schema(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def enrich_raw_close(df: pd.DataFrame, sym0: str, *,
+                     fetcher: Any = None,
+                     min_coverage: float = 0.9) -> tuple[pd.DataFrame, list[str]]:
+    """P1-c：用外部备源名义价回填 ``raw_close``。
+
+    背景（37 号 §4.12）：pandadata ``close_pcr`` 只供复权价，管线原映射
+    ``raw_close = adj_close = close``，湖内 nominal 校准信息完全丢失，
+    "名义价冒充"无法湖内自检（P0-10 只能靠外部探针定罪）。
+
+    契约（静默即事故）：
+    - 对齐成功（覆盖率 ≥ min_coverage）→ ``raw_close`` 写真实名义价，
+      notes 记录来源与覆盖行数；
+    - 失败（备源全败 / 覆盖率不足 / 空帧）→ **原样返回**（``raw_close``
+      仍为 adj 复制品），notes 含归因 —— 调用方必须逐条打印，
+      禁止静默吞掉。
+
+    all-or-nothing：不做部分对齐，避免同一列内语义混杂。
+
+    ``fetcher`` 供测试注入（鸭子类型：只需 ``fetch_raw``）；默认惰性构造
+    ``BackupRawFetcher(save=False)``（备源绝不落数据湖）。
+    """
+    notes: list[str] = []
+    if df.empty:
+        return df, ["空帧，跳过名义价回填"]
+    if fetcher is None:
+        from hexbroker.data.backup import BackupRawFetcher
+        fetcher = BackupRawFetcher(root=None, save=False)
+
+    start = df["datetime"].min().strftime("%Y-%m-%d")
+    end = df["datetime"].max().strftime("%Y-%m-%d")
+    try:
+        pulls = fetcher.fetch_raw([sym0], start, end)
+    except Exception as exc:  # noqa: BLE001 — 备源失败必须降级，不炸管线
+        notes.append(f"回填失败（raw_close 仍为 adj 复制品）："
+                     f"{type(exc).__name__}: {exc}")
+        return df, notes
+
+    pull = pulls.get(sym0)
+    if pull is None or pull.close is None or len(pull.close) == 0:
+        notes.append(f"回填失败：备源返回空（source={pull.source if pull else 'unknown'}）")
+        return df, notes
+
+    nom = pd.to_numeric(pull.close, errors="coerce").dropna()
+    nom.index = pd.to_datetime(nom.index).normalize()
+    nom = nom[~nom.index.duplicated(keep="last")]
+    aligned = df["datetime"].map(nom)
+    coverage = float(aligned.notna().mean()) if len(df) else 0.0
+    if coverage < min_coverage:
+        notes.append(f"回填失败：备源 {pull.source} 覆盖率 {coverage:.1%} < "
+                     f"{min_coverage:.0%}（raw_close 仍为 adj 复制品）")
+        return df, notes
+
+    out = df.copy()
+    matched = int(aligned.notna().sum())
+    # 未对齐行保留原值（adj 复制品），避免 NaN 经 coerce_schema fillna(0.0) 污染
+    out["raw_close"] = aligned.astype(float).fillna(df["raw_close"]).to_numpy()
+    extra = f"；备源提示 {' | '.join(pull.warnings)}" if pull.warnings else ""
+    if matched < len(out):
+        notes.append(f"回填成功：来源 {pull.source}，对齐 {matched}/{len(out)} 行"
+                     f"（{coverage:.1%}，未对齐行保留 adj 复制品）{extra}")
+    else:
+        notes.append(f"回填成功：来源 {pull.source}，"
+                     f"覆盖 {matched}/{len(out)} 行（{coverage:.1%}）{extra}")
+    return out, notes
+
+
 def load_applied() -> list[dict[str, object]]:
     if APPLIED_PATH.exists():
         try:
@@ -558,7 +624,8 @@ def compute_overlap_ratio(old: pd.DataFrame, new: pd.DataFrame) -> float:
 
 
 def stage_parse(persisted: str, sym_arg: str, seg: str,
-                force: bool = False, dry_run: bool = False) -> int:
+                force: bool = False, dry_run: bool = False,
+                skip_nominal: bool = False) -> int:
     """解析单次拉取结果并合并写回（写前备份；幂等；--dry-run 不写盘）。"""
     underlying, sym0 = normalize_sym_arg(sym_arg)
     seg_start, seg_end = parse_seg_label(seg)
@@ -583,6 +650,15 @@ def stage_parse(persisted: str, sym_arg: str, seg: str,
     if new_df.empty:
         print(f"[WARN] 无 {underlying} 在 {seg_start}~{seg_end} 的数据，不写盘、不记录")
         return 0
+
+    # P1-c：名义价回填 raw_close（失败大声降级，不阻断管线；静默即事故）
+    if skip_nominal:
+        print(f"[NOMINAL] {sym0}: 已跳过（--skip-nominal），raw_close 仍为 adj 复制品")
+    else:
+        new_df, nominal_notes = enrich_raw_close(new_df, sym0)
+        for note in nominal_notes:
+            tag = "[NOMINAL]" if "回填成功" in note else "[WARN][NOMINAL]"
+            print(f"{tag} {sym0}: {note}")
 
     # 与计划核对（可选）
     if PLAN_PATH.exists():
@@ -788,6 +864,9 @@ def main() -> int:
                     help="parse 阶段：忽略 applied 记录强制重跑")
     ap.add_argument("--dry-run", action="store_true",
                     help="parse 阶段：只解析预览，不写盘")
+    ap.add_argument("--skip-nominal", action="store_true",
+                    help="parse 阶段：跳过 P1-c 名义价回填（离线场景）,"
+                         "raw_close 将保持 adj 复制品并打印 WARN")
     ap.add_argument("--plan", type=str, default=None,
                     help="verify 阶段：指定计划 JSON 路径（默认 artifacts/p6_4_pull_plan.json）")
     args = ap.parse_args()
@@ -800,7 +879,8 @@ def main() -> int:
             return 2
         try:
             return stage_parse(args.persisted, args.sym, args.seg,
-                               force=args.force, dry_run=args.dry_run)
+                               force=args.force, dry_run=args.dry_run,
+                               skip_nominal=args.skip_nominal)
         except (ValueError, KeyError) as exc:
             print(f"[FAIL] {exc}")
             return 2
