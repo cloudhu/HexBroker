@@ -89,7 +89,7 @@ class TestFetchBars:
         fake = _fake_ak(good_payload)
         monkeypatch.setitem(sys.modules, "akshare", fake)
 
-        src = AkshareSource()
+        src = AkshareSource(save=False)
         bf = src.fetch_bars(["rb0"], "2026-08-26", "2026-08-28", freq="1d")
         assert isinstance(bf, BarFrame)
         assert bf.source == "akshare"
@@ -102,25 +102,25 @@ class TestFetchBars:
 
     def test_symbol_normalized_from_exchange_form(self, monkeypatch, good_payload):
         monkeypatch.setitem(sys.modules, "akshare", _fake_ak(good_payload))
-        bf = AkshareSource().fetch_bars(["SHFE.cu"], "2026-08-26", "2026-08-28")
+        bf = AkshareSource(save=False).fetch_bars(["SHFE.cu"], "2026-08-26", "2026-08-28")
         assert bf.symbols == ["cu0"]
 
     def test_freq_other_than_1d_rejected(self, monkeypatch, good_payload):
         monkeypatch.setitem(sys.modules, "akshare", _fake_ak(good_payload))
         with pytest.raises(HexConfigError):
-            AkshareSource().fetch_bars(["rb0"], "2026-08-26", "2026-08-28", freq="60m")
+            AkshareSource(save=False).fetch_bars(["rb0"], "2026-08-26", "2026-08-28", freq="60m")
 
     def test_unknown_columns_raise_clear_error(self, monkeypatch):
         """列名无法识别时必须明确报错，而不是 KeyError 冒泡。"""
         bad = pd.DataFrame([["2026-08-28", 1, 2, 3, 4]], columns=["foo", "a", "b", "c", "d"])
         monkeypatch.setitem(sys.modules, "akshare", _fake_ak(bad))
         with pytest.raises(HexDataError, match="返回列名无法识别"):
-            AkshareSource().fetch_bars(["rb0"], "2026-08-26", "2026-08-28")
+            AkshareSource(save=False).fetch_bars(["rb0"], "2026-08-26", "2026-08-28")
 
     def test_empty_result_raises(self, monkeypatch):
         monkeypatch.setitem(sys.modules, "akshare", _fake_ak(_ak_payload([])))
         with pytest.raises(HexEmptyDataError):
-            AkshareSource().fetch_bars(["rb0"], "2026-08-26", "2026-08-28")
+            AkshareSource(save=False).fetch_bars(["rb0"], "2026-08-26", "2026-08-28")
 
     def test_stale_result_raises(self, monkeypatch):
         """停摆事故模式：源停更在 2026-06-29，请求窗口到 08-28 → 必须抛陈旧错误。"""
@@ -131,7 +131,7 @@ class TestFetchBars:
             ]
         )
         monkeypatch.setitem(sys.modules, "akshare", _fake_ak(stale))
-        src = AkshareSource()
+        src = AkshareSource(save=False)
         src.today = date(2026, 8, 29)  # 确定性注入
         # start 需覆盖到陈旧数据本身，否则会先被裁成 0 行而命中"空结果"门禁
         # （空门禁优先于陈旧门禁，这是正确行为）
@@ -148,7 +148,7 @@ class TestFetchBars:
             ]
         )
         monkeypatch.setitem(sys.modules, "akshare", _fake_ak(old))
-        src = AkshareSource()
+        src = AkshareSource(save=False)
         src.today = date(2026, 8, 29)
         bf = src.fetch_bars(["rb0"], "2020-03-01", "2020-03-06")
         assert bf.length == 2
