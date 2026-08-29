@@ -724,6 +724,47 @@ enrich_raw_close(df, sym0, *, fetcher=None, min_coverage=0.9)
 ②随 P0-11/pandadata 恢复后的真值重建一并处理；
 ③维持现状（nominal 自检只对未来数据可用）。
 
+---
+
+### 4.17 P0-11 rb0/2020 真值重建驱动器（真值拉取待会话重载）
+
+**前提变化**：pandadata 连接器已恢复 connected（2026-08-29 16:39 实测 UI
+状态），但 **pandadata MCP 工具未注册进本会话**（会话启动时连接器仍是
+断开状态），直连端点 `pandadatamcp.pandaaiquant.com/mcp` 亦 401
+（token 由宿主加密托管，`AES-GCM iv/tag/ct`，会话外不可取）。
+→ 真值拉取需在**连接器已连接状态下启动的新会话**执行。
+
+**本次落地（`scripts/p11_truth_rebuild.py`）**：把重建收敛为一条命令，
+真值到位后零额外开发：
+
+```
+# ① 新会话拉真值（pandadata MCP）：
+#    get_future_daily_post underlying_symbol=["RB"]
+#    start_date=20200101 end_date=20201231 method=close_pcr
+#    → 存 artifacts/p11_rb0_2020_truth.json（p6_4 persisted 格式）
+
+# ② dry-run（默认，零写盘）→ ③ --apply 重建
+python scripts/p11_truth_rebuild.py --persisted artifacts/p11_rb0_2020_truth.json
+python scripts/p11_truth_rebuild.py --persisted ... --apply
+```
+
+**驱动器编排（全部复用已测组件，无第三份实现）**：
+`p6_4.load_persisted_rows` + `normalize_new_df`（含 RAW_SCALE_FIX）→
+P1-c `enrich_raw_close`（重建分区**直接带真名义价**）→
+P0-9 `rebuild_partition`（missing 路径：整分区新建 + 自动清
+`_MISSING_2020.json` + manifest `source=truth-rebuild`）→
+重建后自动验证（全量行数 / quality_notes 洞消除 / 2019→2020→2021
+adj 边界连续性，>10% 假跳变即红牌）。
+跨界保险：真值非目标年度行先过滤，`rebuild_partition` 跨界拒绝兜底。
+
+**验证**：5 测试（dry-run 零写盘 / apply 全链路建分区+清标+manifest /
+跨界行过滤 / 文件缺失 rc=2 / 年度无交集 rc=1 零写盘）；全量
+**858 passed**（853 + 5）；ruff 全过；生产 `data/` 零写盘。
+
+**剩余动作（待会话重载）**：①新会话确认 pandadata 工具注册 + `auth_status`
+→ ②拉 RB 2020 全年 close_pcr → ③跑驱动器 `--apply` → ④QA 复核
+（fsck / 全量回归 / load_processed 行数 ~1855+242）。
+
 
 ## 7. 待办（按优先级）
 
@@ -741,8 +782,9 @@ enrich_raw_close(df, sym0, *, fetcher=None, min_coverage=0.9)
 - [x] ~~**🔴 P0-10 年度口径一致性审计**（§6.5.7）~~ → **审计完成，见 §4.12**：
       缺陷确认且仅限 cu0/rb0 的 2023 年度（外部 k 校准 + 内部边界跳变交叉定罪）；
       检测器已固化为 `caliber`（12 测试）。**处置待拍板**（隔离/备案/真值重建）。
-- [ ] **P0-11 `rb0/2020` 重建**：待 pandadata 恢复授权后用
-      `get_future_daily_post(method=close_pcr)` 重拉 2020 全年，替换隔离区文件。
+- [ ] **P0-11 `rb0/2020` 重建**：pandadata 已恢复连接但 MCP 工具需**会话重载**
+      才注册；重建驱动器已就绪（§4.17），真值到位后一条命令完成
+      （dry-run → --apply，自动清标 + 边界验证）。
 - [x] ~~**P0-12 缺失年度显式化**~~ → **已完成，见 §4.13**：`load_processed`
       洞/标记逐条告警（数据行为不变），`quality_notes` 结构化三类提示；
       `MISSING_GLOB` 收口 store 定义。
@@ -831,8 +873,10 @@ enrich_raw_close(df, sym0, *, fetcher=None, min_coverage=0.9)
 | `tests/test_data_manifest.py` | +2 测试（skip_existing 防覆盖/幂等 + 默认重写行为守护） |
 | `scripts/p6_4_fill_gaps.py` | P1-c：🆕 `enrich_raw_close`（parse 阶段备源名义价回填 + 大声降级）+ `--skip-nominal` |
 | `tests/test_p6_4_nominal_enrich.py` | 🆕 10 测试（成功/降级/覆盖门禁/伪映射守护） |
+| `scripts/p11_truth_rebuild.py` | 🆕 P0-11 真值重建驱动器（dry-run 默认 / --apply 全链路 + 边界验证） |
+| `tests/test_p11_truth_rebuild.py` | 🆕 5 测试（零写盘/全链路/跨界过滤/失败路径） |
 
-**验证**：**853 passed**（原 677 → 713 → 730 → 751 → 752 → 774 → 796 → 810 → 822 → 836 → 841 → 843 → 853）；改动文件 ruff 全通过；
+**验证**：**858 passed**（原 677 → 713 → 730 → 751 → 752 → 774 → 796 → 810 → 822 → 836 → 841 → 843 → 853 → 858）；改动文件 ruff 全通过；
 真实联网 18/18 双源末日 2026-08-28；备源端到端实测（sina→graft）误差 -21.35 bp 且已标记
 provisional；hc0/ni0 端到端实测通过（4199 行，此前被包络校验拒绝）；生产 manifest 增量回填 16 品种
 （cu0/rb0 未动、parquet 零改动）；P1-c 名义价回填 dry-run 实测 raw_close ≠ adj_close；
