@@ -662,8 +662,8 @@ def repair_envelope(df, *, drop_zero_ohl=True) -> tuple[pd.DataFrame, list[str]]
    幂等：重复运行零回填）。
 2. **布局盲区**：`fundamental`/`global` 为扁平布局（`{layer}/{name}.parquet`），
    `backfill_manifests` 只扫 `{layer}/{symbol}/` 子目录，**天然不覆盖**。
-   → 本次不扩 manifest 约定到扁平层（另案设计），P1-b 范围锁定
-   `processed` 层 18 品种。
+   → ~~本次不扩 manifest 约定到扁平层（另案设计）~~ → **已收口，见 §4.19**
+   （`backfill_flat_manifests` + freq="flat"，生产回填 117）。
 
 **生产执行**：`scripts/backfill_manifests.py --data-root data/raw --skip-existing`
 → 回填 **16** 个 manifest（16 品种 × 1 freq）。回填 manifest 语义 =
@@ -795,6 +795,51 @@ docstring 不符。按范围纪律未在执行中改动 P0-9 模块，留待主�
 (A) 修正 docstring（承认 save_processed 语义）；或 (B) rebuild_partition
 在 save_processed 后回写 `source="truth-rebuild"`（需新增测试）。
 
+### 4.19 扁平面板 manifest 回填（P1-b 遗留另案 ✅）
+
+**背景**：P1-b 落地时确认 `fundamental`(108)/`global`(9) 为单层扁平布局
+`{layer}/{name}.parquet`（无 symbol/freq 目录层级），`backfill_manifests`
+的两种布局扫描天然不覆盖，manifest 生产覆盖 0/117 → 另案。本次收口。
+
+**布局取证（实地，不凭文档）**：
+
+| 层 | 文件数 | 结构 | 例 |
+|---|---|---|---|
+| fundamental | 108 | RangeIndex + `date` 列；含全量面板（`basis_CU`）与训练/验证分段面板（`basis_CU_2018_2022` / `_2022_2026`） | 2092 行，2018-01-02→2026-08-21 |
+| global | 9 | **单层命名 DatetimeIndex**（name="datetime"），无 date 列 | `spx` 1909 行，2017-06-01→2024-12-31 |
+
+**设计定案**：
+- manifest 路径 = `manifest_path(root, layer, name, "flat")` =
+  `{layer}/{name}/flat/manifest.json`，与既有 `{layer}/{symbol}/{freq}/`
+  约定同构，`read_manifest(root, layer, name, "flat")` 可直接读回；
+  `freq="flat"` 自描述布局。
+- 扁平面板不经 adjust/main_rule 口径处理（global 为外盘原始收盘、
+  fundamental 为基差/现货）→ `constants={}`，避免暗示期货复权口径适用。
+- `build_manifest` 小幅增强（additive）：单层命名 DatetimeIndex 也计算
+  date_range（原先只认 MultiIndex 或 date/datetime 列，global 面板会得
+  空 date_range）；指纹路径本就支持 DatetimeIndex（reset_index），无变化。
+- **消费者安全（实地取证）**：fundamental/global 全部按精确文件名访问
+  （`global_ref.load_global_close` → `GLOBAL_DATA_DIR / f"{code}.parquet"`、
+  p20_4/p23 → `FUND_DIR / f"basis_{sym}.parquet"`），无目录枚举，
+  新增 `{name}/` 子目录零影响。
+
+**实现**：`manifest.py` 新增 `backfill_flat_manifests(root, *, layers=
+("fundamental","global"), skip_existing=False)` + `FLAT_PANEL_LAYERS` 常量；
+`backfill_manifests` 尾部接线（返回值含 flat 计数）→ 迁移脚本
+`backfill_manifests.py` **零改动**，一条命令覆盖全部三层布局。
+
+**验证**：+4 测试（build_manifest DatetimeIndex date_range / 双层
+fundamental+global 回填 + freq=flat + constants 空 + 指纹回环 /
+skip_existing 幂等 + 默认重写语义 / 空层零计数守护）；全量 **862 passed**
+（858 + 4）；ruff 全过。
+
+**生产执行（`--data-root data/raw --skip-existing`）**：
+- 回填 **117**（108 + 9，与取证一致）；manifest 总数 18 → **135**；
+- 抽检：`spx`（DatetimeIndex 路径）1909 行 / `basis_CU`（date 列路径）
+  2092 行，date_range 与直接读 parquet 一致；
+- 幂等复跑 **0 个**；parquet 零触碰（`-newermt` 计数 0）；
+  cu0/rb0 盘中维护的 manifest 逐字节未动（`v1` + 原 fetched_at）。
+
 
 ## 7. 待办（按优先级）
 
@@ -825,7 +870,8 @@ docstring 不符。按范围纪律未在执行中改动 P0-9 模块，留待主�
       收口三源修复（akshare 补缺失步骤 + 大声告警），端到端实测通过。
 - [x] ~~**P1-b 生产 manifest 补全**~~ → **已完成，见 §4.15**：增量回填 16 品种
       （`skip_existing` 防触碰盘中自动化维护的 manifest），processed 层
-      manifest 覆盖 2 → 18；fundamental/global 扁平布局另案。
+      manifest 覆盖 2 → 18；fundamental/global 扁平布局另案 → **已收口，
+      见 §4.19**（+117，总数 135，幂等复跑 0）。
 - [x] ~~**P1-c `raw_close` 列语义修复**~~ → **已完成，见 §4.16**：parse 阶段
       `enrich_raw_close` 用备源名义价回填（失败大声降级），端到端实测
       raw_close ≠ adj_close 语义分离；**存量分区回填待拍板**（§4.16）。
@@ -900,15 +946,15 @@ docstring 不符。按范围纪律未在执行中改动 P0-9 模块，留待主�
 | `hexbroker/data/sources/test_akshare_source.py` | +5 测试（hc0/ni0 真实毛刺 / 告警 / 废 bar / 干净零告警） |
 | `scripts/dev_probe_p0_13_envelope.py` | 🆕 P0-13 探针（只读直调 `ak.futures_main_sina` 定位毛刺 bar） |
 | `artifacts/p0_13_probe_20260829.log` | 🆕 探针证据存档 |
-| `hexbroker/data/manifest.py` | P1-b：`backfill_manifests` 新增 `skip_existing` 增量模式（防覆盖生产 manifest，幂等） |
+| `hexbroker/data/manifest.py` | P1-b：`backfill_manifests` 新增 `skip_existing` 增量模式（防覆盖生产 manifest，幂等）；§4.19：`backfill_flat_manifests` 扁平面板回填 + `build_manifest` 单层 DatetimeIndex date_range |
 | `scripts/backfill_manifests.py` | 新增 `--skip-existing` 旗标 |
-| `tests/test_data_manifest.py` | +2 测试（skip_existing 防覆盖/幂等 + 默认重写行为守护） |
+| `tests/test_data_manifest.py` | +2 测试（skip_existing 防覆盖/幂等 + 默认重写行为守护）；+4 测试（§4.19 扁平面板回填/DatetimeIndex date_range/幂等/空层守护） |
 | `scripts/p6_4_fill_gaps.py` | P1-c：🆕 `enrich_raw_close`（parse 阶段备源名义价回填 + 大声降级）+ `--skip-nominal` |
 | `tests/test_p6_4_nominal_enrich.py` | 🆕 10 测试（成功/降级/覆盖门禁/伪映射守护） |
 | `scripts/p11_truth_rebuild.py` | 🆕 P0-11 真值重建驱动器（dry-run 默认 / --apply 全链路 + 边界验证） |
 | `tests/test_p11_truth_rebuild.py` | 🆕 5 测试（零写盘/全链路/跨界过滤/失败路径） |
 
-**验证**：**858 passed**（原 677 → 713 → 730 → 751 → 752 → 774 → 796 → 810 → 822 → 836 → 841 → 843 → 853 → 858）；改动文件 ruff 全通过；
+**验证**：**862 passed**（原 677 → 713 → 730 → 751 → 752 → 774 → 796 → 810 → 822 → 836 → 841 → 843 → 853 → 858 → 862）；改动文件 ruff 全通过；
 真实联网 18/18 双源末日 2026-08-28；备源端到端实测（sina→graft）误差 -21.35 bp 且已标记
 provisional；hc0/ni0 端到端实测通过（4199 行，此前被包络校验拒绝）；生产 manifest 增量回填 16 品种
 （cu0/rb0 未动、parquet 零改动）；P1-c 名义价回填 dry-run 实测 raw_close ≠ adj_close；

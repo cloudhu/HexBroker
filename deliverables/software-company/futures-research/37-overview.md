@@ -38,7 +38,7 @@
 
 | 项 | 结果 |
 |---|---|
-| 测试 | **858 passed**（677 → … → 836 → 841 → 843 → 853 → 858，+10 名义价回填，+5 P0-11 驱动器） |
+| 测试 | **862 passed**（677 → … → 836 → 841 → 843 → 853 → 858 → 862，+10 名义价回填，+5 P0-11 驱动器，+4 扁平面板 manifest） |
 | 静态门禁 | 改动文件 ruff **全通过** |
 | 真实联网 | 18/18 品种双源（sina / akshare）末日 **2026-08-28** |
 | 仓库完整性 | `git fsck --no-dangling` **无输出**，对象库完整 |
@@ -67,7 +67,7 @@
 | **P0-10** | 年度口径审计（18 品种 × 9 年）：**确认仅 cu0/rb0 的 2023 名义价冒充**（±27%~51% 假跳空）；检测器固化 `caliber` | ✅ 审计 / 🟡 处置待拍板 |
 | **P0-12** | 缺失年度显式化：`load_processed` 洞/标记逐条告警（数据行为不变）+ `quality_notes` 三类结构化提示 | ✅ |
 | **P1-c** | 🆕 `raw_close` 列语义修复：parse 阶段 `enrich_raw_close` 备源名义价回填（失败大声降级），实测 raw_close ≠ adj_close | ✅ 新写入 / 🟡 存量回填待拍板 |
-| **P1-b** | 🆕 生产 manifest 增量回填 16 品种（`skip_existing` 防触碰盘中自动化 manifest），processed 层覆盖 2 → 18 | ✅ |
+| **P1-b** | 🆕 生产 manifest 增量回填 16 品种（`skip_existing` 防触碰盘中自动化 manifest），processed 层覆盖 2 → 18；扁平面布局另案 → **已收口（§4.19）**：+117（fundamental 108 + global 9），总数 135，幂等复跑 0，parquet 零触碰 | ✅ |
 | **P0-11** | 🆕 `rb0/2020` 真值重建**执行完毕**：pandadata MCP 新会话注册成功 → 真值 243 行（close_pcr）→ dry-run → --apply：2020.parquet 新建（raw_close 名义价 100% 覆盖）、`_MISSING_2020.json` 清除、全量 2098 行、边界跳变 0.61%/0.11%、零污染 QA 通过；遗留：manifest `source` 语义与 rebuild.py docstring 不符（P2 跟进） | ✅ |
 | **P0-12** | 缺失年度显式化（`load_processed` 静默跳过） | ✅（重复行，上为准） |
 | **P0-13** | `hc0`/`ni0` OHLC 包络校验失败：根源端毛刺 bar（各 1 根）；`schema.repair_envelope` 收口三源修复，akshare 补缺失步骤 + 大声告警 | ✅ |
@@ -169,6 +169,15 @@
     实际 `source="lake"`（"最近一次写入"语义），与 L249 docstring 声称的
     `source="truth-rebuild"` 不符 —— 数据本体无影响，P2 跟进
     （改 docstring 或 rebuild 后回写 source）。
+21. **🆕 扁平面板 manifest 收口（P1-b 遗留另案闭环）**：fundamental(108)/
+    global(9) 单层扁平布局此前 manifest 覆盖 0/117。落地
+    `backfill_flat_manifests`（manifest 落 `{layer}/{name}/flat/manifest.json`，
+    freq="flat" 与既有约定同构；面板不经复权口径 → constants 留空）；
+    `build_manifest` additive 增强：单层命名 DatetimeIndex 也算 date_range
+    （global 面板原先会得空区间）。消费者全部按精确文件名访问（实地取证），
+    新增子目录零影响。生产执行 +117 → 总数 135，抽检 spx/basis_CU 行数与
+    date_range 一致，幂等复跑 0，parquet 零触碰，cu0/rb0 manifest 未动。
+    → **manifest 机制三层布局全覆盖**（按年分区 / 无年份分区 / 扁平面板）。
 
 ---
 
@@ -244,7 +253,7 @@
 2. **Q6**：收盘价 vs 结算价 —— 实测两者同口径可任选，选哪个？
 3. **🔴 pandadata 连接器 token 失效**，是否现在恢复授权？（主源不可用期间，
    整个备源链路的优先级建议上调；`rb0/2020` 的重拉也卡在这里）
-4. **下一步优先级**：P0-9 ✅、编排器 ✅、P0-10 审计 ✅（处置待拍板）、P0-12 ✅、P0-13 ✅、P1-b ✅、P1-c ✅（存量回填待拍板）、P0-11 ✅（rb0/2020 真值重建执行闭环）。剩余拍板项 = cu0/rb0 2023 处置 / raw_close 存量回填 / rebuild manifest source 语义（P2）；剩余执行 = 扁平层 manifest 另案。
+4. **下一步优先级**：P0-9 ✅、编排器 ✅、P0-10 审计 ✅（处置待拍板）、P0-12 ✅、P0-13 ✅、P1-b ✅（含扁平层收口 §4.19）、P1-c ✅（存量回填待拍板）、P0-11 ✅（rb0/2020 真值重建执行闭环）。剩余拍板项 = cu0/rb0 2023 处置 / raw_close 存量回填 / rebuild manifest source 语义（P2）。剩余执行项已清零。
 5. **🔴 cu0/rb0 2023 处置拍板**：①隔离 + `_MISSING_2023.json`（留 1 年洞，需 P0-12 配套）②保留 + 备案 ③等授权恢复后真值重建？
 5. **🔴 新增 · 2023 年度口径断裂**（rb0/cu0 存未复权名义价，跨年约 35% 假跳空）：
    是否立 P0-10 优先处理？影响所有跨 2023 年的回测与训练，且数据"看起来完全正常"。
