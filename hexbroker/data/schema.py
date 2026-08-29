@@ -126,3 +126,63 @@ def validate_bars(df: pd.DataFrame, freq: str = "1d", allow_empty: bool = False)
 def as_barframe(df: pd.DataFrame, freq: str = "1d", source: str = "unknown") -> BarFrame:
     """便捷构造并校验 BarFrame。"""
     return BarFrame(df=df, freq=freq, source=source).validate()
+
+
+# ---------------------------------------------------------------------------
+# P0-13：免费源 OHLC 包络修复（共享实现）
+# ---------------------------------------------------------------------------
+def repair_envelope(
+    df: pd.DataFrame, *, drop_zero_ohl: bool = True
+) -> tuple[pd.DataFrame, list[str]]:
+    """修复免费源的 OHLC 包络脏数据并丢弃废 bar（**校验前**的源层清洗）。
+
+    背景（P0-13，2026-08-29 取证）：``AkshareSource`` 缺修复步骤，hc0
+    （2021-12-30，C=4394 < L=4395）与 ni0（2023-08-28，C=167030 < L=167230）
+    各 1 根源端毛刺 bar 使整次拉取被 ``validate_bars`` 拒绝；而
+    ``SinaSource``/``PytdxSource`` 早已各自实现同语义修复（三处重复，
+    本函数收口，调用方保留原方法名委托兼容）。
+
+    语义（与 sina 原实现逐位一致）：
+    - 包络破坏（如 close<low）：以**四价极值**重定 low/high，保证契约成立；
+    - ``close<=0`` 废 bar（无成交）：丢弃；
+    - ``drop_zero_ohl=True``（sina 语义）：``open/high/low<=0``（如 m0
+      2019-07-29 open=0）也丢弃；False（pytdx 语义）保留，交由上层契约裁决。
+
+    返回
+    ----
+    ``(修复后 df, 告警列表)``。**调用方必须上报告警**（logging 等），
+    修复是数据变更，静默即事故。
+    """
+    notes: list[str] = []
+    df = df.copy()
+    for c in ("open", "high", "low", "close"):
+        df[c] = df[c].astype(float)
+    lo = df[["open", "high", "low", "close"]].min(axis=1)
+    hi = df[["open", "high", "low", "close"]].max(axis=1)
+    viol = (df["low"] != lo) | (df["high"] != hi)
+    if viol.any():
+        sample = _sample_dates(df, viol)
+        suffix = f"（如 {', '.join(sample)}）" if sample else ""
+        notes.append(f"包络修复 {int(viol.sum())} 根（low/high 重定为四价极值）{suffix}")
+    df["low"] = lo
+    df["high"] = hi
+    drop_close = df["close"] <= 0
+    if drop_close.any():
+        notes.append(f"丢弃 close<=0 废 bar {int(drop_close.sum())} 根")
+    df = df[df["close"] > 0].copy()
+    if drop_zero_ohl:
+        drop_ohl = (df[["open", "high", "low"]] <= 0).any(axis=1)
+        if drop_ohl.any():
+            notes.append(f"丢弃 open/high/low<=0 废 bar {int(drop_ohl.sum())} 根")
+        df = df[(df[["open", "high", "low"]] > 0).all(axis=1)].copy()
+    return df, notes
+
+
+def _sample_dates(df: pd.DataFrame, mask: pd.Series, k: int = 3) -> list[str]:
+    """从 date/datetime 列或索引取样例日期（取不到就返回空）。"""
+    for c in ("datetime", "date"):
+        if c in df.columns:
+            return [str(v) for v in df.loc[mask, c].head(k)]
+    if isinstance(df.index, pd.DatetimeIndex):
+        return [str(v.date()) for v in df.index[mask][:k]]
+    return []

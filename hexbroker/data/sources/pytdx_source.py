@@ -24,7 +24,7 @@ import pandas as pd
 
 from ... import HexConfigError, HexDataError, HexEmptyDataError
 from ..base import DataSource
-from ..schema import BarFrame
+from ..schema import BarFrame, repair_envelope
 from ..store import DataLake
 
 # ---------------------------------------------------------------------------
@@ -290,17 +290,11 @@ class PytdxSource(DataSource):
     def _repair_ohlc(df: pd.DataFrame) -> pd.DataFrame:
         """免费源偶有脏数据：修复 OHLC 包络（low<=open,close<=high）并丢弃废 bar。
 
-        - 包络破坏（open>high 等）：以四价极值重定 low/high，保证契约成立；
-        - close<=0 的废 bar（无成交）：直接丢弃。
+        自 P0-13 起委托共享实现 :func:`~hexbroker.data.schema.repair_envelope`
+        （``drop_zero_ohl=False`` 保持 pytdx 原语义：只丢 close<=0）。
         """
-        for c in ["open", "high", "low", "close"]:
-            df[c] = df[c].astype(float)
-        lo = df[["open", "high", "low", "close"]].min(axis=1)
-        hi = df[["open", "high", "low", "close"]].max(axis=1)
-        df["low"] = lo
-        df["high"] = hi
-        df = df[df["close"] > 0].copy()
-        return df
+        df2, _ = repair_envelope(df, drop_zero_ohl=False)
+        return df2
 
     @staticmethod
     def _bars_to_frame(bars: list[dict], symbol: str) -> pd.DataFrame:

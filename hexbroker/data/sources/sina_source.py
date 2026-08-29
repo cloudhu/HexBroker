@@ -27,7 +27,7 @@ from ... import (
     HexNetworkError,
 )
 from ..base import DataSource
-from ..schema import BarFrame
+from ..schema import BarFrame, repair_envelope
 from ..store import DataLake
 
 # 新浪内盘期货公开接口 base
@@ -213,19 +213,12 @@ class SinaSource(DataSource):
     def _repair_ohlc(df: pd.DataFrame) -> pd.DataFrame:
         """免费源偶有脏数据：修复 OHLC 包络（low<=open,close<=high）并丢弃废 bar。
 
-        - 包络破坏（open>high 等）：以四价极值重定 low/high，保证契约成立；
-        - close<=0 或 open/high/low<=0 的废 bar（无成交/异常开盘）：直接丢弃
-          （如 m0 2019-07-29 open=0）。
+        自 P0-13 起委托共享实现
+        :func:`~hexbroker.data.schema.repair_envelope`（sina/pytdx/akshare
+        三源收口；本方法保留原签名兼容既有测试）。
         """
-        for c in ["open", "high", "low", "close"]:
-            df[c] = df[c].astype(float)
-        lo = df[["open", "high", "low", "close"]].min(axis=1)
-        hi = df[["open", "high", "low", "close"]].max(axis=1)
-        df["low"] = lo
-        df["high"] = hi
-        df = df[df["close"] > 0].copy()
-        df = df[(df[["open", "high", "low"]] > 0).all(axis=1)].copy()
-        return df
+        df2, _ = repair_envelope(df, drop_zero_ohl=True)
+        return df2
 
     @staticmethod
     def _rows_to_frame(data: list, symbol: str) -> pd.DataFrame:

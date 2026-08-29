@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Optional
 
@@ -24,8 +25,10 @@ import pandas as pd
 
 from ... import HexConfigError, HexDataError, HexEmptyDataError, HexNetworkError
 from ..base import DataSource
-from ..schema import BarFrame
+from ..schema import BarFrame, repair_envelope
 from ..store import DataLake
+
+logger = logging.getLogger(__name__)
 
 #: akshare ``futures_main_sina`` 中文列名 -> 标准列名
 AK_COLUMN_MAP: dict[str, str] = {
@@ -107,6 +110,15 @@ class AkshareSource(DataSource):
             out["symbol"] = self._symbol_key(sym)
             out["datetime"] = pd.to_datetime(out["datetime"]).dt.tz_localize(None)
             out = out.sort_values(["symbol", "datetime"]).reset_index(drop=True)
+
+            # P0-13：免费源脏数据修复（与 SinaSource 同语义）。取证：hc0
+            # 2021-12-30（C=4394<L=4395）、ni0 2023-08-28（C=167030<L=167230）
+            # 各 1 根源端毛刺曾使整次拉取被 validate_bars 拒绝。修复必须
+            # 大声告警——静默改数即事故。
+            out, repairs = repair_envelope(out, drop_zero_ohl=True)
+            for note in repairs:
+                logger.warning("AkshareSource %s(%s): %s", sym, code, note)
+
             for col in ("volume", "open_interest"):
                 if col not in out.columns:
                     out[col] = 0.0

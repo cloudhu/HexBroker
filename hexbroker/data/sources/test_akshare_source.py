@@ -152,3 +152,95 @@ class TestFetchBars:
         src.today = date(2026, 8, 29)
         bf = src.fetch_bars(["rb0"], "2020-03-01", "2020-03-06")
         assert bf.length == 2
+
+
+# ---------------------------------------------------------------------------
+# P0-13：OHLC 包络修复（真实源端毛刺 bar 固化）
+# ---------------------------------------------------------------------------
+class TestEnvelopeRepair:
+    """取证（2026-08-29，scripts/dev_probe_p0_13_envelope.py）：
+    hc0 2021-12-30 C=4394<L=4395、ni0 2023-08-28 C=167030<L=167230，
+    各 1 根源端毛刺曾使整次拉取被 validate_bars 拒绝。"""
+
+    def test_hc0_glitch_bar_repaired(self, monkeypatch):
+        """hc0 真实毛刺：close 略低于 low → low 重定为四价极值，拉取成功。"""
+        glitch = _ak_payload(
+            [
+                ["2021-12-29", 4470.0, 4500.0, 4430.0, 4450.0, 100, 1000, 4445.0],
+                ["2021-12-30", 4460.0, 4515.0, 4395.0, 4394.0, 100, 1000, 4450.0],
+            ]
+        )
+        monkeypatch.setitem(sys.modules, "akshare", _fake_ak(glitch))
+        src = AkshareSource(save=False)
+        src.today = date(2026, 8, 29)
+        bf = src.fetch_bars(["hc0"], "2021-12-29", "2021-12-30")
+        row = bf.df.xs("hc0", level="symbol").loc["2021-12-30"]
+        assert row["low"] == 4394.0          # 重定为四价最小值
+        assert row["high"] == 4515.0
+        assert row["close"] == 4394.0        # close 本身不被改写
+        assert row["open"] == 4460.0
+
+    def test_ni0_glitch_bar_repaired(self, monkeypatch):
+        """ni0 真实毛刺（200 点幅度）同语义修复。"""
+        glitch = _ak_payload(
+            [
+                ["2023-08-28", 169490.0, 171000.0, 167230.0, 167030.0,
+                 100, 1000, 168000.0],
+            ]
+        )
+        monkeypatch.setitem(sys.modules, "akshare", _fake_ak(glitch))
+        src = AkshareSource(save=False)
+        src.today = date(2026, 8, 29)
+        bf = src.fetch_bars(["ni0"], "2023-08-28", "2023-08-28")
+        row = bf.df.xs("ni0", level="symbol").loc["2023-08-28"]
+        assert row["low"] == 167030.0
+        assert row["high"] == 171000.0
+        assert row["close"] == 167030.0
+
+    def test_repair_warns_loudly(self, monkeypatch, caplog):
+        """修复必须大声告警——静默改数即事故。"""
+        import logging
+
+        glitch = _ak_payload(
+            [
+                ["2021-12-30", 4460.0, 4515.0, 4395.0, 4394.0, 100, 1000, 4450.0],
+            ]
+        )
+        monkeypatch.setitem(sys.modules, "akshare", _fake_ak(glitch))
+        src = AkshareSource(save=False)
+        src.today = date(2026, 8, 29)
+        with caplog.at_level(logging.WARNING, logger="hexbroker.data.sources.akshare_source"):
+            src.fetch_bars(["hc0"], "2021-12-30", "2021-12-30")
+        msgs = " ".join(r.getMessage() for r in caplog.records)
+        assert "包络修复" in msgs and "2021-12-30" in msgs
+
+    def test_waste_bar_zero_open_dropped_with_warning(self, monkeypatch, caplog):
+        """m0 2019-07-29 open=0 模式：废 bar 丢弃并告警。"""
+        import logging
+
+        payload = _ak_payload(
+            [
+                ["2019-07-26", 3000.0, 3050.0, 2980.0, 3020.0, 100, 1000, 3010.0],
+                ["2019-07-29", 0.0, 3050.0, 2980.0, 3020.0, 100, 1000, 3010.0],
+                ["2019-07-30", 3010.0, 3060.0, 2990.0, 3030.0, 100, 1000, 3020.0],
+            ]
+        )
+        monkeypatch.setitem(sys.modules, "akshare", _fake_ak(payload))
+        src = AkshareSource(save=False)
+        src.today = date(2026, 8, 29)
+        with caplog.at_level(logging.WARNING, logger="hexbroker.data.sources.akshare_source"):
+            bf = src.fetch_bars(["m0"], "2019-07-26", "2019-07-30")
+        assert bf.length == 2  # open=0 的废 bar 被丢弃
+        msgs = " ".join(r.getMessage() for r in caplog.records)
+        assert "open/high/low<=0" in msgs
+
+    def test_clean_payload_untouched_no_warning(self, monkeypatch, caplog, good_payload):
+        """干净数据零修复零告警（good_payload 复用）。"""
+        import logging
+
+        monkeypatch.setitem(sys.modules, "akshare", _fake_ak(good_payload))
+        src = AkshareSource(save=False)
+        src.today = date(2026, 8, 29)
+        with caplog.at_level(logging.WARNING, logger="hexbroker.data.sources.akshare_source"):
+            src.fetch_bars(["rb0"], "2026-08-26", "2026-08-28")
+        assert not [r for r in caplog.records if r.levelno == logging.WARNING]
