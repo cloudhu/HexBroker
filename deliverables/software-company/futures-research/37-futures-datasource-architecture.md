@@ -495,6 +495,49 @@ rebuild_pipeline(root, truth_fetcher, *, layer, symbols=None) -> RebuildReport
 **验证**：22 测试全过（含静默转正回归门禁）；全量 **796 passed**；ruff 全过；
 `data/` 零改动（护栏在线）。
 
+### 4.11 故障切换编排器（`failover`）—— P0 链路收口
+
+**落地模块**：`hexbroker/data/failover.py`（约 360 行）+ `hexbroker/data/test_failover.py`（14 测试）。
+
+**三级降级拓扑**：
+
+| 层 | 来源 | 语义 | 实现方式 |
+|----|------|------|---------|
+| Tier 1 | pandadata `close_pcr` | 后复权**真值**，命中即 `provisional=False` | 注入式（MCP 适配器由调用方传入，token 可失效不绑定） |
+| Tier 2 | sina+akshare（`BackupRawFetcher`） | 名义价 → `graft_adjusted` 续接 → 一律 `provisional=True` | 复用 §4.9 备源 + §4.8 续接器 |
+| Tier 3 | 交易所官方 | 同备源语义（名义价续接） | 注入式预留，None = 如实归因不可用 |
+
+**差异化路由**（防"盲目重试"与"过早放弃"两个极端）：
+
+| 主源异常 | 路由 |
+|---------|------|
+| `HexQuotaError` | **当日锁定主源**（`_quota_locked_date`），会话内零重试，后续调用直接归因 `QuotaLocked` |
+| `HexNetworkError` | 重试**恰好一次**，再败才降级 |
+| `HexEmptyDataError` / `HexStaleDataError` | 源已坏，**零重试**直接降级 |
+| 其他异常 | 归因 `Other`，不重试 |
+| `primary_fetcher=None` | 归因 `NotWired`，直接从备源开始 |
+
+**🔴 红线（实现期确认的锚定前提）**：
+1. **湖内无锚点（NoAnchor）→ 拒绝续接**，绝不用备源名义价冒充后复权
+   （专项测试 `test_no_anchor_refuses`）。
+2. **备源/Tier3 请求窗口必须向前扩展 `lookback` 天**（`_overlap_start`）：
+   `graft_adjusted` 依赖 raw 与湖内 adj 的**重叠日期**确定锚点比例因子，
+   按调用方 `start` 原样请求时两序列无交集，续接必然失败。这是测试
+   首轮暴露的真实设计缺口（6 个失败用例同根因），不是测试夹具问题。
+3. **续接成功自动 P0-9 挂标**：按年调用 `mark_provisional`（幂等），
+   编排器**不落数据**，只留痕。
+
+**逐次归因**：每次尝试记 `Attempt(tier, source, ok, kind, error)`，
+`Outcome.attempts_summary()` 可直接进告警文案；`primary_error_kind`
+供调用方决定告警级别。
+
+**验证**：14 测试全过（主源成功零挂标 / Quota 当日锁定 / Network 重试一次与
+两次降级 / Empty·Stale 零重试 / NotWired / 备源续接挂标与 sidecar 内容 /
+NoAnchor 拒绝 / Exhausted 逐源归因 / Tier3 降级与不可用报告 / 多品种跨尺度
+锚点互不串扰）；全量 **810 passed**（796 + 14）；ruff 全过；生产 `data/`
+零污染（13:50 cu0/rb0 2026 分区重写经逐字段核验为 13:45 盘中自动化窗口的
+正常生产写入，非测试行为）。
+
 ---
 
 
@@ -508,7 +551,9 @@ rebuild_pipeline(root, truth_fetcher, *, layer, symbols=None) -> RebuildReport
       真正的重建流水线归 P0-9。
 - [x] ~~**P0-9 provisional 标记与重建流水线**~~ → **已完成，见 §4.10**
       （sidecar 挂标 + scan + 真值重建 + 只清覆盖日期，22 测试）
-- [ ] **故障切换编排器**：主 → 备1 → 备2 三级降级，按 §4.1 的异常类型差异化路由
+- [x] ~~**故障切换编排器**~~ → **已完成，见 §4.11**：主 → 备1 → 备2 三级降级，
+      差异化路由（Quota 当日锁 / Network 重试一次 / Empty·Stale 零重试），
+      NoAnchor 拒绝续接红线 + P0-9 自动挂标（14 测试，全量 810 passed）
 - [ ] **🔴 P0-10 年度口径一致性审计**（§6.5.7）：rb0/cu0 的 2023 分区为未复权
       名义价，跨年拼接产生约 35% 假跳空。需全品种全年度扫描 + 修复或标记。
 - [ ] **P0-11 `rb0/2020` 重建**：待 pandadata 恢复授权后用
@@ -570,7 +615,14 @@ rebuild_pipeline(root, truth_fetcher, *, layer, symbols=None) -> RebuildReport
 | `hexbroker/data/backup.py` | 🆕 P0-4 备源 raw 拉取器（§4.9） |
 | `hexbroker/data/test_backup.py` | 🆕 19 测试（降级路由 / 陈旧判定 / 交叉校验） |
 | `hexbroker/__init__.py` | 补齐 `HexQuotaError`/`HexNetworkError` 的 `source`/`symbol` 参数 |
+| `conftest.py` | 🆕 三层护栏（§6.5.4）：isolated lake / opt-in real lake / 生产写哨兵 |
+| `hexbroker/data/rebuild.py` | 🆕 P0-9 provisional 标记与真值重建流水线（§4.10） |
+| `hexbroker/data/test_rebuild.py` | 🆕 22 测试（含静默转正回归门禁） |
+| `hexbroker/data/failover.py` | 🆕 三级故障切换编排器（§4.11） |
+| `hexbroker/data/test_failover.py` | 🆕 14 测试（差异化路由 / NoAnchor 红线 / 跨尺度锚点） |
+| `scripts/dev_restore_polluted_2026.py` | 🆕 污染分区恢复工具（真值直取 + ni0 对照回归门禁） |
+| `scripts/dev_probe_year_rebuild_error.py` | 🆕 年度重建误差留一法评估（插值证伪） |
 
-**验证**：**774 passed**（原 677 → 713 → 730 → 751 → 752 → 774）；改动文件 ruff 全通过；
+**验证**：**810 passed**（原 677 → 713 → 730 → 751 → 752 → 774 → 796 → 810）；改动文件 ruff 全通过；
 真实联网 18/18 双源末日 2026-08-28；备源端到端实测（sina→graft）误差 -21.35 bp 且已标记
 provisional；`git fsck --no-dangling` 无输出；`data/` 零改动。
