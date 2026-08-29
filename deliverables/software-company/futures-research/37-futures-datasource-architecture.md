@@ -580,6 +580,31 @@ NoAnchor 拒绝 / Exhausted 逐源归因 / Tier3 降级与不可用报告 / 多�
 不豁免 / 容差边界 / 重复索引去重）；全量 **822 passed**（810 + 12）；ruff 全过；
 生产 `data/` 零污染。
 
+### 4.13 P0-12 缺失年度显式化（`store.load_processed`）
+
+**落地**：`hexbroker/data/store.py` 新增 `quality_notes()` +
+`load_processed(..., warn=True)`；`MISSING_GLOB` 常量收口到 store 定义、
+`rebuild` 转出（消除重复，避免 store→rebuild 循环导入）；
+`tests/test_store_quality.py`（14 测试）。
+
+**契约（非破坏性，三点）**：
+1. **数据行为不变**：洞仍被拼接（生产基线 1855 行照常读出），但从"无声"
+   变为**逐条 logging WARNING** —— 这是"宁可长期挂标，不可静默"在读路径
+   的对偶落地。`warn=False` 仅供已显式处理 quality_notes 的调用方。
+2. **三类结构化提示**（`DataQualityNote`）：`hole`（范围内年度洞，带
+   `_MISSING` 标记的 reason/quarantined_to/rebuild_condition；**无标记的洞
+   明确标注"最危险"**）/ `stale_mark`（标记与分区并存，应清除）/
+   `missing_mark`（范围外孤儿标记）。
+3. **纯只读**：只看分区文件名与 sidecar JSON，不读 Parquet 内容；
+   标记 JSON 损坏时降级为无留痕洞告警，不崩溃。
+
+**生产实战复核**：对真实 `data/raw` 湖 rb0（2020 洞 + 隔离标记）验证 ——
+洞被检出且告警携带完整标记内容（事故原因 / 隔离路径 / 重建条件），
+`load_processed` 数据行为与改动前逐位一致。
+
+**验证**：14 测试全过；全量 **836 passed**（822 + 14）；ruff 全过；生产
+`data/` 零污染。
+
 ---
 
 
@@ -601,8 +626,9 @@ NoAnchor 拒绝 / Exhausted 逐源归因 / Tier3 降级与不可用报告 / 多�
       检测器已固化为 `caliber`（12 测试）。**处置待拍板**（隔离/备案/真值重建）。
 - [ ] **P0-11 `rb0/2020` 重建**：待 pandadata 恢复授权后用
       `get_future_daily_post(method=close_pcr)` 重拉 2020 全年，替换隔离区文件。
-- [ ] **P0-12 缺失年度显式化**：`load_processed` 用 glob 会静默跳过缺失年度，
-      需改为读 `_MISSING_*.json` 标记并告警（§6.5.6 残留风险）。
+- [x] ~~**P0-12 缺失年度显式化**~~ → **已完成，见 §4.13**：`load_processed`
+      洞/标记逐条告警（数据行为不变），`quality_notes` 结构化三类提示；
+      `MISSING_GLOB` 收口 store 定义。
 - [ ] **P0-13 `hc0`/`ni0` OHLC 包络校验失败排查**：
       `HexDataError: 存在 OHLC 包络关系被破坏的 bar`。
 - [ ] **P1-b 生产 manifest 补全**：全库仅 cu0/rb0 两个品种有 manifest，
@@ -668,11 +694,13 @@ NoAnchor 拒绝 / Exhausted 逐源归因 / Tier3 降级与不可用报告 / 多�
 | `hexbroker/data/test_failover.py` | 🆕 14 测试（差异化路由 / NoAnchor 红线 / 跨尺度锚点） |
 | `hexbroker/data/caliber.py` | 🆕 年度口径检测器（§4.12）：边界假跳变 + 名义嫌疑年 |
 | `hexbroker/data/test_caliber.py` | 🆕 12 测试（rb0 断裂形态固化 / 缺失年不判罪） |
+| `hexbroker/data/store.py` | P0-12：`quality_notes` + `load_processed` 告警（§4.13） |
+| `tests/test_store_quality.py` | 🆕 14 测试（洞 / 陈旧标记 / 孤儿标记 / 损坏 JSON 降级） |
 | `scripts/dev_probe_p0_10_caliber.py` | 🆕 P0-10 审计探针（只读，外部名义价校准） |
 | `artifacts/p0_10_audit_20260829.log` | 🆕 审计证据存档（18 品种 × 9 年度全量） |
 | `scripts/dev_restore_polluted_2026.py` | 🆕 污染分区恢复工具（真值直取 + ni0 对照回归门禁） |
 | `scripts/dev_probe_year_rebuild_error.py` | 🆕 年度重建误差留一法评估（插值证伪） |
 
-**验证**：**822 passed**（原 677 → 713 → 730 → 751 → 752 → 774 → 796 → 810 → 822）；改动文件 ruff 全通过；
+**验证**：**836 passed**（原 677 → 713 → 730 → 751 → 752 → 774 → 796 → 810 → 822 → 836）；改动文件 ruff 全通过；
 真实联网 18/18 双源末日 2026-08-28；备源端到端实测（sina→graft）误差 -21.35 bp 且已标记
 provisional；`git fsck --no-dangling` 无输出；`data/` 零改动。
