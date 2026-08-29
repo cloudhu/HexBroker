@@ -686,6 +686,44 @@ def repair_envelope(df, *, drop_zero_ohl=True) -> tuple[pd.DataFrame, list[str]]
 存在语义错位，与自动化"每次写 2026 分区 + 重建 manifest"的实现方式耦合，
 属既有行为，本次不改（如需统一，随 P1-c 一并考虑）。
 
+---
+
+### 4.16 P1-c `raw_close` 列语义修复（管线写入真实名义价）
+
+**取证**：映射点在 `scripts/p6_4_fill_gaps.py::normalize_new_df`（L482-483）
+—— pandadata `close_pcr` 只供复权价，管线写 `raw_close = adj_close =
+close * scale`，nominal 校准信息完全丢失，"名义价冒充"（P0-10 定罪的
+cu0/rb0 2023）**无法湖内自检**。
+
+**修复（`enrich_raw_close`，仍在 parse 阶段内收口）**：
+```python
+enrich_raw_close(df, sym0, *, fetcher=None, min_coverage=0.9)
+    -> tuple[pd.DataFrame, list[str]]
+```
+- 对齐成功 → `raw_close` = 备源名义价（`BackupRawFetcher(save=False)`，
+  sina→akshare 逐级降级），notes 记录来源/覆盖行数；
+- 失败（备源全败 / 覆盖率 < 90% / 空帧）→ **原样返回**（raw_close 仍为
+  adj 复制品）+ 归因 note，调用方 `[WARN][NOMINAL]` 大声打印 ——
+  **静默即事故**，但备源失败不炸管线（真实拉取失败会先被 §4.7 体检拦住）；
+- all-or-nothing + 未对齐行保留 adj 复制品（避免 NaN 经 coerce_schema
+  fillna(0.0) 污染）；`--skip-nominal` 旗标供离线场景；
+- 备源**绝不落数据湖**（save=False，红线维持）。
+
+**端到端实测**（真实联网 dry-run，cu0 08-28 persisted，不写盘）：
+`[NOMINAL] cu0: 回填成功：来源 sina，覆盖 10/10 行（100.0%）`，预览中
+`raw_close=107690`（名义）≠ `adj_close=158594`（复权）—— 两列语义自此
+分离；同时 P0-13 包络修复告警正常工作。
+
+**验证**：新增 10 测试（成功/部分对齐/去重/告警透传/异常降级/空拉取/
+低覆盖拒绝/空帧短路/min_coverage/伪映射存在性守护）+ p6_4 既有 36 全过；
+全量 **853 passed**（843 + 10）；ruff 全过；生产 `data/` 零污染。
+
+**🔴 存量回填待拍板**：历史分区（全部 18 品种 × 全部年度）的 raw_close
+仍是 adj 复制品 —— 新语义只对**未来写入**生效。存量三个选项：
+①用 `enrich_raw_close` 对存量分区跑一轮离线回填（需逐品种逐段拉备源）；
+②随 P0-11/pandadata 恢复后的真值重建一并处理；
+③维持现状（nominal 自检只对未来数据可用）。
+
 
 ## 7. 待办（按优先级）
 
@@ -714,9 +752,9 @@ def repair_envelope(df, *, drop_zero_ohl=True) -> tuple[pd.DataFrame, list[str]]
 - [x] ~~**P1-b 生产 manifest 补全**~~ → **已完成，见 §4.15**：增量回填 16 品种
       （`skip_existing` 防触碰盘中自动化维护的 manifest），processed 层
       manifest 覆盖 2 → 18；fundamental/global 扁平布局另案。
-- [ ] **P1-c `raw_close` 列语义修复**（§4.12）：湖内该列恒等于 `adj_close`
-      （p6_4 管线映射），不携带名义价校准信息，使"名义价冒充"无法湖内自检。
-      需在管线中改为写入真实外部名义价（历史分区存量是否回填待拍板）。
+- [x] ~~**P1-c `raw_close` 列语义修复**~~ → **已完成，见 §4.16**：parse 阶段
+      `enrich_raw_close` 用备源名义价回填（失败大声降级），端到端实测
+      raw_close ≠ adj_close 语义分离；**存量分区回填待拍板**（§4.16）。
 
 ### 🔴 新发现的风险（需处置）
 - **pandadata MCP 连接器 token 已失效**（2026-08-28 19:50 实测
@@ -791,8 +829,11 @@ def repair_envelope(df, *, drop_zero_ohl=True) -> tuple[pd.DataFrame, list[str]]
 | `hexbroker/data/manifest.py` | P1-b：`backfill_manifests` 新增 `skip_existing` 增量模式（防覆盖生产 manifest，幂等） |
 | `scripts/backfill_manifests.py` | 新增 `--skip-existing` 旗标 |
 | `tests/test_data_manifest.py` | +2 测试（skip_existing 防覆盖/幂等 + 默认重写行为守护） |
+| `scripts/p6_4_fill_gaps.py` | P1-c：🆕 `enrich_raw_close`（parse 阶段备源名义价回填 + 大声降级）+ `--skip-nominal` |
+| `tests/test_p6_4_nominal_enrich.py` | 🆕 10 测试（成功/降级/覆盖门禁/伪映射守护） |
 
-**验证**：**843 passed**（原 677 → 713 → 730 → 751 → 752 → 774 → 796 → 810 → 822 → 836 → 841 → 843）；改动文件 ruff 全通过；
+**验证**：**853 passed**（原 677 → 713 → 730 → 751 → 752 → 774 → 796 → 810 → 822 → 836 → 841 → 843 → 853）；改动文件 ruff 全通过；
 真实联网 18/18 双源末日 2026-08-28；备源端到端实测（sina→graft）误差 -21.35 bp 且已标记
 provisional；hc0/ni0 端到端实测通过（4199 行，此前被包络校验拒绝）；生产 manifest 增量回填 16 品种
-（cu0/rb0 未动、parquet 零改动）；`git fsck --no-dangling` 无输出；`data/` 零改动。
+（cu0/rb0 未动、parquet 零改动）；P1-c 名义价回填 dry-run 实测 raw_close ≠ adj_close；
+`git fsck --no-dangling` 无输出；`data/` 零改动。
