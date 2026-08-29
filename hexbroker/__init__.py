@@ -61,9 +61,19 @@ class HexStaleDataError(HexDataError):
 class HexQuotaError(HexDataError):
     """数据源配额/额度耗尽（可重试，通常需等待配额重置）。"""
 
+    def __init__(self, message: str, *, source: str = "", symbol: str = "") -> None:
+        super().__init__(message)
+        self.source = source
+        self.symbol = symbol
+
 
 class HexNetworkError(HexDataError):
     """网络层失败（连接超时、DNS、被 WAF 拦截等），与"数据为空"区分。"""
+
+    def __init__(self, message: str, *, source: str = "", symbol: str = "") -> None:
+        super().__init__(message)
+        self.source = source
+        self.symbol = symbol
 
 
 class HexLeakageError(HexError):

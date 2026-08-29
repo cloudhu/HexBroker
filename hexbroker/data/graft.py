@@ -81,6 +81,12 @@ class GraftResult:
     new_dates: list
     anchor_date: object
     anchor_ratio: float
+    #: **续接段为临时值标记**。非空表示 ``series`` 中含有靠外推得到的、
+    #: 未经主源真值校验的数据，主源恢复后**必须**用主源重建该窗口。
+    #:
+    #: 必要性：口径跳变若发生在锚点**之后**，重叠区内没有对照样本，
+    #: 原理上无法检出（实测 cu0 2026-08-21：零告警但 21.35 bp 误差）。
+    provisional: bool = False
     segments: list = field(default_factory=list)
     warnings: list = field(default_factory=list)
     alignment: dict = field(default_factory=dict)
@@ -274,4 +280,5 @@ def graft_adjusted(
     return GraftResult(
         series=out, new_dates=list(new_dates), anchor_date=t0, anchor_ratio=k0,
         segments=segments, warnings=warnings, alignment=alignment,
+        provisional=True,
     )

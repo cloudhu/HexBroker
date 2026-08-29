@@ -41,6 +41,49 @@ class TestInputValidation:
         with pytest.raises(HexDataError, match="非正价格"):
             graft_adjusted(_s(idx, [1.0, 2.0, 3.0]), _s(idx, [1.0, 0.0, 3.0]))
 
+    def test_provisional_flag_set_when_grafted(self):
+        """有续接段 → provisional=True。下游据此在主源恢复后重建窗口。"""
+        idx = _idx("2026-08-01", 10)
+        raw = _s(idx, [100.0 + i for i in range(10)])
+        adj = _s(idx[:5], [2.0 * v for v in raw.iloc[:5]])
+        res = graft_adjusted(adj, raw)
+        assert res.provisional is True
+        assert res.new_dates == list(idx[5:])
+
+    def test_provisional_false_when_nothing_to_graft(self):
+        """备源没有更新的数据 → 无需外推 → 不是临时值。"""
+        idx = _idx("2026-08-01", 10)
+        raw = _s(idx, [100.0 + i for i in range(10)])
+        adj = _s(idx, [2.0 * v for v in raw])
+        res = graft_adjusted(adj, raw)
+        assert res.provisional is False
+        assert res.new_dates == []
+
+    def test_undetectable_break_after_anchor_yields_no_warning(self):
+        """锚点之后的口径跳变**原理上不可检出** —— 固化此事实。
+
+        cu0 2026-08-21 实测：重叠区 08-14~08-20 比值恒定（cv=0），
+        跳变发生在锚点之后，结果 -21.35 bp 但零告警。
+        这正说明 provisional 标记不可省（不能靠 warnings 兜底）。
+        """
+        idx = _idx("2026-08-14", 10)
+        base = [107690.0, 109540.0, 107930.0, 106850.0, 107200.0,
+                107520.0, 107910.0, 107980.0, 108750.0, 108300.0]
+        raw = _s(idx, base)
+        # 主源真值：前 5 天比值 1.472692，第 6 天起跳到 1.475842
+        adj_vals = [1.472692 * v for v in base[:5]] + [1.475842 * v for v in base[5:]]
+        adj_all = _s(idx, adj_vals)
+
+        res = graft_adjusted(adj_all.iloc[:5], raw)
+        # 重叠区（前 5 天）完全对齐 → 无告警
+        assert res.alignment["aligned"] is True
+        assert res.warnings == []
+        # 但锚点之后的跳变照样造成恒定偏移
+        err_bp = (res.series.loc[idx[5:]] / adj_all.loc[idx[5:]] - 1) * 1e4
+        assert abs(float(err_bp.iloc[0])) == pytest.approx(21.35, abs=0.5)
+        # 唯一的安全网就是 provisional 标记
+        assert res.provisional is True
+
     def test_no_overlap_raises(self):
         """无锚点禁止外推 —— 这是硬约束，不是警告。"""
         a = _s(_idx("2026-08-01", 3), [10.0, 11.0, 12.0])
