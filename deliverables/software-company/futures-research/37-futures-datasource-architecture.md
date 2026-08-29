@@ -958,6 +958,54 @@ FutureDataDaily.txt` → 200 / ~37.6 KB（`http://` 301 → https；`.htm` 页�
   三源全绿 `sina OK / akshare OK / czce OK rows=15`；
 - 全量回归 **879 passed**（869 + 10），EXIT=0。
 
+### 4.23 dominant 日历本地快照化（P1，§3 架构决策 ✅）
+
+**背景**：主源 pandadata 每次拉数都返回 `dominant_id`（+ 不复权
+`open_interest`），但此前从不落盘 —— 换月日历随主源"用完即弃"，
+形成"主源挂了，换月日历也得问主源要"的死结。
+
+**实现**：
+- `hexbroker/data/dominant.py`：快照目录
+  `{root}/interim/dominant/{sym0}.parquet`；
+  `extract_calendar`（pandadata DataFrame → datetime 索引升序去重日历）/
+  `save_calendar`（merge-upsert：同日期新值覆盖 + 新日期追加，幂等，
+  返回 total/overwritten/appended）/ `load_calendar`（缺→None）/
+  `detect_switches`（date/from_id/to_id 明细；首个合约无 from，入
+  DataFrame 后为 NaN，判定用 `pd.isna`）/ `rollover_dates(root, sym0,
+  start, end)`（窗口 (start, end] 切换日，快照缺失抛 FileNotFoundError；
+  输出与 graft `rollover_dates` 直接兼容）。
+- `scripts/p41_dominant_snapshot.py`：驱动器（dry-run 默认 / `--apply`），
+  `--input` 单文件 / `--input-dir` 批量（递归收 JSON，非 pandadata 结果
+  `[SKIP]` 留痕）；品种推断：显式 `--sym RB` → `rb0`（自动补 `0` 后缀，
+  已是 `rb0` 则原样）＞ `--sym-map "RB:rb0,CU:cu0"` 映射 ＞ 行内
+  `symbol` 列；多文件按品种聚合后入库。
+- **⚠️ 大声声明（继承 §4.8 陷阱）**：dominant_id 切换日 ≠ 后复权因子
+  切换日（cu0 相差 3 交易日）→ 本日历只用于换月日候选（graft
+  `rollover_dates`）/ 事后对账 / 切换历史分析，**不得**直接当后复权
+  调整依据。
+
+**开发期修复（实测定罪）**：
+1. p41 按合约去重 bug：初版 `drop_duplicates(subset=["dominant_id"])`
+   把同一主力合约存续期的多个交易日坍缩成 1 行（2 天日历只剩末 日）→
+   改为仅防多文件拼接的重叠日期（`index.duplicated`），日历语义 =
+   每交易日一行；
+2. `--sym RB` 输出 `rb` 而非 `rb0`（docstring 与行为不符）→ 显式
+   传入自动补 `0` 后缀，并加守护测试（不得落成裸品种名）。
+
+**验证（证据链）**：
+- +9 测试（真实 pandadata 列契约固化：extract 排序去重/缺列报错/
+  save-load 回环+幂等+upsert/detect_switches+rollover 窗口 (start,end]/
+  缺快照报错/p41 dry-run 零写盘+apply+幂等复跑/sym-map 覆盖/
+  `--sym` 归一化守护）；
+- **真实数据冒烟**：`artifacts/p11_rb0_2023_truth.json`（RB 2023 全年
+  pandadata 真值，242 行）→ dry-run（`[PLAN] rb0: 日历 242 行 … 历史切换
+  3 次`，零写盘）→ `--apply`（242 行落盘）→ 幂等复跑（覆盖 242 新增 0）；
+  快照 vs 真值**逐日对账 242/242 零不一致**（dominant_id +
+  open_interest 双列）；切换日 2023-04-03 / 09-01 / 12-01
+  （RB2305→RB2310→RB2401→RB2405），快照路径
+  `data/raw/interim/dominant/rb0.parquet`；
+- 全量回归 **888 passed**（879 + 9），EXIT=0；ruff 三文件全过。
+
 
 ## 7. 待办（按优先级）
 
@@ -1010,7 +1058,9 @@ FutureDataDaily.txt` → 200 / ~37.6 KB（`http://` 301 → https；`.htm` 页�
 - [x] ~~CZCE `.txt` 官方源接入（已验证 24 合约）~~ → **已完成，见 §4.22**：
       第三备源接线 + 10 测试 + 真实冒烟 15/15 与 sina 一致 + 879 passed
 - [x] ~~`p6_4_apply_persisted_dir.py --trading-day` 语义缺口~~ → **已完成，见 §4.7**
-- [ ] dominant 日历本地快照化（§3）
+- [x] ~~dominant 日历本地快照化（§3）~~ → **已完成，见 §4.23**：
+      `dominant.py` 模块 + `p41` 驱动器 + 9 测试；RB 2023 真值冒烟
+      242 行逐日对账零不一致、幂等复跑 0 新增；888 passed
 
 ### P2
 - [ ] DCE 官方源（本环境 412，需换网络环境）
@@ -1088,8 +1138,11 @@ FutureDataDaily.txt` → 200 / ~37.6 KB（`http://` 301 → https；`.htm` 页�
 | `tests/test_p6_4_nominal_enrich.py` | 🆕 10 测试（成功/降级/覆盖门禁/伪映射守护） |
 | `scripts/p11_truth_rebuild.py` | 🆕 P0-11 真值重建驱动器（dry-run 默认 / --apply 全链路 + 边界验证） |
 | `tests/test_p11_truth_rebuild.py` | 🆕 5 测试（零写盘/全链路/跨界过滤/失败路径） |
+| `hexbroker/data/dominant.py` | 🆕 P1 dominant 日历快照模块（extract/save-upsert/load/detect_switches/rollover_dates，§4.23） |
+| `scripts/p41_dominant_snapshot.py` | 🆕 dominant 快照驱动器（dry-run 默认/--apply/--sym 归一化/--sym-map/--input-dir 批量，§4.23） |
+| `tests/test_dominant_calendar.py` | 🆕 9 测试（真实 pandadata 列契约固化，§4.23） |
 
-**验证**：**862 passed**（原 677 → 713 → 730 → 751 → 752 → 774 → 796 → 810 → 822 → 836 → 841 → 843 → 853 → 858 → 862）；改动文件 ruff 全通过；
+**验证**：**888 passed**（原 677 → 713 → 730 → 751 → 752 → 774 → 796 → 810 → 822 → 836 → 841 → 843 → 853 → 858 → 862 → 869 → 879 → 888）；改动文件 ruff 全通过；
 真实联网 18/18 双源末日 2026-08-28；备源端到端实测（sina→graft）误差 -21.35 bp 且已标记
 provisional；hc0/ni0 端到端实测通过（4199 行，此前被包络校验拒绝）；生产 manifest 增量回填 16 品种
 （cu0/rb0 未动、parquet 零改动）；P1-c 名义价回填 dry-run 实测 raw_close ≠ adj_close；
