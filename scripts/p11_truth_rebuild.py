@@ -27,7 +27,8 @@ rb0/2020 分区被写成 2 行合成数据，已隔离（artifacts/quarantine/�
 --------
 - dry-run 默认：只解析/规范化/名义价回填/预览，零写盘；
 - --apply 走 P0-9 ``rebuild_partition``（missing 路径）：整分区新建 +
-  自动清 ``_MISSING_2020.json`` + manifest 重写（source=truth-rebuild）；
+  自动清 ``_MISSING_2020.json``；manifest 经 save_processed 按
+  "最近一次写入"语义重写（source="lake"，描述新分区）；
 - 真值仅取目标年度行（rebuild_partition 跨界拒绝双保险）；
 - 名义价回填（P1-c ``enrich_raw_close``）默认开启，失败大声降级。
 """

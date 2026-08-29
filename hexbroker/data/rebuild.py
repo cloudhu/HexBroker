@@ -246,7 +246,9 @@ def rebuild_partition(
     - provisional：同日期行**逐行替换**为真值行；真值有而库中无的日期**追加**。
       真值未覆盖到的临时日期**保留标记**（不静默转正）。
     - missing：真值必须含该年的行，整分区新建；真值不含该年任何行则 SKIPPED。
-    - 写回后重算 manifest（``source="truth-rebuild"``）。
+    - 写回经 ``DataLake.save_processed``，manifest 按"最近一次写入"语义
+      重算（``source="lake"``，字段只描述本次写入的分区）；重建来源信息
+      由调用方（驱动器）日志/报告承载，manifest 不承载。
     """
     root = Path(root)
     res = RebuildResult(symbol=item.symbol, freq=item.freq, year=item.year,

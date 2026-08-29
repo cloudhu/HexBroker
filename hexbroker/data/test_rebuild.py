@@ -170,10 +170,10 @@ class TestRebuildProvisional:
         row = _read_year(tmp_path).iloc[-1]
         assert row["close"] == 999.0 and row["volume"] == 77
         assert not (tmp_path / "processed" / SYM / "1d" / "_provisional.json").exists()
-        # manifest 已重算
+        # manifest 已重算（经 save_processed，"最近一次写入"语义）
         m = json.loads((tmp_path / "processed" / SYM / "1d" / "manifest.json")
                        .read_text(encoding="utf-8"))
-        assert m["source"] == "truth-rebuild" or m["source"] == "lake"
+        assert m["source"] == "lake"
 
     def test_append_new_dates(self, tmp_path):
         _mk_lake(tmp_path)
