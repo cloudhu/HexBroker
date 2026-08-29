@@ -1057,7 +1057,7 @@ spike-scan）；全量回归 **895 passed**（888+7），EXIT=0；ruff 全过；
 证据存档 `artifacts/p42_reconcile.{log,json}`、
 `artifacts/p42_spike_scan.{log,json}`。
 
-### 4.25 raw_close 单日口径残留 · 处置工具 p43（P2 工具就绪，apply 待拍板）
+### 4.25 raw_close 单日口径残留 · 处置工具 p43（P2 已闭环：apply 已执行）
 
 **修复原理（数学精确，非插值）**：后复权口径 `adj = k × raw`，`k` 段内
 恒定。V 形毛刺日 = raw 偏离段内常数 k 而 adj（pandadata 真值）平滑 →
@@ -1088,8 +1088,21 @@ raw，无估计误差。
 dry-run 零写盘→apply 精确修复 / 复扫归零+幂等 / --json 报告）；
 ruff 全过。
 
-**🔴 待主理人拍板**：`--apply` 执行（161 处 / 跨 18 品种约百余个年度
-分区重写；有 dry-run 全量计划可审）。
+**🔴 --apply 已执行（2026-08-29，主理人拍板）**。执行前 preflight 重跑
+dry-run 与存档计划 `p43_repair_plan.json` **逐条一致**（161 处 / 0 拦截 /
+18 品种，`(date, old_raw, new_raw)` 全同）后才落盘。执行证据
+（`artifacts/p43_apply_20260829.log`）：
+- `[WRITE] 重写 82 个年度分区 / 161 行 raw_close`；内置复扫
+  **0 事件**（residual_events_after=0），exit 0；
+- **定点落盘验证**：cu0 2019-04-22 `raw_close = 49250.0`（原 69625.70），
+  相邻 adj 序列 70021.5 → 69625.7 → 69498.5 平滑无跳；
+- **幂等复跑**：重跑 dry-run `[PLAN] 修复 0 处` —— 湖内毛刺清零；
+- **sidecar 留痕**：`data/raw/processed/_RAW_CLOSE_REPAIRS.json` 单条
+  批次记录 `{ts, tool: p43_raw_close_spike_repair, n_partitions: 82,
+  n_rows: 161, residual_events_after: 0}`；幂等复跑未追加（no-op
+  不留痕语义验证通过）；
+- 本轮为纯数据变更（无代码改动），故仅 docs 提交；测试基线维持
+  **901 passed**。
 
 
 ## 7. 待办（按优先级）
@@ -1151,10 +1164,10 @@ ruff 全过。
 - [ ] DCE 官方源（本环境 412，需换网络环境）
 - [ ] pytdx 扩展行情 7727（握手失败，需换环境）
 - [ ] 东财（代理/非代理两种环境均失败，倾向排除）
-- [ ] 🔴 **raw_close 单日口径残留**（§4.24 新立）：全湖 161 事件跨品种
-      同日聚集（2019-04-22 ×14 品种等），疑似备源端坏 bar 直灌；
-      **处置工具 p43 已就绪（§4.25）**：dry-run 161 处 / 0 拦截 /
-      数学精确修复值 + 独立验证；**--apply 待拍板**
+- [x] ~~🔴 **raw_close 单日口径残留**（§4.24 新立）~~ → **已闭环，见 §4.25**：
+      处置工具 p43（数学精确 adj/k + 三重安全门）→ **--apply 已执行
+      （2026-08-29 主理人拍板）**：82 分区 / 161 行重写，复扫 0 事件，
+      幂等复跑 0，sidecar 留痕；独立验证 akshare 该日整行缺失
 - [ ] 湖内 `is_rollover` 列全 False 形同虚设（§4.24 附带发现）：
       填充语义（dominant 切换日? 因子切换日?）待定义
 
@@ -1241,4 +1254,6 @@ ruff 全过。
 真实联网 18/18 双源末日 2026-08-28；备源端到端实测（sina→graft）误差 -21.35 bp 且已标记
 provisional；hc0/ni0 端到端实测通过（4199 行，此前被包络校验拒绝）；生产 manifest 增量回填 16 品种
 （cu0/rb0 未动、parquet 零改动）；P1-c 名义价回填 dry-run 实测 raw_close ≠ adj_close；
-`git fsck --no-dangling` 无输出；`data/` 零改动。
+`git fsck --no-dangling` 无输出；`data/` 改动仅限 p43 --apply 定点修复
+（2026-08-29：82 分区 / 161 行 raw_close，见 §4.25，sidecar 留痕 + 复扫
+0 事件 + 幂等复跑 0），其余零改动。

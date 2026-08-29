@@ -73,6 +73,7 @@
 | **P0-13** | `hc0`/`ni0` OHLC 包络校验失败：根源端毛刺 bar（各 1 根）；`schema.repair_envelope` 收口三源修复，akshare 补缺失步骤 + 大声告警 | ✅ |
 | **P1-CZCE** | 🆕 交易所官方源接入：**CZCE `.txt` 第三备源**（主力=当日 OI 最大合约官方近似，仅郑商所品种；真实冒烟 CF/SR/TA×5 日 15/15 与 sina 完全一致）；**SHFE/INE 复测不可达**（数据端点全 404 + 官网 WAF 人机识别，降级 P2）；879 passed | ✅ CZCE / ⛔ SHFE-INE→P2 |
 | **P1-Dominant** | 🆕 **dominant 日历本地快照化（§4.23）**：`dominant.py`（extract / save merge-upsert 幂等 / load / detect_switches / rollover_dates）+ `p41` 驱动器（dry-run 默认、`--sym RB→rb0` 归一化、`--input-dir` 批量）；开发期实测定罪 2 缺陷（按合约去重坍缩存续期 / `--sym` 漏补 `0` 后缀）；RB 2023 真值冒烟 242 行逐日对账零不一致、幂等复跑 0 新增；888 passed | ✅ |
+| **P2-rawclose** | 🆕 **raw_close 单日口径残留全湖定罪 + 修复闭环（§4.24/§4.25）**：p42 对账探针副产发现（161 事件跨品种同日聚集：2019-04-22 ×12 / 2021-12-30 ×11）；p43 修复驱动器（数学精确 `raw_true = adj/k` + G1/G2/G3 三重安全门 + dry-run 默认 + 内置复扫门禁 + sidecar 留痕）；akshare 独立验证 cu0 2019-04-22 源端整行缺失；**--apply 已执行（2026-08-29 主理人拍板）**：preflight 与存档计划逐条一致 → 82 分区 / 161 行重写 → 复扫 0 事件 → 幂等复跑 0 → sidecar 单条留痕；901 passed | ✅ |
 
 ---
 
@@ -255,7 +256,7 @@
 2. **Q6**：收盘价 vs 结算价 —— 实测两者同口径可任选，选哪个？
 3. **🔴 pandadata 连接器 token 失效**，是否现在恢复授权？（主源不可用期间，
    整个备源链路的优先级建议上调；`rb0/2020` 的重拉也卡在这里）
-4. **下一步优先级**：**P0 全清、P1 全清**（CZCE 第三备源 + dominant 日历快照化均落地）；P2 剩 DCE/pytdx/东财/SHFE-INE（均需换网络环境）+ **🔴 raw_close 单日残留 --apply 待拍板**（p43 工具就绪：dry-run 161 处 / 0 拦截 / 数学精确 / 独立验证，§4.25）。**三大拍板项全部裁决并执行完毕（cu0/rb0 2023 真值重建 / raw_close 存量批量 / rebuild source 语义 docstring 修正）**。生产湖 raw_close 全量 162 分区均为真名义价，备份 `data/p37_backup_processed_20260829T101345` 可回滚；dominant 快照 `data/raw/interim/dominant/{rb0,cu0}.parquet`（485/242 行）已落盘。
+4. **下一步优先级**：**P0 全清、P1 全清**（CZCE 第三备源 + dominant 日历快照化均落地）；P2 剩 DCE/pytdx/东财/SHFE-INE（均需换网络环境）+ `is_rollover` 填充语义待定义；**raw_close 单日残留 --apply 已执行（2026-08-29 主理人拍板）：82 分区 / 161 行定点修复，复扫 0 事件 + 幂等复跑 0 + sidecar 留痕（§4.25）**。三大拍板项全部裁决并执行完毕（cu0/rb0 2023 真值重建 / raw_close 存量批量 / rebuild source 语义 docstring 修正）。生产湖 raw_close 全量 162 分区均为真名义价，备份 `data/p37_backup_processed_20260829T101345` 可回滚；dominant 快照 `data/raw/interim/dominant/{rb0,cu0}.parquet`（485/242 行）已落盘。
 5. **🔴 cu0/rb0 2023 处置拍板**：①隔离 + `_MISSING_2023.json`（留 1 年洞，需 P0-12 配套）②保留 + 备案 ③等授权恢复后真值重建？
 5. **🔴 新增 · 2023 年度口径断裂**（rb0/cu0 存未复权名义价，跨年约 35% 假跳空）：
    是否立 P0-10 优先处理？影响所有跨 2023 年的回测与训练，且数据"看起来完全正常"。
