@@ -14,6 +14,7 @@ from _helpers import make_prices
 from hexbroker.config import load_config
 from hexbroker.data.manifest import (
     DataManifest,
+    backfill_flat_manifests,
     backfill_manifests,
     build_manifest,
     content_fingerprint,
@@ -156,6 +157,89 @@ def test_backfill_without_skip_existing_overwrites(tmp_path):
     )
     backfill_manifests(tmp_path, cfg)
     assert read_manifest(tmp_path, "processed", "A", "1d").data_version.startswith("backfill-")
+
+
+# ---------------------------------------------------------------------------
+# 扁平面板（fundamental/global）回填 —— P1-b 遗留另案
+# ---------------------------------------------------------------------------
+def _flat_fundamental_df():
+    """fundamental 面板形态：RangeIndex + date 列（basis_CU 等）。"""
+    return pd.DataFrame({
+        "date": pd.to_datetime(["2020-01-02", "2020-01-03", "2020-01-06"]),
+        "basis": [10.0, 11.0, 12.0],
+        "basis_ratio": [0.1, 0.11, 0.12],
+        "spot_price": [100.0, 101.0, 102.0],
+    })
+
+
+def _flat_global_df():
+    """global 面板形态：单层命名 DatetimeIndex、无 date 列（spx/t10y 等）。"""
+    idx = pd.DatetimeIndex(pd.to_datetime(["2020-01-02", "2020-01-03"]),
+                           name="datetime")
+    return pd.DataFrame({"close": [3200.0, 3215.0], "open": [3190.0, 3205.0]},
+                        index=idx)
+
+
+def test_build_manifest_datetimeindex_date_range():
+    """build_manifest 增强：单层命名 DatetimeIndex 也能算出 date_range。"""
+    m = build_manifest("global", "spx", "flat", _flat_global_df(), source="lake")
+    assert m.date_range == ("2020-01-02", "2020-01-03")
+    assert m.n_rows == 2
+
+
+def test_backfill_flat_panels_creates_manifests(tmp_path):
+    """fundamental（date 列）与 global（DatetimeIndex）扁平面板均回填；
+    manifest 落在 {layer}/{name}/flat/manifest.json（freq="flat"），
+    与既有 {layer}/{symbol}/{freq}/ 约定同构，read_manifest 可直接读回。"""
+    fdir = tmp_path / "fundamental"
+    gdir = tmp_path / "global"
+    fdir.mkdir()
+    gdir.mkdir()
+    write_parquet(_flat_fundamental_df(), fdir / "basis_CU.parquet")
+    write_parquet(_flat_global_df(), gdir / "spx.parquet")
+
+    n = backfill_manifests(tmp_path, load_config())
+    assert n >= 2
+
+    mf = read_manifest(tmp_path, "fundamental", "basis_CU", "flat")
+    assert mf is not None
+    assert mf.freq == "flat" and mf.n_rows == 3
+    assert mf.date_range == ("2020-01-02", "2020-01-06")
+    # 扁平面板不经 adjust/main_rule 口径处理 → constants 留空
+    assert mf.constants == {}
+
+    mg = read_manifest(tmp_path, "global", "spx", "flat")
+    assert mg is not None
+    assert mg.freq == "flat" and mg.n_rows == 2
+    assert mg.date_range == ("2020-01-02", "2020-01-03")
+    assert mg.content_fingerprint == content_fingerprint(_flat_global_df())
+
+
+def test_backfill_flat_skip_existing_idempotent(tmp_path):
+    """skip_existing=True 幂等零回填；默认 False 保持重写语义。"""
+    fdir = tmp_path / "fundamental"
+    fdir.mkdir()
+    write_parquet(_flat_fundamental_df(), fdir / "basis_CU.parquet")
+
+    assert backfill_manifests(tmp_path, load_config(), skip_existing=True) >= 1
+    m_path = fdir / "basis_CU" / "flat" / "manifest.json"
+    before = m_path.read_text(encoding="utf-8")
+
+    # 幂等：再次增量运行零回填，manifest 逐字节未动
+    assert backfill_manifests(tmp_path, load_config(), skip_existing=True) == 0
+    assert m_path.read_text(encoding="utf-8") == before
+
+    # 默认重写语义
+    assert backfill_manifests(tmp_path, load_config()) >= 1
+    assert read_manifest(tmp_path, "fundamental", "basis_CU", "flat") \
+        .data_version.startswith("backfill-")
+
+
+def test_backfill_flat_empty_layers_zero_count(tmp_path):
+    """flat 层不存在或为空时零回填、不报错（幂等守护）。"""
+    (tmp_path / "fundamental").mkdir()  # 存在但无 parquet
+    assert backfill_flat_manifests(tmp_path) == 0
+    assert backfill_manifests(tmp_path, load_config()) == 0  # global 层不存在
 
 
 # ---------------------------------------------------------------------------

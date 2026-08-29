@@ -135,6 +135,9 @@ def build_manifest(layer: str, symbol: str, freq: str, df: pd.DataFrame, *,
             if c in df.columns:
                 dts = pd.to_datetime(df[c])
                 break
+        # 单层命名 DatetimeIndex（如 global 扁平面板 {layer}/{name}.parquet）
+        if dts is None and isinstance(df.index, pd.DatetimeIndex):
+            dts = pd.Series(df.index)
     date_range = ("", "")
     if dts is not None and len(dts):
         date_range = (dts.min().strftime("%Y-%m-%d"), dts.max().strftime("%Y-%m-%d"))
@@ -155,9 +158,10 @@ def build_manifest(layer: str, symbol: str, freq: str, df: pd.DataFrame, *,
 def backfill_manifests(root: Path, cfg: Any, *, skip_existing: bool = False) -> int:
     """对存量 parquet 分区回填 manifest；返回回填数（PRD A3.1 迁移脚本）。
 
-    覆盖两种布局：
+    覆盖三种布局：
     - ``{layer}/{symbol}/{freq}/{year}.parquet``（按年分区）；
-    - ``{layer}/{symbol}/{freq}.parquet``（无年份分区）。
+    - ``{layer}/{symbol}/{freq}.parquet``（无年份分区）；
+    - ``{layer}/{name}.parquet``（扁平面板，仅 fundamental/global 层）。
 
     ``skip_existing=True`` 时跳过已有 manifest 的分区（增量补全，不触碰
     生产自动化在维护的 manifest，如盘中流水线按 ``v1`` 重写的品种）。
@@ -207,6 +211,57 @@ def backfill_manifests(root: Path, cfg: Any, *, skip_existing: bool = False) -> 
                     root,
                 )
                 count += 1
+    count += backfill_flat_manifests(root, skip_existing=skip_existing)
+    return count
+
+
+# 扁平面板布局仅存在于这两层（数据契约；raw/interim/processed 均有 symbol 层级）
+FLAT_PANEL_LAYERS: tuple[str, ...] = ("fundamental", "global")
+
+
+def backfill_flat_manifests(
+    root: Path,
+    *,
+    layers: tuple[str, ...] = FLAT_PANEL_LAYERS,
+    skip_existing: bool = False,
+) -> int:
+    """对扁平面板 ``{layer}/{name}.parquet`` 回填 manifest；返回回填数。
+
+    P1-b 遗留另案：``fundamental``/``global`` 为单层扁平布局（无
+    symbol/freq 目录层级），``backfill_manifests`` 的两种布局扫描天然
+    不覆盖（生产实测覆盖 0/117）。
+
+    manifest 约定：``manifest_path(root, layer, name, "flat")`` =
+    ``{layer}/{name}/flat/manifest.json``，与既有
+    ``{layer}/{symbol}/{freq}/`` 约定同构，``read_manifest`` 可直接读回；
+    ``freq="flat"`` 自描述布局。扁平面板不经 adjust/main_rule 口径处理
+    （global 为外盘原始收盘、fundamental 为基差/现货），``constants`` 留空，
+    避免暗示期货复权口径适用。
+
+    消费者安全：fundamental/global 全部按精确文件名访问
+    （``global_ref.load_global_close``、p20_4/p23 的
+    ``FUND_DIR / f"basis_{sym}.parquet"``），无目录枚举，
+    新增 ``{name}/`` 子目录零影响。
+    """
+    root = Path(root)
+    count = 0
+    for layer in layers:
+        layer_dir = root / layer
+        if not layer_dir.exists():
+            continue
+        for fp in sorted(layer_dir.glob("*.parquet")):
+            if skip_existing and manifest_path(root, layer, fp.stem, "flat").exists():
+                continue
+            df = read_parquet(fp)
+            write_manifest(
+                build_manifest(
+                    layer, fp.stem, "flat", df,
+                    source="lake",
+                    data_version=_backfill_version(),
+                ),
+                root,
+            )
+            count += 1
     return count
 
 
