@@ -12,7 +12,7 @@ from typing import Optional
 
 import pandas as pd
 
-from ... import HexDataError
+from ... import HexDataError, HexEmptyDataError
 from ..base import DataSource
 from ..schema import BarFrame
 
@@ -23,6 +23,9 @@ class CsvSource(DataSource):
     """本地 CSV 数据源。"""
 
     name = "csv"
+
+    #: 离线确定性源：不做新鲜度判定，仅做空结果门禁
+    check_freshness = False
 
     def __init__(self, root: Optional[str | Path] = None) -> None:
         self.root = Path(root) if root else DEFAULT_SAMPLE_DIR
@@ -43,9 +46,12 @@ class CsvSource(DataSource):
             raw = raw.sort_values("date").reset_index(drop=True)
             df = self._build_frame(raw, sym, freq)
             frames.append(df)
+        if not frames:
+            raise HexEmptyDataError(f"CSV 源未取到任何品种数据（请求 {symbols}）", source="csv")
         out = pd.concat(frames)
-        out = self._clip_range(out, start, end)
-        return BarFrame(df=out, freq=freq, source="csv").validate()
+        # 收口：裁剪 + 空结果门禁 + 契约校验。
+        # CSV 是离线确定性源，默认关闭新鲜度判定（见类属性 check_freshness）。
+        return self._finalize(out, start, end, freq, symbols=symbols, source="csv")
 
     @staticmethod
     def _build_frame(raw: pd.DataFrame, symbol: str, freq: str) -> pd.DataFrame:

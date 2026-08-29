@@ -10,15 +10,16 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from unittest.mock import MagicMock
 
 import pandas as pd
 import pytest
 
-from hexbroker.data.sources.sina_source import SinaSource
 from hexbroker import HexConfigError, HexDataError
 from hexbroker.data.schema import BarFrame
+from hexbroker.data.sources.sina_source import SinaSource
 
 
 # ---------------------------------------------------------------------------
@@ -166,14 +167,31 @@ class TestHealthCheck:
 # fetch_bars（monkeypatch requests）
 # ---------------------------------------------------------------------------
 class FakeResp:
-    def __init__(self, payload):
+    """模拟新浪响应。
+
+    同时提供 ``text``（JSONP 包装，1d 新端点路径）与 ``json()``（分钟线旧端点路径），
+    使 mock 与真实契约一致 —— 早期只提供 ``json()``，会掩盖两类端点的风格差异。
+    """
+
+    def __init__(self, payload, style: str = "jsonp"):
         self._payload = payload
+        self._style = style
 
     def raise_for_status(self):
         pass
 
     def json(self):
         return self._payload
+
+    @property
+    def text(self):
+        if self._style != "jsonp":
+            return json.dumps(self._payload)
+        # 真实包装形如：/*<script>location.href='//sina.com';</script>*/\nvar _RB0=(…);
+        return (
+            "/*<script>location.href='//sina.com';</script>*/\n"
+            f"var _XX=({json.dumps(self._payload)});"
+        )
 
 
 class TestFetchBars:

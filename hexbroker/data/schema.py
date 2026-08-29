@@ -11,7 +11,10 @@ from dataclasses import dataclass, field
 
 import pandas as pd
 
-from .. import HexDataError
+from .. import (
+    HexDataError,
+    HexEmptyDataError,
+)
 from ..constants import OHLCV_COLS
 
 REQUIRED_COLS = OHLCV_COLS + ["adj_close", "raw_close"]
@@ -42,9 +45,17 @@ class BarFrame:
     def length(self) -> int:
         return len(self.df)
 
-    def validate(self) -> "BarFrame":
-        """校验数据契约，失败抛 ``HexDataError``。"""
-        validate_bars(self.df, freq=self.freq)
+    def validate(self, allow_empty: bool = False) -> "BarFrame":
+        """校验数据契约，失败抛 ``HexDataError``。
+
+        ``allow_empty``：是否容忍 0 行。默认 **False** —— 0 行一律视为异常。
+
+        背景（2026-08-28 停摆事故根因）：空 DataFrame 能通过 ``validate_bars``
+        的全部既有校验项（无重复索引、列齐全、groupby 无分组故单调性检查空转、
+        价格比较对空 Series 恒真），导致"数据源停更 → 请求新日期窗口 → 被裁剪成
+        0 行 → 静默返回成功"整条链路被伪装成刷新成功。此处必须由默认行为拦截。
+        """
+        validate_bars(self.df, freq=self.freq, allow_empty=allow_empty)
         return self
 
     def by_symbol(self, symbol: str) -> pd.DataFrame:
@@ -58,15 +69,23 @@ class BarFrame:
         return self.df
 
 
-def validate_bars(df: pd.DataFrame, freq: str = "1d") -> bool:
+def validate_bars(df: pd.DataFrame, freq: str = "1d", allow_empty: bool = False) -> bool:
     """校验 BarFrame 的 DataFrame 是否符合契约。
 
     校验项：
+    0. 非空（``allow_empty=False`` 时，0 行抛 ``HexEmptyDataError``）
     1. 两级 MultiIndex (symbol, datetime)
     2. 必须列齐全；索引单调、无重复
     3. 价格非负、high>=low、high/low 包络 open/close
     4. 缺失值策略：前向填充 ≤1 根后不得残留 NaN（除可选标记列）
     """
+    if len(df) == 0:
+        if allow_empty:
+            return True
+        raise HexEmptyDataError(
+            "BarFrame 为 0 行：取数链路返回空结果。"
+            "若确需容忍空结果（如区间内无交易日），请显式传 allow_empty=True。"
+        )
     if not isinstance(df.index, pd.MultiIndex) or df.index.nlevels != 2:
         raise HexDataError("索引必须为 MultiIndex(symbol, datetime)")
     syms = df.index.get_level_values(0)

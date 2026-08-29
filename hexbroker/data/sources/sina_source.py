@@ -14,28 +14,54 @@
 
 from __future__ import annotations
 
+import json
 import time
 from typing import Optional
 
 import pandas as pd
 
-from ... import HexConfigError, HexDataError
+from ... import (
+    HexConfigError,
+    HexDataError,
+    HexEmptyDataError,
+    HexNetworkError,
+)
 from ..base import DataSource
 from ..schema import BarFrame
 from ..store import DataLake
 
 # 新浪内盘期货公开接口 base
-SINA_BASE = "http://stock2.finance.sina.com.cn/futures/api"
+SINA_BASE = "https://stock2.finance.sina.com.cn/futures/api"
 
-# 本项目 freq -> (脚本文件, 服务名)
-FREQ_TO_SERVICE: dict[str, tuple[str, str]] = {
-    "1d": ("json.php", "IndexService.getInnerFuturesDailyKLine"),
-    "60m": ("json_v2.php", "IndexService.getInnerFuturesMiniKLine60m"),
+# 本项目 freq -> (脚本文件, 服务名, 响应风格)
+#
+# ⚠️ 2026-08-28 实测更正（主理人独立取证）：
+#   旧端点 ``json.php/IndexService.getInnerFuturesDailyKLine`` **已冻结于 2024-07-17**，
+#   仅 6 字段（无持仓量/结算价）。本项目原先正使用此端点 —— 故障切换时会静默喂两年陈数据。
+#   新端点 ``jsonp.php/.../InnerFuturesNewService.getDailyKLine`` 实测新鲜到当日
+#   （2026-08-28 拉 rb0 得 4232 行、末日 2026-08-28），且多给持仓量(``p``)与结算价(``s``)。
+#   akshare 的 ``futures_main_sina`` 走的正是新端点。
+FREQ_TO_SERVICE: dict[str, tuple[str, str, str]] = {
+    "1d": ("jsonp.php", "InnerFuturesNewService.getDailyKLine", "jsonp"),
+    # 分钟线仍走旧版 IndexService（新服务未提供分钟线），风格保持 json
+    "60m": ("json_v2.php", "IndexService.getInnerFuturesMiniKLine60m", "json"),
     # 扩展：分钟线可按需开启（新浪支持 1/5/15/30/60m）
-    "30m": ("json_v2.php", "IndexService.getInnerFuturesMiniKLine30m"),
-    "15m": ("json_v2.php", "IndexService.getInnerFuturesMiniKLine15m"),
-    "5m": ("json_v2.php", "IndexService.getInnerFuturesMiniKLine5m"),
-    "1m": ("json_v2.php", "IndexService.getInnerFuturesMiniKLine1m"),
+    "30m": ("json_v2.php", "IndexService.getInnerFuturesMiniKLine30m", "json"),
+    "15m": ("json_v2.php", "IndexService.getInnerFuturesMiniKLine15m", "json"),
+    "5m": ("json_v2.php", "IndexService.getInnerFuturesMiniKLine5m", "json"),
+    "1m": ("json_v2.php", "IndexService.getInnerFuturesMiniKLine1m", "json"),
+}
+
+# 新端点（InnerFuturesNewService）使用单字母键，需映射到标准列名
+SINA_NEW_FIELD_MAP: dict[str, str] = {
+    "d": "date",
+    "o": "open",
+    "h": "high",
+    "l": "low",
+    "c": "close",
+    "v": "volume",
+    "p": "open_interest",  # 持仓量
+    "s": "settlement",  # 结算价
 }
 
 # 单合约代码后缀识别（4 字母品种 + 4 位数字，如 CU2609）
@@ -95,22 +121,68 @@ class SinaSource(DataSource):
             return f"{product}{CONTINUOUS_SUFFIX}"
         return s.lower()
 
+    # ---- URL / 响应解析 ---------------------------------------------------
+    @staticmethod
+    def _build_url(code: str, script: str, service: str, style: str) -> str:
+        """按响应风格拼 URL。
+
+        * ``jsonp``：``jsonp.php/var%20_{SYM}=/{service}?symbol={SYM}``，**代码必须大写**
+          （实测小写返回空）。返回体是 JSONP，需剥壳。
+        * ``json``：``{script}/{service}?symbol={code}``，直接返回 JSON。
+        """
+        if style == "jsonp":
+            sym = code.upper()
+            return f"{SINA_BASE}/{script}/var%20_{sym}=/{service}?symbol={sym}"
+        return f"{SINA_BASE}/{script}/{service}?symbol={code}"
+
+    @staticmethod
+    def _parse_payload(text: str, code: str, freq: str, style: str) -> list:
+        """解析响应体。
+
+        JSONP 包装形如：::
+
+            /*<script>location.href='//sina.com';</script>*/
+            var _RB0=([{"d":"2009-03-27", ...}]);
+
+        需取首个 ``(`` 与最后一个 ``)`` 之间的内容再 ``json.loads``。
+        """
+        if style != "jsonp":
+            data = json.loads(text)
+            return data if isinstance(data, list) else []
+
+        start = text.find("(")
+        end = text.rfind(")")
+        if start < 0 or end <= start:
+            raise HexDataError(
+                f"新浪 {code}({freq}) 返回非 JSONP 格式，无法解析（前 80 字符：{text[:80]!r}）"
+            )
+        data = json.loads(text[start + 1 : end])
+        if not isinstance(data, list):
+            raise HexDataError(
+                f"新浪 {code}({freq}) JSONP 载荷不是列表，实际类型 {type(data).__name__}"
+            )
+        return data
+
     # ---- 抓取 ------------------------------------------------------------
     def _fetch_one(self, code: str, freq: str) -> pd.DataFrame:
         """抓单合约/连续的 K 线，返回单 symbol 的 DataFrame。"""
         requests = self._require_requests()
         if freq not in FREQ_TO_SERVICE:
             raise HexConfigError(f"新浪不支持 freq={freq!r}，可选 {list(FREQ_TO_SERVICE)}")
-        script, service = FREQ_TO_SERVICE[freq]
-        url = f"{SINA_BASE}/{script}/{service}?symbol={code}"
+        script, service, style = FREQ_TO_SERVICE[freq]
+        url = self._build_url(code, script, service, style)
         try:
             resp = requests.get(url, timeout=self.timeout)
             resp.raise_for_status()
-            data = resp.json()
+            data = self._parse_payload(resp.text, code, freq, style)
+        except HexDataError:
+            raise
         except Exception as exc:
-            raise HexDataError(f"新浪抓取 {code}({freq}) 失败：{exc}") from exc
+            raise HexNetworkError(f"新浪抓取 {code}({freq}) 失败：{exc}") from exc
         if not data:
-            raise HexDataError(f"新浪返回 {code}({freq}) 空数据（合约可能不支持）")
+            raise HexEmptyDataError(
+                f"新浪返回 {code}({freq}) 空数据（合约可能不支持）", source="sina"
+            )
         # 新浪返回最新在前，需反转回时间升序
         data = list(reversed(data))
         return self._rows_to_frame(data, code)
@@ -121,13 +193,16 @@ class SinaSource(DataSource):
 
         新浪内盘期货接口返回**列表的列表**（非 dict）：
         ``[date, open, high, low, close, volume]``（60min 字段相同，date 含时间）。
-        若返回 dict 列表（部分版本）则原样使用。
+        若返回 dict 列表（新端点 ``InnerFuturesNewService``）则先按
+        ``SINA_NEW_FIELD_MAP`` 把单字母键换成标准列名。
         """
         cols = ["date", "open", "high", "low", "close", "volume"]
         norm: list[dict] = []
         for row in data:
             if isinstance(row, dict):
-                norm.append(row)
+                norm.append(
+                    {SINA_NEW_FIELD_MAP.get(k, k): v for k, v in row.items()}
+                )
             elif isinstance(row, (list, tuple)):
                 norm.append(dict(zip(cols, row)))
             else:
@@ -177,7 +252,8 @@ class SinaSource(DataSource):
                 df[col] = 0.0
             else:
                 df[col] = df[col].astype(float)
-        # 新浪不提供 amount/open_interest，补 0；不复权
+        # 新端点（1d）已提供 volume/open_interest/settlement；旧端点（分钟线）
+        # 与 amount 仍缺失，此处补 0.0。新浪一律不复权。
         df["amount"] = df["amount"].astype(float)
         df["open_interest"] = df["open_interest"].astype(float)
         df["raw_close"] = df["close"].astype(float)
@@ -206,17 +282,21 @@ class SinaSource(DataSource):
             if self.rate_limit_sleep:
                 time.sleep(self.rate_limit_sleep)
 
+        if not frames:
+            raise HexEmptyDataError(
+                f"新浪未取到任何品种数据（请求 {symbols}）", source="sina"
+            )
         out = pd.concat(frames)
-        out = self._clip_range(out, start, end)
+        # 收口：裁剪 + 空结果/新鲜度门禁 + 契约校验（杜绝"裁成 0 行还报成功"）
+        bf = self._finalize(out, start, end, freq, symbols=symbols, source="sina")
 
-        bf = BarFrame(df=out, freq=freq, source="sina")
         do_save = self.save if save is None else save
         if do_save:
             try:
                 self.lake.save_processed(bf)
             except Exception as exc:
                 raise HexDataError(f"新浪落 Parquet 失败：{exc}") from exc
-        return bf.validate()
+        return bf
 
     def health_check(self) -> bool:
         try:

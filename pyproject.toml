@@ -41,7 +41,10 @@ optional = ["pyqlib", "rqalpha", "vnpy", "mlflow"]
 packages = ["hexbroker"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests", "hexbroker/data/sources"]
+# 注意：testpaths 是**白名单**，写在列表之外的测试文件会被静默跳过、永不执行
+# （2026-08-29：hexbroker/data/test_freshness.py 曾因此被完全跳过）。
+# 新增测试目录时必须同步登记此处。
+testpaths = ["tests", "hexbroker/data", "hexbroker/data/sources"]
 python_files = ["test_*.py"]
 addopts = "-q"
 filterwarnings = ["ignore::DeprecationWarning"]

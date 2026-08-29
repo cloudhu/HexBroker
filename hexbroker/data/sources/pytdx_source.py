@@ -22,7 +22,7 @@ from typing import Optional
 
 import pandas as pd
 
-from ... import HexConfigError, HexDataError
+from ... import HexConfigError, HexDataError, HexEmptyDataError
 from ..base import DataSource
 from ..schema import BarFrame
 from ..store import DataLake
@@ -276,9 +276,12 @@ class PytdxSource(DataSource):
         """
         main_code, main_market = self._select_main_contract(product)
         df = self._fetch_contract_bars(main_code, period, count, market=main_market)
-        # 主力连续以品种字母作 symbol，便于与 ContractStitcher 衔接
+        # 主力连续统一输出 ``rb0`` 形式（D3 修复）。
+        # 旧实现直接写 ``product.lower()`` → ``rb``，与生产读取的 ``rb0`` 不匹配，
+        # 导致该源产出的数据在生产侧永远检索不到。
         df = df.reset_index()
-        df["symbol"] = product.lower()
+        sym_key = product.strip().lower()
+        df["symbol"] = sym_key if sym_key.endswith(CONTINUOUS_SUFFIX) else sym_key + CONTINUOUS_SUFFIX
         df = df.set_index(["symbol", "datetime"]).sort_index()
         return df
 
@@ -378,17 +381,21 @@ class PytdxSource(DataSource):
         finally:
             self._disconnect()
 
+        if not frames:
+            raise HexEmptyDataError(
+                f"pytdx 未取到任何品种数据（请求 {symbols}）", source="pytdx"
+            )
         out = pd.concat(frames)
-        out = self._clip_range(out, start, end)
+        # 收口：裁剪 + 空结果/新鲜度门禁 + 契约校验（杜绝"裁成 0 行还报成功"）
+        bf = self._finalize(out, start, end, freq, symbols=symbols, source="pytdx")
 
-        bf = BarFrame(df=out, freq=freq, source="pytdx")
         do_save = self.save if save is None else save
         if do_save:
             try:
                 self.lake.save_processed(bf)
             except Exception as exc:  # 落盘失败不阻断取数，明确提示
                 raise HexDataError(f"pytdx 落 Parquet 失败：{exc}") from exc
-        return bf.validate()
+        return bf
 
     def health_check(self) -> bool:
         try:

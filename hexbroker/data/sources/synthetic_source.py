@@ -8,10 +8,10 @@
 
 from __future__ import annotations
 
-
 import numpy as np
 import pandas as pd
 
+from ... import HexEmptyDataError
 from ...constants import LIMIT_DOWN, LIMIT_UP
 from ..base import DataSource
 from ..schema import BarFrame
@@ -21,6 +21,9 @@ class SyntheticSource(DataSource):
     """确定性合成数据源，用于离线 smoke 与单测。"""
 
     name = "synthetic"
+
+    #: 离线确定性源：不做新鲜度判定，仅做空结果门禁
+    check_freshness = False
 
     def __init__(
         self,
@@ -51,9 +54,14 @@ class SyntheticSource(DataSource):
             prices = self._gen_prices(rng)
             df = self._to_frame(prices, sym, rng)
             frames.append(df)
+        if not frames:
+            raise HexEmptyDataError(
+                f"Synthetic 源未生成任何品种数据（请求 {symbols}）", source="synthetic"
+            )
         out = pd.concat(frames)
-        out = self._clip_range(out, start, end)
-        return BarFrame(df=out, freq=freq, source="synthetic").validate()
+        # 收口：裁剪 + 空结果门禁 + 契约校验。
+        # 合成源是离线确定性源，默认关闭新鲜度判定（见类属性 check_freshness）。
+        return self._finalize(out, start, end, freq, symbols=symbols, source="synthetic")
 
     def _gen_prices(self, rng: np.random.Generator) -> np.ndarray:
         """几何随机游走 + 分段 regime（可学习方向） + 换月跳空。"""

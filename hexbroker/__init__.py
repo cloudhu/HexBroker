@@ -22,6 +22,50 @@ class HexDataError(HexError):
     """数据契约校验失败。"""
 
 
+class HexEmptyDataError(HexDataError):
+    """取数成功但结果为 0 行。
+
+    与"网络失败"区分：本异常表示链路通、请求成功，但没有任何数据返回
+    （如请求区间内无交易日、或源本身已停更导致裁剪后为空）。
+    """
+
+    def __init__(self, message: str, *, source: str = "", symbol: str = "") -> None:
+        super().__init__(message)
+        self.source = source
+        self.symbol = symbol
+
+
+class HexStaleDataError(HexDataError):
+    """取到数据但最新日期落后于期望日期（数据陈旧）。
+
+    典型场景：数据源停更，请求 ``[start, end]`` 拿到的是数月前的最后一根 bar，
+    被误当作"刷新成功"。这是 2026-08-28 停摆事故的故障模式。
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        source: str = "",
+        symbol: str = "",
+        latest: str = "",
+        expected: str = "",
+    ) -> None:
+        super().__init__(message)
+        self.source = source
+        self.symbol = symbol
+        self.latest = latest
+        self.expected = expected
+
+
+class HexQuotaError(HexDataError):
+    """数据源配额/额度耗尽（可重试，通常需等待配额重置）。"""
+
+
+class HexNetworkError(HexDataError):
+    """网络层失败（连接超时、DNS、被 WAF 拦截等），与"数据为空"区分。"""
+
+
 class HexLeakageError(HexError):
     """检测到信息泄漏（防泄漏红线）。一旦抛出必须终止运行。"""
 
@@ -35,6 +79,10 @@ __all__ = [
     "HexError",
     "HexConfigError",
     "HexDataError",
+    "HexEmptyDataError",
+    "HexStaleDataError",
+    "HexQuotaError",
+    "HexNetworkError",
     "HexLeakageError",
     "HexRiskError",
 ]
