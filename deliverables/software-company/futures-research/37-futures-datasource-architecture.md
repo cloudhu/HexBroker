@@ -837,8 +837,87 @@ skip_existing 幂等 + 默认重写语义 / 空层零计数守护）；全量 **
 - 回填 **117**（108 + 9，与取证一致）；manifest 总数 18 → **135**；
 - 抽检：`spx`（DatetimeIndex 路径）1909 行 / `basis_CU`（date 列路径）
   2092 行，date_range 与直接读 parquet 一致；
-- 幂等复跑 **0 个**；parquet 零触碰（`-newermt` 计数 0）；
+-   幂等复跑 **0 个**；parquet 零触碰（`-newermt` 计数 0）；
   cu0/rb0 盘中维护的 manifest 逐字节未动（`v1` + 原 fetched_at）。
+
+### 4.20 cu0/rb0 2023 真值重建（整年替换，主理人拍板 ③ ✅）
+
+**背景**：P0-10 审计（§4.12）定罪 cu0/rb0 的 2023 年度口径缺陷
+（年度边界假跳变 ±27%~51%、k≡1.0 与相邻年 k≈1.3~1.5 矛盾）。
+主理人 2026-08-29 拍板 ③真值重建。与 rb0/2020（§4.18，缺失分区新建）
+不同，本次是**既有分区的整年替换**。
+
+**驱动器泛化（`scripts/p11_truth_rebuild.py`，feat `e875169`）**：
+- 机制取证（`rebuild.py` L268-289）：`rebuild_partition` 对既有分区
+  本就执行"同日期逐行替换（`merged.loc[common] = t.loc[common]`）+
+  真值新日期追加"，kind 只影响清标记分支 → `kind="missing"` + 全年
+  真值即等价整年替换，核心引擎零改动；
+- **缺口修补**：整年替换语义下，真值未覆盖的脏行会静默残留 →
+  驱动器新增前置预检：列集合必须一致 + 真值日期必须全覆盖分区日期
+  （`uncovered = set(cur) - set(truth)`），违反即 rc=1 **零写盘**；
+- 边界验证泛化（`y_prev = year-1` / `y_next = year+1`）、dry-run
+  消息区分"整年替换"与"新建"。
+
+**执行**：pandadata 真值（RB/CU 各 242 行，20230103~20231229，无重复
+无 NaN）→ dry-run 确认 → `--apply`：两品种各 **replaced=242 /
+appended=0**，分区行数不变。
+
+**验证（证据闭环）**：
+- 年度边界假跳变消失：修复前 ±27%~51%（k≡1.0）→ 修复后 rb0
+  **1.02% / 1.12%**、cu0 **0.72% / 0.06%**；
+- `caliber` 全量复扫 **0 告警** —— 当初定罪的检测器现在判无罪；
+- +2 测试：整年替换（3 替换 + 2 追加、脏值 3500 清零断言）/
+  未覆盖日期中止（rc=1 且分区逐字节未动）；全量 862 → **864**。
+
+### 4.21 raw_close 存量离线批量回填（主理人拍板 ① ✅）
+
+**背景**：P1-c（§4.16）修复了 parse 阶段，但存量 162 个年度分区的
+`raw_close` 仍是 adj 复制品。主理人拍板 ①离线批量：离线一次性回填
+（生产湖 `data/raw`，读路径全只读，写路径 dry-run 默认 + `--apply`）。
+
+**实现（`scripts/p37_raw_close_backfill.py`）**：
+- `_CachingFetcher`：每品种预热一次备源 + 按分区窗口切片；
+- 每分区 `enrich_raw_close(min_coverage=0.9, all-or-nothing)`，失败
+  大声降级跳过、绝不半写；
+- 幂等：回填值与现有 raw_close 逐行相同 → 跳过不写；
+- `--apply`：先全量备份 processed 层（`{root.parent}/p37_backup_processed_{ts}`），
+  覆写前 assert 除 raw_close 外全列 equals，manifest 仅重算
+  `backfill-*` 维护的 freq 目录（cu0/rb0 `v1` 盘中自动化不触碰）；
+- +5 测试（dry-run 零写盘 / apply 列语义 + manifest 双语义 + 备份 /
+  幂等二轮零写盘 / 低覆盖大声降级 / warm 窗口契约）。
+
+**🔴 首轮 dry-run 事故与根因（无证据不翻转，代码路径定罪）**：
+- 现象：162/162 分区 `BackupExhaustedError: 全部备源失败（sina, akshare）`，
+  而同日 p11 驱动器单年窗口拉取全部成功；
+- 根因：`_CachingFetcher` 初版请求全历史窗口 `end="2099-12-31"` →
+  `assert_fresh` 的历史回填豁免条件是 `end < today - max_stale_days`，
+  **未来窗口不豁免** → 正常判定要求最新 bar ≥ 2099-12-31 - 5d，
+  而实际最新 bar = 今天 → 每源被判 `HexStaleDataError`（"数据陈旧"）
+  → 双源全灭。日志看不到归因是因 `enrich_raw_close` 只打印 `str(exc)`；
+- 修复：`_CachingFetcher.warm(sym, start, end)` 按品种**实际分区日期
+  范围**预热，`end` 钳制到今天；`fetch_raw` 未命中兜底直拉请求自身
+  窗口（绝不伪造未来窗口）；+1 回归测试锁定 warm 契约。
+
+**生产执行**：
+- dry-run（修复后，21 秒）：18 品种 warm 全命中（2018-01-01 ~
+  2026-08-29）、**156 入 PLAN / 6 SKIP / 0 失败**（SKIP = 3 个今日
+  重建分区 cu0/2023、rb0/2020、rb0/2023 + ag0/au0/m0 2018 已真）；
+- `--apply`（36 秒）：**156 分区覆写、raw_close 更新 32,220 行**，
+  备份 `data/p37_backup_processed_20260829T101345`（回滚 = 拷回），
+  manifest 16 品种 backfill-* 重算 + cu0/rb0 v1 不触碰。
+
+**QA（六链全绿）**：
+1. 零污染：备份 vs 生产 162 分区文件集合一致 + 除 raw_close 外全列
+   逐值一致（意外变化 0）；样例语义正确（ag0/2020 行0：4377 adj
+   复制品 → 4320 真名义价）；
+2. 幂等复跑：**0 待写盘 / 162 SKIP**；
+3. caliber 复扫：m0/2018 🚨 裁定为**检测器已知误报模式**——
+   `nominal_suspect_years` 的 k = adj_close/外部名义价（与本轮回填
+   的 raw_close 无关），m0 全年段 k≈1（2018~2024 均 1.0，2025:0.994、
+   2026:1.015）属"滚动价差极小品种"真值特征（caliber.py docstring
+   明示单凭本函数不定罪）；QA 证明 adj_close 逐值未动 + SKIP 反证
+   raw_close 本已是真值 → 与回填无因果，**不定罪、不处置**；
+4. 全量回归 **869 passed**（864 + 5），EXIT=0。
 
 
 ## 7. 待办（按优先级）
@@ -856,7 +935,9 @@ skip_existing 幂等 + 默认重写语义 / 空层零计数守护）；全量 **
       NoAnchor 拒绝续接红线 + P0-9 自动挂标（14 测试，全量 810 passed）
 - [x] ~~**🔴 P0-10 年度口径一致性审计**（§6.5.7）~~ → **审计完成，见 §4.12**：
       缺陷确认且仅限 cu0/rb0 的 2023 年度（外部 k 校准 + 内部边界跳变交叉定罪）；
-      检测器已固化为 `caliber`（12 测试）。**处置待拍板**（隔离/备案/真值重建）。
+      检测器已固化为 `caliber`（12 测试）。**处置已完成，见 §4.20**
+      （主理人拍板 ③真值重建：cu0/rb0 2023 整年替换 242 行×2，
+      假跳变消失 + caliber 复扫 0 告警，feat `e875169`）。
 - [x] ~~**P0-11 `rb0/2020` 重建**~~ → **已完成，见 §4.17/§4.18**：pandadata
       MCP 工具在新会话注册成功；真值 243 行（close_pcr）→ dry-run →
       `--apply`：2020.parquet 新建（243 行，raw_close 名义价 100% 覆盖）、
@@ -874,13 +955,15 @@ skip_existing 幂等 + 默认重写语义 / 空层零计数守护）；全量 **
       见 §4.19**（+117，总数 135，幂等复跑 0）。
 - [x] ~~**P1-c `raw_close` 列语义修复**~~ → **已完成，见 §4.16**：parse 阶段
       `enrich_raw_close` 用备源名义价回填（失败大声降级），端到端实测
-      raw_close ≠ adj_close 语义分离；**存量分区回填待拍板**（§4.16）。
+      raw_close ≠ adj_close 语义分离；**存量分区回填已完成，见 §4.21**
+      （主理人拍板 ①离线批量：156 分区 / 32,220 行，幂等复跑 0，
+      全量回归 869 passed）。
 
 ### 🔴 新发现的风险（需处置）
-- **pandadata MCP 连接器 token 已失效**（2026-08-28 19:50 实测
-  `Authentication required`）。主源当前**不可用** —— 这使备源链路与续接器
-  从"备用"变为"刚需"。建议：① 尽快恢复连接器授权；② 在此之前
-  `--trading-day` 体检（§4.7）是唯一能拦住"静默用旧数据"的闸门。
+- ~~**pandadata MCP 连接器 token 已失效**~~ → **已恢复**（2026-08-29
+  会话实测：gateway 模式五工具全部注册成功，token 剩余约 28 天；
+  P0-11/任务 ③ 两轮真值拉取均经此通道完成）。续接体检闸门（§4.7）
+  保留为常态化防线。
 
 ### P1
 - [ ] SHFE / INE 官方源路径修正（`/data/tradedata/future/dailydata/`）
@@ -945,6 +1028,13 @@ skip_existing 幂等 + 默认重写语义 / 空层零计数守护）；全量 **
 | `hexbroker/data/sources/akshare_source.py` | 补缺失的包络修复步骤 + 逐条大声告警 |
 | `hexbroker/data/sources/test_akshare_source.py` | +5 测试（hc0/ni0 真实毛刺 / 告警 / 废 bar / 干净零告警） |
 | `scripts/dev_probe_p0_13_envelope.py` | 🆕 P0-13 探针（只读直调 `ak.futures_main_sina` 定位毛刺 bar） |
+| `hexbroker/data/manifest.py` | P1-b/扁平：`backfill_flat_manifests` + `FLAT_PANEL_LAYERS` + build_manifest DatetimeIndex 增强（§4.19） |
+| `tests/test_data_manifest.py` | +4 扁平面板测试（§4.19） |
+| `hexbroker/data/rebuild.py` | 任务 A：docstring source 语义修正（§4.18）；tests +2 断言收紧 |
+| `scripts/p11_truth_rebuild.py` | 任务 ③：泛化为整年替换驱动器 + 前置覆盖预检（§4.20） |
+| `tests/test_p11_truth_rebuild.py` | +2 整年替换测试（脏值清零 / 未覆盖中止，§4.20） |
+| `scripts/p37_raw_close_backfill.py` | 🆕 任务 ①：存量 raw_close 离线批量回填驱动器（§4.21） |
+| `tests/test_p37_raw_close_backfill.py` | 🆕 5 测试（含 BackupExhaustedError 根因回归门禁，§4.21） |
 | `artifacts/p0_13_probe_20260829.log` | 🆕 探针证据存档 |
 | `hexbroker/data/manifest.py` | P1-b：`backfill_manifests` 新增 `skip_existing` 增量模式（防覆盖生产 manifest，幂等）；§4.19：`backfill_flat_manifests` 扁平面板回填 + `build_manifest` 单层 DatetimeIndex date_range |
 | `scripts/backfill_manifests.py` | 新增 `--skip-existing` 旗标 |
