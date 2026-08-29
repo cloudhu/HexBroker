@@ -152,12 +152,15 @@ def build_manifest(layer: str, symbol: str, freq: str, df: pd.DataFrame, *,
     )
 
 
-def backfill_manifests(root: Path, cfg: Any) -> int:
+def backfill_manifests(root: Path, cfg: Any, *, skip_existing: bool = False) -> int:
     """对存量 parquet 分区回填 manifest；返回回填数（PRD A3.1 迁移脚本）。
 
     覆盖两种布局：
     - ``{layer}/{symbol}/{freq}/{year}.parquet``（按年分区）；
     - ``{layer}/{symbol}/{freq}.parquet``（无年份分区）。
+
+    ``skip_existing=True`` 时跳过已有 manifest 的分区（增量补全，不触碰
+    生产自动化在维护的 manifest，如盘中流水线按 ``v1`` 重写的品种）。
     """
     root = Path(root)
     constants = _constants_from_cfg(cfg)
@@ -171,6 +174,8 @@ def backfill_manifests(root: Path, cfg: Any) -> int:
             for freq_dir in sorted(p for p in symbol_dir.iterdir() if p.is_dir()):
                 files = sorted(freq_dir.glob("*.parquet"))
                 if not files:
+                    continue
+                if skip_existing and (freq_dir / "manifest.json").exists():
                     continue
                 parts = [read_parquet(f) for f in files]
                 df = pd.concat(parts, ignore_index=True)
@@ -186,6 +191,11 @@ def backfill_manifests(root: Path, cfg: Any) -> int:
                 count += 1
             # 无年份分区文件
             for freq_file in sorted(symbol_dir.glob("*.parquet")):
+                if skip_existing and (
+                    freq_file.with_name("manifest.json").exists()
+                    or (freq_file.parent / freq_file.stem / "manifest.json").exists()
+                ):
+                    continue
                 df = read_parquet(freq_file)
                 write_manifest(
                     build_manifest(

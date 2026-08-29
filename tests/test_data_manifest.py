@@ -9,7 +9,6 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import pytest
-
 from _helpers import make_prices
 
 from hexbroker.config import load_config
@@ -110,6 +109,53 @@ def test_backfill_manifests_flat_layout(tmp_path):
     n = backfill_manifests(tmp_path, load_config())
     assert n >= 1
     assert read_manifest(tmp_path, "raw", "X", "1d") is not None
+
+
+def test_backfill_skip_existing_preserves_production_manifest(tmp_path):
+    """P1-b：skip_existing=True 跳过已有 manifest 的分区，生产自动化维护的
+    manifest（data_version=v1）不被改写；仅补全缺失分区。"""
+    cfg = load_config()
+    # 分区 A：模拟盘中自动化已写 v1 manifest
+    dir_a = tmp_path / "processed" / "A" / "1d"
+    dir_a.mkdir(parents=True)
+    write_parquet(_mindex_df().reset_index(), dir_a / "2026.parquet")
+    write_manifest(
+        build_manifest("processed", "A", "1d", _mindex_df(),
+                       source="lake", data_version="v1"),
+        tmp_path,
+    )
+    before = (dir_a / "manifest.json").read_text(encoding="utf-8")
+
+    # 分区 B：从未生成 manifest
+    dir_b = tmp_path / "processed" / "B" / "1d"
+    dir_b.mkdir(parents=True)
+    write_parquet(_mindex_df().reset_index(), dir_b / "2026.parquet")
+
+    n = backfill_manifests(tmp_path, cfg, skip_existing=True)
+    assert n == 1  # 仅 B 被回填
+    # A 的 manifest 逐字节未动（仍为 v1，非 backfill-*）
+    assert (dir_a / "manifest.json").read_text(encoding="utf-8") == before
+    assert read_manifest(tmp_path, "processed", "A", "1d").data_version == "v1"
+    # B 已补全且标记 backfill-*
+    assert read_manifest(tmp_path, "processed", "B", "1d").data_version.startswith("backfill-")
+
+    # 再次增量运行：幂等，零回填
+    assert backfill_manifests(tmp_path, cfg, skip_existing=True) == 0
+
+
+def test_backfill_without_skip_existing_overwrites(tmp_path):
+    """默认 skip_existing=False 保持既有行为：已有 manifest 也会重写。"""
+    cfg = load_config()
+    dir_a = tmp_path / "processed" / "A" / "1d"
+    dir_a.mkdir(parents=True)
+    write_parquet(_mindex_df().reset_index(), dir_a / "2026.parquet")
+    write_manifest(
+        build_manifest("processed", "A", "1d", _mindex_df(),
+                       source="lake", data_version="v1"),
+        tmp_path,
+    )
+    backfill_manifests(tmp_path, cfg)
+    assert read_manifest(tmp_path, "processed", "A", "1d").data_version.startswith("backfill-")
 
 
 # ---------------------------------------------------------------------------
