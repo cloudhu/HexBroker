@@ -163,3 +163,70 @@ def test_empty_year_truth_fails_without_write(tmp_path):
     assert rc == 1
     assert not (root / "processed" / "rb0" / "1d" / "2020.parquet").exists()
     assert (root / "processed" / "rb0" / "1d" / "_MISSING_2020.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# 既有分区整年替换（主理人 2026-08-29 拍板 ③：cu0/rb0 2023 名义价冒充根治）
+# ---------------------------------------------------------------------------
+def _write_corrupted_partition(root: Path, dates: list[str]) -> Path:
+    """写入"名义价冒充"形态的既有分区（close=3500 恒定，脏数据）。"""
+    from hexbroker.utils.io import write_parquet
+    n = len(dates)
+    df = pd.DataFrame({
+        "symbol": ["rb0"] * n,
+        "datetime": pd.to_datetime(dates),
+        "open": [3500.0] * n, "high": [3500.0] * n, "low": [3500.0] * n,
+        "close": [3500.0] * n, "volume": [1.0] * n, "amount": [0.0] * n,
+        "open_interest": [1.0] * n,
+        "raw_close": [3500.0] * n, "adj_close": [3500.0] * n,
+        "limit_up": False, "limit_down": False, "is_rollover": False,
+    })
+    d = root / "processed" / "rb0" / "1d"
+    write_parquet(df, d / "2020.parquet")
+    return d / "2020.parquet"
+
+
+def test_apply_existing_partition_full_year_replace(tmp_path):
+    """既有分区 + 真值全覆盖 → 同日期逐行替换 + 新日期追加（整年替换）。"""
+    truth_dates = [f"2020-01-0{i}" for i in range(1, 6)]
+    persisted = _write_persisted(tmp_path, _persisted_payload(truth_dates))
+    root = _make_lake(tmp_path)
+    # 去掉 _MISSING 标记并写入脏分区（前 3 个真值日期，恒定 3500）
+    (root / "processed" / "rb0" / "1d" / "_MISSING_2020.json").unlink()
+    target = _write_corrupted_partition(root, truth_dates[:3])
+    before = target.read_bytes()
+
+    rc = mod.main(["--persisted", str(persisted), "--data-root", str(root),
+                   "--apply", "--skip-nominal"])
+
+    assert rc == 0
+    from hexbroker.data.store import DataLake
+    lake = DataLake(root=root)
+    bf = lake.load_processed("rb0", "1d", warn=False)
+    dt = bf.df.index.get_level_values("datetime")
+    # 行数 = 3 相邻年 + 5 真值行（3 替换 + 2 追加）
+    assert (dt.year == 2020).sum() == 5
+    y20 = bf.df[dt.year == 2020]
+    # 脏行已被真值替换（close 3500 → 真值 3501+），且追加 2 行新日期
+    assert (y20["close"] == 3500.0).sum() == 0
+    # 真值文件/预检证据：2020.parquet 内容已变
+    assert target.read_bytes() != before
+
+
+def test_apply_existing_partition_uncovered_dates_aborts(tmp_path):
+    """既有分区日期未被真值全覆盖 → 中止零写盘（脏行不得静默残留）。"""
+    truth_dates = [f"2020-01-0{i}" for i in range(1, 4)]  # 真值只有 3 天
+    persisted = _write_persisted(tmp_path, _persisted_payload(truth_dates))
+    root = _make_lake(tmp_path)
+    (root / "processed" / "rb0" / "1d" / "_MISSING_2020.json").unlink()
+    # 脏分区含真值没有的日期 01-06、01-07
+    target = _write_corrupted_partition(
+        root, ["2020-01-02", "2020-01-03", "2020-01-06", "2020-01-07"])
+    before = target.read_bytes()
+
+    rc = mod.main(["--persisted", str(persisted), "--data-root", str(root),
+                   "--apply", "--skip-nominal"])
+
+    assert rc == 1
+    # 分区逐字节未动（零写盘）
+    assert target.read_bytes() == before

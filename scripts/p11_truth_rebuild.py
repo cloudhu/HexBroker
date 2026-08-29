@@ -1,4 +1,4 @@
-"""P0-11：rb0/2020 缺失分区真值重建驱动器。
+"""P0-11：年度真值重建驱动器（首例 rb0/2020 缺失分区；支持既有分区整年替换）。
 
 背景（2026-08-29 11:49 pytest 污染事故）
 ----------------------------------------
@@ -7,6 +7,14 @@ rb0/2020 分区被写成 2 行合成数据，已隔离（artifacts/quarantine/�
 ``_MISSING_2020.json``。留一法实测插值重建不可行（53.22 bp 均值误差），
 唯一出路 = pandadata ``get_future_daily_post(method=close_pcr)`` 重拉 2020
 全年真值 + P0-9 rebuild 流水线整分区新建。
+
+扩展（主理人 2026-08-29 拍板 ③真值重建）
+----------------------------------------
+cu0/rb0 2023 为名义价冒充（P0-10 审计定罪，假跳空 ±27%~51%），沿同一路线
+根治。``rebuild_partition`` 对既有分区同样执行"同日期逐行替换 + 新日期
+追加"（kind 只影响清标记分支），故 kind="missing" + 全年真值即等价于
+整年替换。**前置覆盖预检**：既有分区每个日期必须被真值覆盖，否则中止
+（真值缺口会让脏行静默残留，铁律禁止）。
 
 用法（两步走）
 --------------
@@ -26,9 +34,11 @@ rb0/2020 分区被写成 2 行合成数据，已隔离（artifacts/quarantine/�
 安全语义
 --------
 - dry-run 默认：只解析/规范化/名义价回填/预览，零写盘；
-- --apply 走 P0-9 ``rebuild_partition``（missing 路径）：整分区新建 +
-  自动清 ``_MISSING_2020.json``；manifest 经 save_processed 按
-  "最近一次写入"语义重写（source="lake"，描述新分区）；
+- --apply 走 P0-9 ``rebuild_partition``（missing 路径）：分区不存在则新建，
+  已存在则同日期逐行替换 + 新日期追加（整年替换语义）；自动清
+  ``_MISSING_{year}.json``；manifest 经 save_processed 按"最近一次写入"
+  语义重写（source="lake"，描述本次写入的分区）；
+- 既有分区前置预检：列集合一致 + 真值日期全覆盖，违反即 rc=1 零写盘；
 - 真值仅取目标年度行（rebuild_partition 跨界拒绝双保险）；
 - 名义价回填（P1-c ``enrich_raw_close``）默认开启，失败大声降级。
 """
@@ -59,7 +69,8 @@ def _load_p6_4():
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="P0-11 缺失分区真值重建（rb0/2020）")
+    ap = argparse.ArgumentParser(
+        description="P0-11 年度真值重建（缺失分区新建 / 既有分区整年替换）")
     ap.add_argument("--persisted", required=True,
                     help="pandadata 拉取结果 JSON（p6_4 persisted 格式）")
     ap.add_argument("--sym", default="rb0", help="品种 sym0（默认 rb0）")
@@ -112,15 +123,43 @@ def main(argv: list[str] | None = None) -> int:
             tag = "[NOMINAL]" if "回填成功" in note else "[WARN][NOMINAL]"
             print(f"{tag} {sym0}: {note}")
 
-    # 3) 重建（missing 路径）
+    # 3) 既有分区前置预检（整年替换语义下，真值缺口 = 脏行残留，禁止）
+    target = (Path(args.data_root) / "processed" / sym0 / "1d"
+              / f"{args.year}.parquet")
+    replacing = target.exists()
+    if replacing:
+        cur = pd.read_parquet(target)
+        cur["datetime"] = pd.to_datetime(cur["datetime"]).dt.normalize()
+        col_diff_t = sorted(set(truth.columns) - set(cur.columns))
+        col_diff_c = sorted(set(cur.columns) - set(truth.columns))
+        if col_diff_t or col_diff_c:
+            print(f"[FAIL] 列集合不一致：仅真值有 {col_diff_t[:6]}，"
+                  f"仅分区有 {col_diff_c[:6]} —— 拒绝替换")
+            return 1
+        uncovered = sorted(set(cur["datetime"]) - set(truth["datetime"]))
+        if uncovered:
+            print(f"[FAIL] 既有分区 {len(cur)} 行中 {len(uncovered)} 个日期"
+                  f"未被真值覆盖（首个 {uncovered[0].date()}）—— "
+                  f"替换将残留脏行，中止（零写盘）。"
+                  f"请检查真值拉取区间/品种是否完整")
+            return 1
+        n_replaced = len(set(cur["datetime"]) & set(truth["datetime"]))
+        n_appended = len(truth) - n_replaced
+        print(f"[PRECHECK] 既有分区 {len(cur)} 行：将替换 {n_replaced} 行"
+              f" + 追加 {n_appended} 行（真值全覆盖 ✅）")
+
+    # 4) 重建（missing 路径；对既有分区 = 同日期逐行替换 + 新日期追加）
     item = RebuildNeeded(symbol=sym0, freq="1d", year=args.year,
                          kind="missing", dates=[], detail={
                              "driver": "scripts/p11_truth_rebuild.py",
                              "persisted": str(persisted),
                          })
     if not args.apply:
-        print(f"[DRY-RUN] 将新建 {sym0}/1d/{args.year}.parquet "
-              f"({len(truth)} 行) 并清除 _MISSING_{args.year}.json；预览:")
+        action = "整年替换" if replacing else "新建"
+        print(f"[DRY-RUN] 将{action} {sym0}/1d/{args.year}.parquet "
+              f"({len(truth)} 行)"
+              + (f" 并清除 _MISSING_{args.year}.json" if not replacing else "")
+              + "；预览:")
         print(truth.head(3).to_string(index=False))
         return 0
 
@@ -134,7 +173,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[FAIL] 重建未完成：{res.reason}")
         return 1
 
-    # 4) 重建后验证：行数 / 洞告警消除 / 年度边界连续性
+    # 5) 重建后验证：行数 / 洞告警消除 / 年度边界连续性（前后年通用）
     lake = DataLake(root=args.data_root)
     bf = lake.load_processed(sym0, "1d", warn=False)
     dts = bf.df.index.get_level_values("datetime")
@@ -143,16 +182,18 @@ def main(argv: list[str] | None = None) -> int:
     notes = lake.quality_notes(sym0, "1d")
     holes = [n for n in notes if n.kind == "hole"]
     print(f"[VERIFY] quality_notes hole 数: {len(holes)}"
-          + (f"（仍剩: {[n.year for n in holes]}）" if holes else "（2020 洞已消除）"))
+          + (f"（仍剩: {[n.year for n in holes]}）" if holes else "（目标洞已消除）"))
 
     adj = bf.df["adj_close"].reset_index(drop=True)
     dt = pd.Series(dts)
-    y19_end = adj[dt.dt.year == 2019].iloc[-1] if (dt.dt.year == 2019).any() else None
-    y20_first = adj[dt.dt.year == args.year].iloc[0]
-    y20_last = adj[dt.dt.year == args.year].iloc[-1]
-    y21_first = adj[dt.dt.year == 2021].iloc[0] if (dt.dt.year == 2021).any() else None
-    for label, a, b in (("2019→2020", y19_end, y20_first),
-                        ("2020→2021", y20_last, y21_first)):
+    y_prev = args.year - 1
+    y_next = args.year + 1
+    prev_end = adj[dt.dt.year == y_prev].iloc[-1] if (dt.dt.year == y_prev).any() else None
+    y_first = adj[dt.dt.year == args.year].iloc[0]
+    y_last = adj[dt.dt.year == args.year].iloc[-1]
+    next_first = adj[dt.dt.year == y_next].iloc[0] if (dt.dt.year == y_next).any() else None
+    for label, a, b in ((f"{y_prev}→{args.year}", prev_end, y_first),
+                        (f"{args.year}→{y_next}", y_last, next_first)):
         if a is None or b is None or not a or not b:
             print(f"[VERIFY] 边界 {label}: 数据不足，跳过")
             continue
@@ -160,7 +201,8 @@ def main(argv: list[str] | None = None) -> int:
         flag = "OK" if jump <= 0.10 else "🔴 可疑假跳变（>10%，需人工复核）"
         print(f"[VERIFY] 边界 {label}: adj 跳变 {jump:.4%} —— {flag}")
 
-    print(f"[OK] P0-11 完成：{sym0}/{args.year} 真值重建 + 洞标记清除")
+    print(f"[OK] P0-11 完成：{sym0}/{args.year} 真值重建"
+          + ("（整年替换）" if replacing else "（新建分区）"))
     return 0
 
 
