@@ -38,7 +38,7 @@
 
 | 项 | 结果 |
 |---|---|
-| 测试 | **836 passed**（677 → … → 774 → 796 → 810 → 822 → 836，+14 为缺失年度显式化） |
+| 测试 | **841 passed**（677 → … → 810 → 822 → 836 → 841，+14 缺失年度显式化，+5 OHLC 包络修复） |
 | 静态门禁 | 改动文件 ruff **全通过** |
 | 真实联网 | 18/18 品种双源（sina / akshare）末日 **2026-08-28** |
 | 仓库完整性 | `git fsck --no-dangling` **无输出**，对象库完整 |
@@ -68,8 +68,8 @@
 | **P0-12** | 缺失年度显式化：`load_processed` 洞/标记逐条告警（数据行为不变）+ `quality_notes` 三类结构化提示 | ✅ |
 | **P1-c** | 🆕 `raw_close` 列恒等于 `adj_close`（管线映射），湖内无法自检名义价冒充 | ⬜ 新立项 |
 | **P0-11** | `rb0/2020` 重拉（待 pandadata 恢复授权） | ⬜ 阻断中 |
-| **P0-12** | 缺失年度显式化（`load_processed` 静默跳过） | ⬜ 新立项 |
-| **P0-13** | `hc0`/`ni0` OHLC 包络校验失败排查 | ⬜ 新立项 |
+| **P0-12** | 缺失年度显式化（`load_processed` 静默跳过） | ✅（重复行，上为准） |
+| **P0-13** | `hc0`/`ni0` OHLC 包络校验失败：根源端毛刺 bar（各 1 根）；`schema.repair_envelope` 收口三源修复，akshare 补缺失步骤 + 大声告警 | ✅ |
 
 ---
 
@@ -126,6 +126,14 @@
     提供三类结构化提示（hole / stale_mark / missing_mark）供程序化消费。
     生产 rb0 实战复核：2020 洞带完整标记内容告警，1855 行读取逐位一致。
     → ①隔离处置方案的配套告警已就绪。
+16. **🆕 P0-13 定案：校验器没错，是数据源脏**：hc0/ni0 各恰好 1 根新浪源端
+    毛刺 bar（hc0 2021-12-30 C=4394<L=4395 差 1 点；ni0 2023-08-28
+    C=167030<L=167230 差 200 点，1/3000 量级）。修复能力三源三份且不一致
+    （sina 有 / akshare 完全缺失 / pytdx 语义略异）→ 收口为
+    `schema.repair_envelope`（四价极值重定 low/high + 丢非正价，返回告警
+    列表），akshare 补齐并大声告警 —— **修复是数据变更，静默即事故**。
+    端到端实测：hc0/ni0 全历史 4199 行拉取成功（此前被拒），告警逐日命中
+    探针定位日期。
 
 ---
 
@@ -179,8 +187,10 @@
 - `tests/test_store_quality.py` —— 🆕 14 测试（P0-12 缺失年度显式化）
 - `scripts/dev_probe_p0_10_caliber.py` —— 🆕 P0-10 审计探针（只读，外部名义价校准）
 - `artifacts/p0_10_audit_20260829.log` —— 🆕 审计证据存档
+- `scripts/dev_probe_p0_13_envelope.py` —— 🆕 P0-13 探针（只读直调 `ak.futures_main_sina` 定位毛刺 bar）
+- `artifacts/p0_13_probe_20260829.log` —— 🆕 探针证据存档
 - `scripts/dev_probe_37_graft_truth.py` —— 真实数据反证 + 三策略消融
-- `hexbroker/data/sources/test_akshare_source.py` —— 19 测试（此前无测试文件）
+- `hexbroker/data/sources/test_akshare_source.py` —— 24 测试（19 既有 + 5 包络修复）
 - `scripts/p36_smoke_sources.py` —— 真实联网冒烟（P0-8，刻意不进 pytest）
 - `tests/test_p6_4_apply_gate.py` —— 17 测试
 - `deliverables/software-company/futures-research/37-futures-datasource-architecture.md`
@@ -199,7 +209,7 @@
 2. **Q6**：收盘价 vs 结算价 —— 实测两者同口径可任选，选哪个？
 3. **🔴 pandadata 连接器 token 失效**，是否现在恢复授权？（主源不可用期间，
    整个备源链路的优先级建议上调；`rb0/2020` 的重拉也卡在这里）
-4. **下一步优先级**：P0-9 ✅、编排器 ✅、P0-10 审计 ✅（处置待拍板）、P0-12 ✅。剩余 = cu0/rb0 2023 处置拍板（隔离的告警配套已就绪）/ P0-11（卡授权）/ P0-13（hc0/ni0 包络）/ P1-b、P1-c。
+4. **下一步优先级**：P0-9 ✅、编排器 ✅、P0-10 审计 ✅（处置待拍板）、P0-12 ✅、P0-13 ✅。剩余 = cu0/rb0 2023 处置拍板（隔离的告警配套已就绪）/ P0-11（卡授权）/ P1-b、P1-c。
 5. **🔴 cu0/rb0 2023 处置拍板**：①隔离 + `_MISSING_2023.json`（留 1 年洞，需 P0-12 配套）②保留 + 备案 ③等授权恢复后真值重建？
 5. **🔴 新增 · 2023 年度口径断裂**（rb0/cu0 存未复权名义价，跨年约 35% 假跳空）：
    是否立 P0-10 优先处理？影响所有跨 2023 年的回测与训练，且数据"看起来完全正常"。

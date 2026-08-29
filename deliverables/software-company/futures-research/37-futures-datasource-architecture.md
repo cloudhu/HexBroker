@@ -607,6 +607,45 @@ NoAnchor 拒绝 / Exhausted 逐源归因 / Tier3 降级与不可用报告 / 多�
 
 ---
 
+### 4.14 P0-13 hc0/ni0 OHLC 包络校验失败（根源端毛刺 + 三源修复收口）
+
+**取证（`scripts/dev_probe_p0_13_envelope.py`，只读直调 `ak.futures_main_sina`）**：
+每品种**恰好 1 根**源端毛刺 bar，非解析 bug（hc0 3030 根、ni0 2780 根中各 1 根）：
+
+| 品种 | 日期 | 毛刺形态 | 幅度 |
+|------|------|---------|------|
+| hc0 | 2021-12-30 | O=4460 H=4515 L=4395 **C=4394**（close < low） | 差 1 点 |
+| ni0 | 2023-08-28 | O=169490 H=171000 L=167230 **C=167030**（close < low） | 差 200 点 |
+
+证据存档 `artifacts/p0_13_probe_20260829.log`。
+
+**根因（三点）**：
+1. **源端毛刺**：新浪主连原始行情偶发 close 略越 low 边界（1/3000 量级），
+   `validate_bars` 包络校验如实拒绝 —— 校验器没错，是数据源脏。
+2. **三源修复重复且不一致**：`SinaSource._repair_ohlc` 早已存在（sina 路径
+   因此能过）、`AkshareSource` **完全缺失修复步骤**（hc0/ni0 走 akshare
+   即被拒）、pytdx 有第三份语义略异的实现（只丢 close<=0）。
+3. **静默修复即事故**：修复是数据变更，必须大声告警留痕。
+
+**修复（收口到 `schema.repair_envelope`）**：
+```python
+def repair_envelope(df, *, drop_zero_ohl=True) -> tuple[pd.DataFrame, list[str]]:
+    # 四价极值重定 low/high + 丢 close<=0 + 可选丢 open/high/low<=0
+    # 返回 (df, 告警列表)，告警含违规根数与日期样例
+```
+- `sina_source` / `pytdx_source`：`_repair_ohlc` 改委托（保留方法签名兼容
+  既有测试；pytdx 传 `drop_zero_ohl=False` 保持原语义）；
+- `akshare_source`：`fetch_bars` 排序后插入修复，逐条
+  `logger.warning("AkshareSource %s(%s): %s")` 大声告警。
+
+**端到端实测**（真实联网，`save=False`）：hc0/ni0 全历史拉取成功（4199 行，
+此前被 `validate_bars` 拒绝），告警逐日命中 2021-12-30 / 2023-08-28，
+与探针定位完全吻合。
+
+**验证**：akshare 24（19+5）+ sina/pytdx/kronos 委托回归 56 全过；全量
+**841 passed**（836 + 5）；ruff 全过；生产 `data/` 零污染（mtime 核实仅
+盘中自动化 13:50/13:55 正常写入）。
+
 
 ## 7. 待办（按优先级）
 
@@ -629,8 +668,9 @@ NoAnchor 拒绝 / Exhausted 逐源归因 / Tier3 降级与不可用报告 / 多�
 - [x] ~~**P0-12 缺失年度显式化**~~ → **已完成，见 §4.13**：`load_processed`
       洞/标记逐条告警（数据行为不变），`quality_notes` 结构化三类提示；
       `MISSING_GLOB` 收口 store 定义。
-- [ ] **P0-13 `hc0`/`ni0` OHLC 包络校验失败排查**：
-      `HexDataError: 存在 OHLC 包络关系被破坏的 bar`。
+- [x] ~~**P0-13 `hc0`/`ni0` OHLC 包络校验失败排查**~~ → **已完成，见 §4.14**：
+      根因系新浪源端毛刺 bar（各 1 根，非解析 bug）；`schema.repair_envelope`
+      收口三源修复（akshare 补缺失步骤 + 大声告警），端到端实测通过。
 - [ ] **P1-b 生产 manifest 补全**：全库仅 cu0/rb0 两个品种有 manifest，
       其余 16 个从未生成 —— manifest 机制形同虚设。
 - [ ] **P1-c `raw_close` 列语义修复**（§4.12）：湖内该列恒等于 `adj_close`
@@ -700,7 +740,14 @@ NoAnchor 拒绝 / Exhausted 逐源归因 / Tier3 降级与不可用报告 / 多�
 | `artifacts/p0_10_audit_20260829.log` | 🆕 审计证据存档（18 品种 × 9 年度全量） |
 | `scripts/dev_restore_polluted_2026.py` | 🆕 污染分区恢复工具（真值直取 + ni0 对照回归门禁） |
 | `scripts/dev_probe_year_rebuild_error.py` | 🆕 年度重建误差留一法评估（插值证伪） |
+| `hexbroker/data/schema.py` | P0-13：🆕 共享 `repair_envelope`（四价极值重定 + 丢非正价，返回告警列表） |
+| `hexbroker/data/sources/sina_source.py` | `_repair_ohlc` 改委托 `repair_envelope`（签名兼容） |
+| `hexbroker/data/sources/pytdx_source.py` | 同委托，`drop_zero_ohl=False` 保持原语义 |
+| `hexbroker/data/sources/akshare_source.py` | 补缺失的包络修复步骤 + 逐条大声告警 |
+| `hexbroker/data/sources/test_akshare_source.py` | +5 测试（hc0/ni0 真实毛刺 / 告警 / 废 bar / 干净零告警） |
+| `scripts/dev_probe_p0_13_envelope.py` | 🆕 P0-13 探针（只读直调 `ak.futures_main_sina` 定位毛刺 bar） |
+| `artifacts/p0_13_probe_20260829.log` | 🆕 探针证据存档 |
 
-**验证**：**836 passed**（原 677 → 713 → 730 → 751 → 752 → 774 → 796 → 810 → 822 → 836）；改动文件 ruff 全通过；
+**验证**：**841 passed**（原 677 → 713 → 730 → 751 → 752 → 774 → 796 → 810 → 822 → 836 → 841）；改动文件 ruff 全通过；
 真实联网 18/18 双源末日 2026-08-28；备源端到端实测（sina→graft）误差 -21.35 bp 且已标记
-provisional；`git fsck --no-dangling` 无输出；`data/` 零改动。
+provisional；hc0/ni0 端到端实测通过（4199 行，此前被包络校验拒绝）；`git fsck --no-dangling` 无输出；`data/` 零改动。
