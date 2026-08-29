@@ -1006,6 +1006,57 @@ FutureDataDaily.txt` → 200 / ~37.6 KB（`http://` 301 → https；`.htm` 页�
   `data/raw/interim/dominant/rb0.parquet`；
 - 全量回归 **888 passed**（879 + 9），EXIT=0；ruff 三文件全过。
 
+### 4.24 dominant 快照扩展 + 对账探针 p42（P1 收口 ✅）+ 🔴 新缺陷：raw_close 单日口径残留
+
+**快照横向扩展（现成真值素材入库）**：p41 `--sym` 三连——
+`p11_rb0_2020_truth.json`（243 行全新增，跨段 merge-upsert）→
+rb0 快照 2020+2023 两段合计 **485 行**；`p11_cu0_2023_truth.json`
+→ **cu0.parquet 242 行**（11 次切换，铜月度合约换月更频）；
+rb0/2023 复跑全（覆盖 242 新增 0，幂等）。
+
+**对账探针 `scripts/p42_dominant_reconcile.py`（只读，无 --apply）**：
+两个独立证据源交叉——
+- **A** = dominant 快照 `detect_switches`（排除段首与跨段接缝：
+  日历间隔 >45 日的"切换"是两段拼接伪切换，rb0 2020 段末→2023 段首实测）；
+- **B** = 湖内 processed `adj_close/raw_close` 比值突变日（复权因子切换）。
+  ⚠️ 阈值必须用 `--tol 1e-3`（10bp）：`graft.DEFAULT_ALIGN_TOL=1e-6`
+  是同源重叠区容差，直接借用把湖内跨源微差全判成突变（实测 cu0 212 处
+  假阳性；真换月跳空实测最小 62.7bp≈6.3e-3）；
+- 匹配窗口 ±3 **交易日**（基于湖内交易日历位置差，非日历日）；
+- A 有 B 无 → "dominant 切了因子没动"（ni0 型，**不得**作 graft
+  `rollover_dates` 输入）；B 有 A 无 → 按形态二分：**单日回落尖峰**
+  （V 形签名，下跳+回复成对消费 → 数据毛刺嫌疑）vs **持续阶梯**
+  （roll 期震荡/口径事件，人工复核）。
+
+**真实对账结果（rb0 485 行 + cu0 242 行快照）**：
+- cu0（2023 段）：A 11 切换 → 10 匹配（偏移 ±1 交易日）+ 1 个 ni0 型
+  （2023-12-22）；覆盖内零毛刺零阶梯（2023 段是 pandadata 真值重建，干净）；
+- rb0（2020+2023 段）：A 6 切换 → **6/6 全命中**（偏移 0~1）；
+  阶梯待复核 32 处 = 备源主力逐日 OI 翻覆的 roll 期震荡
+  （2021-11-18~26 连续 5 天实测），符合预期；
+- **结论：dominant 快照 A 与湖内因子 B 高度一致（17 切换 16 命中）**，
+  快照可作 graft `rollover_dates` 的**候选**输入（仍须配
+  `rollover_spreads` 精确价差，见 §4.8）。
+
+**🔴 新缺陷（本探针副产发现，需主理人裁决）：raw_close 单日口径残留**：
+- 定罪样例：cu0 2019-04-22 单日 `raw_close = adj_close = 69625.70`
+  （比值 1.0），前后日均为 49,500 名义价（比值 1.4137）—— 与 2023
+  "名义价冒充"同族但**反向**（复权价冒充名义价）；
+- 全湖 `--spike-scan`（V 形签名，不依赖快照）：**18 品种 / 161 事件
+  （322 日期）**，且**跨品种同日强聚集**：2019-04-22 出现于 14 品种、
+  2021-12-30 出现于 10 品种、2023-08-28 出现于 5 品种（正是 P0-13 定罪
+  的新浪源端毛刺日！）、2024-09-25 出现于 6 品种；
+- 根因推断：**系统性源级事件** —— 备源（sina 系）单日坏 bar 被 p37
+  `enrich_raw_close` 回填直灌 raw_close（备源当天整体脏 → 备源间
+  交叉校验同源失效）。修复方向：同日跨品种聚集清单 → 用正确名义价
+  定点替换（真值源可用时）或显式标记；工程留待拍板后另案。
+
+**验证（证据链）**：+7 测试（同日/偏移命中 / ni0 型 / 尖峰-阶梯二分
+（含回复跳成对消费）/ 接缝排除 / 缺数据 skip / main 端到端 --json /
+spike-scan）；全量回归 **895 passed**（888+7），EXIT=0；ruff 全过；
+证据存档 `artifacts/p42_reconcile.{log,json}`、
+`artifacts/p42_spike_scan.{log,json}`。
+
 
 ## 7. 待办（按优先级）
 
@@ -1066,6 +1117,11 @@ FutureDataDaily.txt` → 200 / ~37.6 KB（`http://` 301 → https；`.htm` 页�
 - [ ] DCE 官方源（本环境 412，需换网络环境）
 - [ ] pytdx 扩展行情 7727（握手失败，需换环境）
 - [ ] 东财（代理/非代理两种环境均失败，倾向排除）
+- [ ] 🔴 **raw_close 单日口径残留**（§4.24 新立）：全湖 161 事件跨品种
+      同日聚集（2019-04-22 ×14 品种等），疑似备源端坏 bar 直灌；
+      处置方案待拍板（定点真值替换 / 显式标记）
+- [ ] 湖内 `is_rollover` 列全 False 形同虚设（§4.24 附带发现）：
+      填充语义（dominant 切换日? 因子切换日?）待定义
 
 ### 待用户拍板（Q 系列）
 - **Q1**：是否接受备源只续接短期窗口（如 10 日）？
@@ -1141,8 +1197,10 @@ FutureDataDaily.txt` → 200 / ~37.6 KB（`http://` 301 → https；`.htm` 页�
 | `hexbroker/data/dominant.py` | 🆕 P1 dominant 日历快照模块（extract/save-upsert/load/detect_switches/rollover_dates，§4.23） |
 | `scripts/p41_dominant_snapshot.py` | 🆕 dominant 快照驱动器（dry-run 默认/--apply/--sym 归一化/--sym-map/--input-dir 批量，§4.23） |
 | `tests/test_dominant_calendar.py` | 🆕 9 测试（真实 pandadata 列契约固化，§4.23） |
+| `scripts/p42_dominant_reconcile.py` | 🆕 dominant×因子 交叉对账探针（只读；A↔B 匹配 / ni0 型 / 尖峰-阶梯二分 / --spike-scan 全湖毛刺扫描，§4.24） |
+| `tests/test_p42_dominant_reconcile.py` | 🆕 7 测试（含回复跳成对消费 / 接缝排除，§4.24） |
 
-**验证**：**888 passed**（原 677 → 713 → 730 → 751 → 752 → 774 → 796 → 810 → 822 → 836 → 841 → 843 → 853 → 858 → 862 → 869 → 879 → 888）；改动文件 ruff 全通过；
+**验证**：**895 passed**（原 677 → 713 → 730 → 751 → 752 → 774 → 796 → 810 → 822 → 836 → 841 → 843 → 853 → 858 → 862 → 869 → 879 → 888 → 895）；改动文件 ruff 全通过；
 真实联网 18/18 双源末日 2026-08-28；备源端到端实测（sina→graft）误差 -21.35 bp 且已标记
 provisional；hc0/ni0 端到端实测通过（4199 行，此前被包络校验拒绝）；生产 manifest 增量回填 16 品种
 （cu0/rb0 未动、parquet 零改动）；P1-c 名义价回填 dry-run 实测 raw_close ≠ adj_close；
