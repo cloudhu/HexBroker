@@ -646,6 +646,46 @@ def repair_envelope(df, *, drop_zero_ohl=True) -> tuple[pd.DataFrame, list[str]]
 **841 passed**（836 + 5）；ruff 全过；生产 `data/` 零污染（mtime 核实仅
 盘中自动化 13:50/13:55 正常写入）。
 
+---
+
+### 4.15 P1-b 生产 manifest 补全（增量回填 16 品种）
+
+**取证**：全库盘点 —— `processed` 161 parquet / 2 manifest（仅 cu0/rb0，
+为盘中自动化按 `v1` 重写的最近一次写入）；`fundamental` 108 parquet / 0；
+`global` 9 parquet / 0。`backfill_manifests()`（PRD A3.1）与 CLI 脚本
+早已存在，只是从未对生产湖执行。
+
+**两个生产接线缺口（本次补齐）**：
+1. **防覆盖**：原函数会无条件重写全部 manifest —— 会把盘中自动化维护的
+   cu0/rb0（`v1`）冲成 `backfill-*`，次日自动化再写回，无谓翻覆。
+   → 新增 `skip_existing=True` 增量模式（已有 manifest 的分区整段跳过，
+   幂等：重复运行零回填）。
+2. **布局盲区**：`fundamental`/`global` 为扁平布局（`{layer}/{name}.parquet`），
+   `backfill_manifests` 只扫 `{layer}/{symbol}/` 子目录，**天然不覆盖**。
+   → 本次不扩 manifest 约定到扁平层（另案设计），P1-b 范围锁定
+   `processed` 层 18 品种。
+
+**生产执行**：`scripts/backfill_manifests.py --data-root data/raw --skip-existing`
+→ 回填 **16** 个 manifest（16 品种 × 1 freq）。回填 manifest 语义 =
+**整 freq 目录全量拼接**（与 save_processed 的"最近一次写入"语义不同）：
+全历史 date_range + 全量行数 + 内容指纹 + 口径常量
+（`adjust_method=backward` / `main_rule=open_interest`，来自 base.yaml），
+`data_version=backfill-<ts>`。
+
+**验证**：
+- manifest 数 2 → 18；hc0 抽查 `n_rows=2098` / `2018-01-02..2026-08-28`
+  与实际读取逐位一致；
+- cu0/rb0 manifest 未动（仍 `v1` @ 05:50Z 盘中自动化写入）；回填后
+  parquet 零改动（`-newermt` 计数 0）；
+- 读路径回归：rb0 1855 行 + P0-12 洞告警完整保留，hc0 正常读取；
+- manifest 测试 13（11+2：skip_existing 防覆盖/幂等 + 默认重写行为
+  既有语义守护）；全量 **843 passed**（841 + 2）；ruff 全过。
+
+**遗留观察**：save_processed 的 manifest 描述"最近一次写入的 df"而非
+整个 freq 目录 —— cu0/rb0 的 manifest（n_rows=156）与全量真值（~2000 行）
+存在语义错位，与自动化"每次写 2026 分区 + 重建 manifest"的实现方式耦合，
+属既有行为，本次不改（如需统一，随 P1-c 一并考虑）。
+
 
 ## 7. 待办（按优先级）
 
@@ -671,8 +711,9 @@ def repair_envelope(df, *, drop_zero_ohl=True) -> tuple[pd.DataFrame, list[str]]
 - [x] ~~**P0-13 `hc0`/`ni0` OHLC 包络校验失败排查**~~ → **已完成，见 §4.14**：
       根因系新浪源端毛刺 bar（各 1 根，非解析 bug）；`schema.repair_envelope`
       收口三源修复（akshare 补缺失步骤 + 大声告警），端到端实测通过。
-- [ ] **P1-b 生产 manifest 补全**：全库仅 cu0/rb0 两个品种有 manifest，
-      其余 16 个从未生成 —— manifest 机制形同虚设。
+- [x] ~~**P1-b 生产 manifest 补全**~~ → **已完成，见 §4.15**：增量回填 16 品种
+      （`skip_existing` 防触碰盘中自动化维护的 manifest），processed 层
+      manifest 覆盖 2 → 18；fundamental/global 扁平布局另案。
 - [ ] **P1-c `raw_close` 列语义修复**（§4.12）：湖内该列恒等于 `adj_close`
       （p6_4 管线映射），不携带名义价校准信息，使"名义价冒充"无法湖内自检。
       需在管线中改为写入真实外部名义价（历史分区存量是否回填待拍板）。
@@ -747,7 +788,11 @@ def repair_envelope(df, *, drop_zero_ohl=True) -> tuple[pd.DataFrame, list[str]]
 | `hexbroker/data/sources/test_akshare_source.py` | +5 测试（hc0/ni0 真实毛刺 / 告警 / 废 bar / 干净零告警） |
 | `scripts/dev_probe_p0_13_envelope.py` | 🆕 P0-13 探针（只读直调 `ak.futures_main_sina` 定位毛刺 bar） |
 | `artifacts/p0_13_probe_20260829.log` | 🆕 探针证据存档 |
+| `hexbroker/data/manifest.py` | P1-b：`backfill_manifests` 新增 `skip_existing` 增量模式（防覆盖生产 manifest，幂等） |
+| `scripts/backfill_manifests.py` | 新增 `--skip-existing` 旗标 |
+| `tests/test_data_manifest.py` | +2 测试（skip_existing 防覆盖/幂等 + 默认重写行为守护） |
 
-**验证**：**841 passed**（原 677 → 713 → 730 → 751 → 752 → 774 → 796 → 810 → 822 → 836 → 841）；改动文件 ruff 全通过；
+**验证**：**843 passed**（原 677 → 713 → 730 → 751 → 752 → 774 → 796 → 810 → 822 → 836 → 841 → 843）；改动文件 ruff 全通过；
 真实联网 18/18 双源末日 2026-08-28；备源端到端实测（sina→graft）误差 -21.35 bp 且已标记
-provisional；hc0/ni0 端到端实测通过（4199 行，此前被包络校验拒绝）；`git fsck --no-dangling` 无输出；`data/` 零改动。
+provisional；hc0/ni0 端到端实测通过（4199 行，此前被包络校验拒绝）；生产 manifest 增量回填 16 品种
+（cu0/rb0 未动、parquet 零改动）；`git fsck --no-dangling` 无输出；`data/` 零改动。
