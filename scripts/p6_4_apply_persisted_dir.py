@@ -22,20 +22,34 @@
 ----
   python scripts/p6_4_apply_persisted_dir.py --dir artifacts/p6_4_pull_20260825
   python scripts/p6_4_apply_persisted_dir.py --dir artifacts/p6_4_pull_20260825 --skip-p22
-  # 交易日场景（推荐自动化使用）：0 落盘即判定拉取失败 → 醒目横幅 + exit 3
+  # 交易日场景（推荐自动化使用）：拉取结果体检不通过 → 醒目横幅 + exit 3
   python scripts/p6_4_apply_persisted_dir.py --dir artifacts/p6_4_pull_20260825 --trading-day
+  # 指定基准交易日与容忍天数
+  python scripts/p6_4_apply_persisted_dir.py --dir artifacts/p6_4_pull_20260825 \
+      --trading-day --asof 2026-08-28 --stale-days 5
 
 退出码
 ------
   0 正常完成 / 非交易日安全返回 | 1 融合或 p22 失败 | 2 目录不存在 | 3 数据源拉取失败（--trading-day）
+
+``--trading-day`` 体检三重判定（任一不通过 → exit 3）
+---------------------------------------------------
+  1. **EMPTY**   目录 0 个 json
+  2. **PARTIAL** 品种数 < ``--expect``（旧版漏网：18 只落 5 个也 exit 0）
+  3. **STALE**   数据最新日期 早于 ``--asof`` - ``--stale-days``
+                 （旧版漏网：目录非空但数据是几天前的，照样 exit 0，
+                   把"真实拉取失败"伪装成"刷新成功"）
+
+历史回填场景应**不加** ``--trading-day``，以免被陈旧判定误杀。
 """
 from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
-from datetime import date
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -79,6 +93,148 @@ def _seg_from_dates(df) -> str:
     return f"{min(dates)}_{max(dates)}"
 
 
+def _norm_date(value) -> str:
+    """把 ``20260828`` / ``2026-08-28`` / ``2026/08/28`` 统一成 ``YYYYMMDD`` 字符串。
+
+    persisted 文件里的日期格式随上游变化（pandadata 给 ``20260828``，
+    部分源给 ``2026-08-28``），统一后可做字典序比较。
+    """
+    return re.sub(r"\D", "", str(value))[:8]
+
+
+def _scan_latest_date(json_files: list[Path]) -> tuple[str | None, dict[str, str | None]]:
+    """扫描全部 persisted 文件，返回 (全局最新日期, 每品种最新日期)。
+
+    纯 json 解析，不依赖 pandas —— 保证"拉取失败"快速路径在数据环境异常时也能出结论。
+    单文件解析失败不中断整体扫描，记为 None 交由上层按缺失处理。
+    """
+    latest: str | None = None
+    per_sym: dict[str, str | None] = {}
+    for fp in json_files:
+        sym = fp.stem
+        try:
+            raw = json.loads(fp.read_text(encoding="utf-8"))
+            res = _resolve_result(raw)
+            cols = res.get("columns") or []
+            rows = res.get("rows") or []
+            if "date" not in cols or not rows:
+                per_sym[sym] = None
+                continue
+            i = cols.index("date")
+            vals = [_norm_date(r[i]) for r in rows if i < len(r) and r[i] is not None]
+            per_sym[sym] = max(vals) if vals else None
+        except Exception:  # noqa: BLE001 - 单文件损坏不应阻断整体判定
+            per_sym[sym] = None
+        m = per_sym.get(sym)
+        if m and (latest is None or m > latest):
+            latest = m
+    return latest, per_sym
+
+
+def _print_stale_banner(d: Path, expect: int, got: int, latest: str | None,
+                        asof: str, earliest_ok: str, stale_days: int,
+                        missing: list[str], reason: str = "STALE") -> None:
+    """P1-c：目录非空但数据陈旧 / 品种不全 —— 与"0 落盘"同样的醒目横幅 + exit 3。
+
+    背景（2026-08-29 补齐）：原 ``--trading-day`` 只判「目录 0 个 json」。
+    实际生产中出现过两类漏网：
+      1. **数据陈旧**：目录里是几天前（甚至更旧）的数据，本脚本照常融合并 exit 0，
+         把"真实拉取失败"伪装成"刷新成功"；
+      2. **品种不全**：18 个只落了 5 个，同样 exit 0，而下游按 18 品种出信号。
+    两者与「0 落盘」后果相同：缓存不延长 → fd>0 → 隔夜过期门禁禁开。
+    失败原因不同（配额/网络/部分超时），但**都必须是显式失败**。
+    """
+    print("=" * 66)
+    print("⛔ 行情数据不可用 —— 缓存【不会延长】，请检查数据源")
+    print("=" * 66)
+    print(f"  · 目录：{d}")
+    print(f"  · 期望 {expect} 个 <sym0>.json，实际 {got}")
+    if latest:
+        print(f"  · 数据最新日期：{latest}（要求不早于 {earliest_ok}，容忍 {stale_days} 日历日）")
+        print(f"  · 基准交易日（--asof）：{asof}")
+    else:
+        print(f"  · 基准交易日（--asof）：{asof}")
+        print("  · 无有效日期：全部文件均无 date 列或为空")
+    # 判定文案必须与事实一致：误导性告警比没有告警更糟
+    if reason == "PARTIAL":
+        print("  · 判定：品种不全 —— 部分品种未落盘，下游按全品种出信号会缺腿")
+    elif reason == "EMPTY_DATE":
+        print("  · 判定：无有效日期 —— 文件存在但取不到日期字段，无法确认新鲜度")
+    else:
+        print("  · 判定：数据陈旧 —— 拉取到的是旧数据，不得当作刷新成功")
+    if missing:
+        shown = missing[:8]
+        tail = f" … 共 {len(missing)} 个" if len(missing) > 8 else ""
+        print(f"  · 缺失/无有效日期品种：{', '.join(shown)}{tail}")
+    print("  · 常见原因：Pandadata 网关 500009 单日总流量超限 / MCP 未接线 / "
+          "网络中断 / 部分品种超时")
+    print("  · 后果：阈值=0 隔夜过期门禁下主源信号全部过期 → 夜盘仅技术兜底或 0 开仓")
+    print("  → 处置：确认数据源配额与连接器接线；配额重置后（通常本地 0 点）重跑本管线补刷")
+    print("  → 若今日确为非交易日，请去掉 --trading-day 重跑（走旧的安全返回语义）")
+    print("=" * 66)
+
+
+def _check_trading_day_pull(d: Path, json_files: list[Path], expect: int,
+                            asof: str, stale_days: int) -> tuple[bool, str]:
+    """交易日拉取结果体检。返回 (是否通过, 失败原因)。
+
+    三重判定，任一不通过即显式失败：
+      1. 完全没落盘（0 个 json）
+      2. 品种不全（少于 expect）
+      3. 数据陈旧（全局最新日期 早于 asof - stale_days）
+    """
+    # 1) 完全没落盘 —— 沿用原有横幅（文案针对该场景）
+    if not json_files:
+        _print_pull_failure_banner(d, expect)
+        return False, "EMPTY"
+
+    # 2) 品种不全
+    if len(json_files) < expect:
+        latest, per_sym = _scan_latest_date(json_files)
+        _print_stale_banner(
+            d, expect, len(json_files), latest, asof,
+            _earliest_ok(asof, stale_days), stale_days, [], reason="PARTIAL"
+        )
+        return False, "PARTIAL"
+
+    # 3) 数据陈旧 / 无有效日期
+    latest, per_sym = _scan_latest_date(json_files)
+    earliest_ok = _earliest_ok(asof, stale_days)
+    missing = sorted(s for s, v in per_sym.items() if not v)
+    if latest is None:
+        _print_stale_banner(
+            d, expect, len(json_files), None, asof, earliest_ok, stale_days,
+            missing, reason="EMPTY_DATE"
+        )
+        return False, "EMPTY_DATE"
+    if latest < earliest_ok:
+        _print_stale_banner(
+            d, expect, len(json_files), latest, asof, earliest_ok, stale_days,
+            missing, reason="STALE"
+        )
+        return False, "STALE"
+    return True, "OK"
+
+
+def _earliest_ok(asof: str, stale_days: int) -> str:
+    """新鲜度下限：``asof - stale_days``，返回 YYYYMMDD。"""
+    d = datetime.strptime(_norm_date(asof), "%Y%m%d").date()
+    return (d - timedelta(days=stale_days)).strftime("%Y%m%d")
+
+
+def _default_stale_days() -> int:
+    """容忍天数默认与数据层门禁保持一致（避免两处口径漂移）。
+
+    惰性导入：本脚本的"拉取失败"快速路径不应因 pandas 缺失而无法出结论。
+    """
+    try:
+        from hexbroker.data.freshness import DEFAULT_MAX_STALE_DAYS
+
+        return int(DEFAULT_MAX_STALE_DAYS)
+    except Exception:  # noqa: BLE001
+        return 5
+
+
 def _print_pull_failure_banner(d: Path, expect: int) -> None:
     """P1-a：数据源拉取失败醒目横幅。
 
@@ -110,7 +266,13 @@ def main() -> int:
                          "判定为【数据源拉取失败】→ 醒目横幅 + exit 3；不置位维持旧语义"
                          "（WARN + exit 0，兼容非交易日/无新数据）")
     ap.add_argument("--expect", type=int, default=18,
-                    help="期望品种数（仅用于提示文案，默认 18）")
+                    help="期望品种数（--trading-day 下参与『品种不全』判定，默认 18）")
+    ap.add_argument("--asof", default=None,
+                    help="基准交易日 YYYY-MM-DD / YYYYMMDD，默认今天。"
+                         "仅 --trading-day 下用于陈旧判定")
+    ap.add_argument("--stale-days", type=int, default=None,
+                    help="陈旧容忍日历日，默认取数据层 "
+                         "hexbroker.data.freshness.DEFAULT_MAX_STALE_DAYS（当前 5）")
     ap.add_argument("--python",
                     default=r"C:/Users/Administrator/.workbuddy/binaries/python/envs/default/Scripts/python.exe",
                     help="python 解释器（默认 managed venv；缺失时回退 sys.executable）")
@@ -122,10 +284,20 @@ def main() -> int:
         return 2
 
     json_files = sorted(p for p in d.glob("*.json") if not p.name.endswith(".clean.json"))
-    if not json_files:
-        if args.trading_day:
-            _print_pull_failure_banner(d, args.expect)
+
+    if args.trading_day:
+        asof = args.asof or date.today().isoformat()
+        stale_days = args.stale_days if args.stale_days is not None else _default_stale_days()
+        passed, reason = _check_trading_day_pull(
+            d, json_files, args.expect, asof, stale_days
+        )
+        if not passed:
+            print(f"[FAIL] 交易日拉取体检未通过：{reason}")
             return 3
+        latest, _ = _scan_latest_date(json_files)
+        print(f"[GATE] 交易日体检通过：{len(json_files)}/{args.expect} 品种，"
+              f"数据最新 {latest}，基准 {asof}，容忍 {stale_days} 日历日")
+    elif not json_files:
         print(f"[WARN] 目录无 *.json（排除 .clean.json）: {d}（无新数据可融合，属预期）")
         return 0
 
