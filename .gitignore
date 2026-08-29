@@ -32,3 +32,6 @@ catboost_info/
 # numpy 二进制（测试残留/缓存）
 *.npy
 data/paper/
+
+# p37 raw_close backfill 全量备份（生产数据快照，不入库）
+data/p37_backup_processed_*/
