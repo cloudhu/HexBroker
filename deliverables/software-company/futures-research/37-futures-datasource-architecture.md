@@ -142,6 +142,29 @@ akshare 返回中文列名 `日期 开盘价 最高价 最低价 收盘价 成�
 
 `pyproject.toml` 的 `testpaths = ["tests", "hexbroker/data/sources"]` 是**白名单**，新增的 `hexbroker/data/test_freshness.py` 在名单外 → **17 个测试永不执行**。与 PM 报告的"mock 假绿灯"是同一类病（测试存在但无效）。已补 `hexbroker/data` 并加注释警示。
 
+### 4.7 「交易日拉取体检」三重判定（补 P1-a 语义缺口）
+
+`scripts/p6_4_apply_persisted_dir.py --trading-day` 原只判「目录 0 个 json」。补齐为三重判定，
+任一不通过即醒目横幅 + `exit 3`：
+
+| 判定 | 场景 | 旧行为 |
+|---|---|---|
+| **EMPTY** | 目录 0 个 json | 已覆盖 |
+| **PARTIAL** | 品种数 < `--expect`（如 18 只落 5 个） | ⚠️ **exit 0**，下游按 18 品种出信号缺腿 |
+| **STALE** | 数据最新日期 早于 `--asof` - `--stale-days` | ⚠️ **exit 0**，把真实拉取失败伪装成刷新成功 |
+| **EMPTY_DATE** | 文件存在但取不到日期字段 | ⚠️ 同 STALE |
+
+新增 `--asof`（基准交易日，默认今天）与 `--stale-days`（默认取数据层
+`DEFAULT_MAX_STALE_DAYS`，惰性导入以免失败快速路径依赖 pandas）。
+历史回填场景不加 `--trading-day`，避免被陈旧判定误杀。
+
+**判定文案须与事实一致**：初版在 PARTIAL 场景下会错报"数据陈旧"（数据其实是新鲜的），
+已修正 —— 误导性告警比没有告警更糟。
+
+**测试方式**：`tests/test_p6_4_apply_gate.py`（17 测试）。刻意用单测而非跑真目录验证 ——
+本脚本 happy path 会真正调用 `p6_4_fill_gaps.py --stage parse` **写入生产 parquet**，
+用真实目录验证门禁会造成生产数据污染。
+
 ### 4.6 P0-8 真实联网冒烟脚本
 
 `scripts/p36_smoke_sources.py` —— 刻意**不进 pytest**（CI 不应依赖外网）。退出码 `0` 至少一个源新鲜 / `1` 无源新鲜 / `3` 脚本异常。
@@ -213,7 +236,7 @@ akshare 返回中文列名 `日期 开盘价 最高价 最低价 收盘价 成�
 ### P1
 - [ ] SHFE / INE 官方源路径修正（`/data/tradedata/future/dailydata/`）
 - [ ] CZCE `.txt` 官方源接入（已验证 24 合约）
-- [ ] `p6_4_apply_persisted_dir.py --trading-day` 语义缺口：**目录非空但数据陈旧**目前仍返回 `exit 0`，须与 P0-0 同源修复
+- [x] ~~`p6_4_apply_persisted_dir.py --trading-day` 语义缺口~~ → **已完成，见 §4.7**
 - [ ] dominant 日历本地快照化（§3）
 
 ### P2
