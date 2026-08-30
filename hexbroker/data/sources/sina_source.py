@@ -78,7 +78,7 @@ class SinaSource(DataSource):
         timeout: float = 10.0,
         rate_limit_sleep: float = 0.3,
         root: Optional[str] = None,
-        save: bool = True,
+        save: bool = False,
     ) -> None:
         """初始化新浪源。
 
@@ -87,7 +87,8 @@ class SinaSource(DataSource):
         timeout : 单次请求超时（秒），默认 10s。
         rate_limit_sleep : 请求间限频保护间隔（秒），默认 0.3s。
         root : ``DataLake`` 根目录（落 Parquet），默认 ``data/raw``。
-        save : 取数后是否落 Parquet，默认 True。
+        save : 取数后是否落 Parquet。**默认 False** —— 取数是纯读操作，不应带
+            写生产数据湖的副作用；确需落盘时由调用方显式传 ``save=True``。
         """
         self.timeout = timeout
         self.rate_limit_sleep = rate_limit_sleep

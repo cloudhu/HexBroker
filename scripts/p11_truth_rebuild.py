@@ -2,11 +2,14 @@
 
 背景（2026-08-29 11:49 pytest 污染事故）
 ----------------------------------------
-AkshareSource(save=True) 默认落盘 + DataLake.save_processed 整文件覆盖，
-rb0/2020 分区被写成 2 行合成数据，已隔离（artifacts/quarantine/）并挂
-``_MISSING_2020.json``。留一法实测插值重建不可行（53.22 bp 均值误差），
+AkshareSource 曾以 ``save=True`` 为默认 + DataLake.save_processed 整文件
+覆盖，rb0/2020 分区被写成 2 行合成数据，已隔离（artifacts/quarantine/）
+并挂 ``_MISSING_2020.json``。留一法实测插值重建不可行（53.22 bp 均值误差），
 唯一出路 = pandadata ``get_future_daily_post(method=close_pcr)`` 重拉 2020
 全年真值 + P0-9 rebuild 流水线整分区新建。
+
+（2026-08-30 备注：三源 + czce 的 ``save`` 默认已改 ``False``，并新增
+save_processed 分区缩水门禁 —— 本节描述的触发条件已消除，历史留档。）
 
 扩展（主理人 2026-08-29 拍板 ③真值重建）
 ----------------------------------------

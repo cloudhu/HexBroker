@@ -76,8 +76,14 @@ class CzceSource(DataSource):
         timeout: float = 10.0,
         rate_limit_sleep: float = 0.3,
         root: Optional[str] = None,
-        save: bool = True,
+        save: bool = False,
     ) -> None:
+        """初始化郑商所源。
+
+        ``save`` 默认 **False** —— 取数是纯读操作，不应带写生产数据湖的
+        副作用；确需落盘时由调用方显式传 ``save=True``（与 sina/akshare/
+        pytdx 三源同一红线口径，QA 复核 2026-08-30 建议补齐）。
+        """
         self.timeout = timeout
         self.rate_limit_sleep = rate_limit_sleep
         self.save = save

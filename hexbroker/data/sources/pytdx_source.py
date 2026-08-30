@@ -83,7 +83,7 @@ class PytdxSource(DataSource):
         connect_timeout: float = 5.0,
         rate_limit_sleep: float = 0.2,
         root: Optional[str] = None,
-        save: bool = True,
+        save: bool = False,
     ) -> None:
         """初始化 pytdx 源。
 
@@ -93,7 +93,8 @@ class PytdxSource(DataSource):
         connect_timeout : 单服务器连接超时（秒），默认 5s。
         rate_limit_sleep : 多次请求之间的保护间隔（秒）。
         root : ``DataLake`` 根目录（落 Parquet），默认 ``data/raw``。
-        save : 取数后是否落 Parquet，默认 True。
+        save : 取数后是否落 Parquet。**默认 False** —— 取数是纯读操作，不应带
+            写生产数据湖的副作用；确需落盘时由调用方显式传 ``save=True``。
         """
         self.servers = servers if servers is not None else list(DEFAULT_SERVERS)
         self.connect_timeout = connect_timeout

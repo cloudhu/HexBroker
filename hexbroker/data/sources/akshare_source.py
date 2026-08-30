@@ -51,7 +51,7 @@ class AkshareSource(DataSource):
 
     name = "akshare"
 
-    def __init__(self, root: Optional[str] = None, save: bool = True) -> None:
+    def __init__(self, root: Optional[str] = None, save: bool = False) -> None:
         """初始化 AkShare 源。
 
         与其他源保持一致的构造/调用签名，便于故障切换编排器无差别调用。
@@ -59,7 +59,8 @@ class AkshareSource(DataSource):
         参数
         ----
         root : ``DataLake`` 根目录（落 Parquet），默认 ``data/raw``。
-        save : 取数后是否落 Parquet，默认 True。
+        save : 取数后是否落 Parquet。**默认 False** —— 取数是纯读操作，不应带
+            写生产数据湖的副作用；确需落盘时由调用方显式传 ``save=True``。
         """
         self.save = save
         self.lake = DataLake(root if root is not None else "data/raw")

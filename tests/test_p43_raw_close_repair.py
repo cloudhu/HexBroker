@@ -123,6 +123,106 @@ def test_apply_rescans_zero_and_idempotent(tmp_path):
     assert log[0]["n_rows"] == 1
 
 
+def test_g4_blocks_deny_list_symbol(tmp_path):
+    """显式冻结名单命中 → 整个品种拒执行（不是跳过单条）。"""
+    mod = _load_p43()
+    _mk_lake(tmp_path, "ag0", GLITCH_RAW, BASE_ADJ)  # 本可修出 1 处毛刺
+    df = mod._load_processed(tmp_path, "ag0", "1d")
+    plan = mod.build_plan(tmp_path, "ag0", df, tol=1e-3)
+    assert plan["blocked"] is True
+    assert plan["repairs"] == []
+    assert "冻结名单" in plan["blocked_reason"]
+
+
+def test_g4_auto_detects_k_identical_pollution(tmp_path):
+    """不依赖名单：段内 k≡1 占比 > 50% 即自动拦截（污染率写进原因）。"""
+    mod = _load_p43()
+    # 10 行中 7 行 raw==adj（k≡1），其余 3 行真 k=1.5
+    raw = [100.0] * 7 + [100.0, 100.0, 100.0]
+    adj = [100.0] * 7 + [150.0, 150.0, 150.0]
+    _mk_lake(tmp_path, "xx0", raw, adj)
+    df = mod._load_processed(tmp_path, "xx0", "1d")
+    plan = mod.build_plan(tmp_path, "xx0", df, tol=1e-3, deny_symbols=())
+    assert plan["blocked"] is True
+    assert plan["repairs"] == []
+    assert "70.00%" in plan["blocked_reason"]
+    # override 抬高阈值 → 放行（k=1.5 段内无毛刺，故 0 修复但不 block）
+    plan2 = mod.build_plan(tmp_path, "xx0", df, tol=1e-3, deny_symbols=(),
+                           k_cap=0.9)
+    assert plan2["blocked"] is False
+
+
+def test_g4_no_zero_division_on_empty_ratio(tmp_path):
+    """ratio 为空 → 污染率视为 0，不得拦截、不得除零。"""
+    mod = _load_p43()
+    dates = pd.bdate_range("2023-01-02", periods=4)
+    df = pd.DataFrame({"symbol": ["YY0"] * 4, "datetime": dates,
+                       "raw_close": [0.0] * 4, "adj_close": [0.0] * 4})
+    plan = mod.build_plan(tmp_path, "yy0", df, tol=1e-3)
+    assert plan["blocked"] is False
+
+
+def test_g4_blocked_zero_write_others_proceed(tmp_path):
+    """被冻结品种零写入；其余品种修复照常，退出码仍 0。"""
+    mod = _load_p43()
+    _mk_lake(tmp_path, "ag0", GLITCH_RAW, BASE_ADJ)  # 冻结：不得写
+    _mk_lake(tmp_path, "cu0", GLITCH_RAW, BASE_ADJ)  # 非冻结：应修 100.0
+    ag_part = tmp_path / "processed" / "ag0" / "1d" / "2023.parquet"
+    cu_part = tmp_path / "processed" / "cu0" / "1d" / "2023.parquet"
+    ag_before, cu_before = ag_part.read_bytes(), cu_part.read_bytes()
+
+    assert mod.main(["--data-root", str(tmp_path), "--apply"]) == 0
+    assert ag_part.read_bytes() == ag_before  # 零写入
+    assert cu_part.read_bytes() != cu_before  # 正常修复
+    cu = pd.read_parquet(cu_part)
+    cu["datetime"] = pd.to_datetime(cu["datetime"])
+    row = cu.loc[cu["datetime"] == pd.Timestamp("2023-01-05")].iloc[0]
+    assert row["raw_close"] == 100.0
+
+
+def test_g4_cli_overrides(tmp_path, capsys):
+    """--deny-symbols / --k-cap 人工 override 生效。"""
+    mod = _load_p43()
+    _mk_lake(tmp_path, "ag0", GLITCH_RAW, BASE_ADJ)
+    # 默认：名单命中 → blocked
+    mod.main(["--data-root", str(tmp_path), "--apply"])
+    assert "BLOCKED" in capsys.readouterr().out
+    # 清空名单 → 放行并落盘
+    rc = mod.main(["--data-root", str(tmp_path), "--apply",
+                   "--deny-symbols", ""])
+    assert rc == 0
+    part = tmp_path / "processed" / "ag0" / "1d" / "2023.parquet"
+    df = pd.read_parquet(part)
+    df["datetime"] = pd.to_datetime(df["datetime"])
+    row = df.loc[df["datetime"] == pd.Timestamp("2023-01-05")].iloc[0]
+    assert row["raw_close"] == 100.0
+
+
+def test_sidecar_records_full_repairs_for_rollback(tmp_path):
+    """sidecar 必须逐行记录 old/new，否则一行都回滚不了（P0-4 证据 4）。"""
+    mod = _load_p43()
+    _mk_lake(tmp_path, "ag0", GLITCH_RAW, BASE_ADJ)  # 冻结品种
+    _mk_lake(tmp_path, "cu0", GLITCH_RAW, BASE_ADJ)
+    assert mod.main(["--data-root", str(tmp_path), "--apply"]) == 0
+    log = json.loads(
+        (tmp_path / "processed" / mod.SIDECAR_NAME).read_text(encoding="utf-8"))
+    assert isinstance(log, list) and len(log) == 1
+    e = log[0]
+    # 原有 5 字段（向后兼容）
+    for key in ("ts", "tool", "n_partitions", "n_rows",
+                "residual_events_after"):
+        assert key in e
+    # 全量逐行：7 字段齐全
+    r = e["repairs"][0]
+    assert set(r) == {"sym0", "date", "year", "old_raw", "new_raw", "k",
+                      "adj_close"}
+    assert r["old_raw"] == 150.0 and r["new_raw"] == 100.0
+    assert e["blocked"][0]["sym0"] == "ag0"
+    assert e["blocked"][0]["blocked_reason"]
+    assert e["k_cap"] == mod.K_IDENTICAL_CAP
+    assert e["deny_symbols"] == list(mod.DEFAULT_DENY_SYMBOLS)
+
+
 def test_main_json_report(tmp_path):
     mod = _load_p43()
     _mk_lake(tmp_path, "cu0", GLITCH_RAW, BASE_ADJ)
