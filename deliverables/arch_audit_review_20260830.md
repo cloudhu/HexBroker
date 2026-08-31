@@ -133,6 +133,31 @@ amount = 0.0、open_interest = 0.0、is_rollover = False、limit_up/down = False
 > **若 QA 证实抖动确实落在 07-18 前后，§3 的"拉全年真值"方案是唯一能把它从"外推风险"变成"实测验证"的做法**（§3.4 闸 2）。
 > 若 QA 推翻 RAW_SCALE_FIX 的适用性，回填口径设计需整体重做。
 
+> 🔴 **后续更正（2026-08-31 追加，不修改上文历史结论）**
+>
+> **上面这个条件分支已被实际触发 —— QA 已推翻 `RAW_SCALE_FIX` 的适用性**，但推翻理由
+> 不是"07-18 抖动"，而是更根本的**方向性错误**：
+>
+> - 序 3 取证（2026-08-30）：三品种湖内 `raw_close` ≡ 名义价（正确），**坏的是 `adj_close`**
+>   （被污染成名义价的拷贝）。对照 rb0 的 `adj_close` ≡ `close_pcr` 逐位相同 → 管线健康，
+>   仅三品种 `adj_close` 受损。
+> - `RAW_SCALE_FIX` 是把**正确的** `close_pcr` 乘常数去"对齐"**错误的**既有序列，
+>   **把对的改成错的**。
+> - 另一硬伤：nominal/复权 比值是**每 dominant 段一个常数、段间跳变**，单一常数在物理上不成立
+>   （实测 ag0 2025 k=0.986 / 2026 k=0.9937，若常数正确应恰好 = 1）。
+>
+> **对本文的影响**：
+>
+> 1. §1.1 事实表中「ag0/au0/m0 湖内 `close` = **既有原始口径（≈名义价）**」这一行的
+>    **现象描述仍然属实**，但应读作「**待修复的污染态**」，而非「应沿用的目标口径」。
+> 2. §1.2 / §1.3 基于"三品种就是原始口径"展开的回填与 graft 设计**需整体重做** ——
+>    而非按 07-18 抖动去微调。
+> 3. **现行止血口径**：三品种口径重建必须禁用该常数（`normalize_new_df(..., scale=1.0)`
+>    或 CLI `--scale 1.0`；`p6_4_apply_persisted_dir.py` 已固定传 `--scale 1.0`）。
+>    终态：三品种 27 个分区用 `close_pcr` 真值重建完毕后整体废弃该常数。
+>
+> 权威留档：`scripts/p6_4_fill_gaps.py` L112-140；开发者指南 `docs/developer-guide.md` §9.11 更正块。
+
 ### 1.3 连带影响
 
 `hexbroker/data/graft.py:6-7` docstring 称「18 品种比例因子跨度 0.4781(cf0) ~ 8.7769(i0)」——这个跨度里混了两种口径。
@@ -282,7 +307,7 @@ def _no_production_lake_writes(monkeypatch):
 
 | 方案 | 机制 | 风险 | 裁决 |
 |---|---|---|---|
-| **S1 · pandadata 主源 `close_pcr` 全年真值** | `get_future_daily_post(underlying_symbol=[AG/AU/M], start_date=20240101, end_date=20241231, method=close_pcr)` → `normalize_new_df`（自动 × `RAW_SCALE_FIX`）→ `enrich_raw_close` → `rebuild_partition` 整年替换 | ① MCP token 失效（2026-08-28 实测发生过）；② 网关 ~1000 行截断（p6_4 实测 ≈4 年，全年 243 行安全）；③ scale 在 2024-07 边界的 ±0.4% 抖动 | ✅ **唯一主选** |
+| **S1 · pandadata 主源 `close_pcr` 全年真值** | `get_future_daily_post(underlying_symbol=[AG/AU/M], start_date=20240101, end_date=20241231, method=close_pcr)` → `normalize_new_df`（⚠️ **更正 2026-08-31：必须 `--scale 1.0` 禁用 `RAW_SCALE_FIX`**，原文"自动 × RAW_SCALE_FIX"已证伪）→ `enrich_raw_close` → `rebuild_partition` 整年替换 | ① MCP token 失效（2026-08-28 实测发生过）；② 网关 ~1000 行截断（p6_4 实测 ≈4 年，全年 243 行安全）；③ ~~scale 在 2024-07 边界的 ±0.4% 抖动~~（⚠️ 2026-08-31：风险③已**不再是主要风险** —— 常数本身方向性错误，见 §1.2 后续更正块） | ✅ **唯一主选**（机制仍为主选，但**执行参数须按上表更正**） |
 | **S2 · 免费源名义价 + graft 续接** | sina/akshare 名义价 → `graft_adjusted` | 见下「为什么 S2 架构错配」四条例 | ❌ 不可用于本次回填；仅作主源不可用时的临时降级 + provisional |
 | **S3 · czce 交易所官方** | czce 名义价 + graft | S2 全部风险 + P2-5（逐日 HTTP，5 年 ≈2h/品种）+ P2-9（主力规则不同）+ **品种覆盖不匹配** | ❌ 不可用 |
 
@@ -441,7 +466,7 @@ sequenceDiagram
     participant OP as 运维/工程师
     participant SN as Snapshot 三层
     participant PD as pandadata MCP<br/>主源 close_pcr
-    participant NRM as p6_4.normalize_new_df<br/>RAW_SCALE_FIX
+    participant NRM as p6_4.normalize_new_df<br/>scale=1.0 · 禁用 RAW_SCALE_FIX
     participant ENR as enrich_raw_close<br/>备源名义价
     participant RB as rebuild_partition<br/>先合后写
     participant GT as 四道闸校验
@@ -455,9 +480,9 @@ sequenceDiagram
     PD-->>OP: 全年真值 JSON → artifacts/pXX_raw/seg_20240101_20241231_{SYM}.json
     OP->>OP: 落盘持久化（审计凭据，勿只留在 MCP tool-results 临时目录）
 
-    OP->>NRM: normalize_new_df(df, "AG", "ag0", 2024-01-01, 2024-12-31)
-    Note over NRM: open/high/low/close/raw_close/adj_close<br/>× RAW_SCALE_FIX(ag0=1.4505)<br/>limit_up/down/is_rollover = False
-    NRM-->>OP: 14 列标准 schema（原始口径）
+    OP->>NRM: normalize_new_df(df, "AG", "ag0", 2024-01-01, 2024-12-31, scale=1.0)
+    Note over NRM: ⚠️ 更正 2026-08-31：必须显式 scale=1.0<br/>禁用 RAW_SCALE_FIX ag0=1.4505 · 已证伪<br/>limit_up/down/is_rollover = False
+    NRM-->>OP: 14 列标准 schema（正确后复权口径）
 
     OP->>ENR: enrich_raw_close(truth, "ag0")
     Note over ENR: 备源名义价回填 raw_close<br/>all-or-nothing，覆盖率<90% 则原样返回并告警
