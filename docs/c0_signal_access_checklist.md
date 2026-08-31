@@ -19,7 +19,7 @@
 | 文件格式 | parquet（与现有 `signal_caches` 同格式） |
 | 列 schema | 对齐 v8：`symbol, ts, p_up, exp_ret, is_effective`（其余列按需补充，主源以这 5 列校验） |
 | 必含行 | 至少包含 `symbol == "c0"` 的有效行（`is_effective=True`、`ts` 为交易日当天） |
-| 新鲜度 | `freshness_threshold_days=0` 下仅「同一交易日」信号有效，需每个交易日开盘前刷新 |
+| 新鲜度 | `freshness_threshold_days=1`（**自然日差**口径，P3-B 2026-08-31）下，上一交易日的信号在当日盘中有效（fd=1），跨周末/跨假期（fd≥2）过期。故**周末与假期后的首个交易日开盘前必须刷新缓存** |
 
 **建议路径落点**：将这份 parquet 加入 `configs/paper.yaml` 的 `signal_caches` 列表**首位**（作为主源，优先级最高）。当前 `configs/paper.yaml:19-21` 为：
 
@@ -63,7 +63,8 @@
 
 - [ ] 外部跑批产出含 `c0` 行的 v8 schema parquet（`symbol, ts, p_up, exp_ret, is_effective`）
 - [ ] parquet 加入 `configs/paper.yaml` 的 `signal_caches` **首位**
-- [ ] 每个交易日开盘前刷新缓存（满足 `freshness_threshold_days=0`）
+- [ ] **周末/假期后的首个交易日开盘前必须刷新缓存**（否则周五信号在周一使用 → fd=3 > 阈值 1 → 全部过期降级技术兜底）
+- [ ] 常规交易日（周二~周五）盘中信号为上一交易日收盘特征所生成，fd=1 ≤ 阈值 1，正常放行
 - [ ] （可选）`symbols.c0.mode` 由 `accumulate` 改为 `trade`（运维决定）
 - [ ] 验证：`SignalEngine.has_symbol("c0") == True` 且 `latest_signal("c0").is_effective == True`
 - [ ] 监控：c0 不再因「信号缺失」保持 0 成交（属数据就绪后的正常交易）
