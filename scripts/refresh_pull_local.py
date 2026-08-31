@@ -123,6 +123,35 @@ def _load_collector_daily(sym0: str, start: pd.Timestamp, end: pd.Timestamp) -> 
     return df[(df["datetime"] >= start) & (df["datetime"] <= end)].sort_values("datetime")
 
 
+def _augment_ext_with_collector(
+    sym0: str,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    ext: pd.DataFrame,
+    lake_last: pd.Timestamp,
+) -> tuple[str, pd.DataFrame]:
+    """用采集湖 POC 日线增强扩展区（tqsdk 扩展日之后、湖最后日之前）。
+
+    返回 ``(ext_source, ext_rows)``。采集湖 POC 无日线分区/空帧（无 ``datetime`` 列）
+    时安全回落 tqsdk（``ext_source='tqsdk'``、``ext_rows=ext``），不会因 ``.set_index``
+    抛 ``KeyError`` 导致全品种失败（见 2026-08-31 夜盘前刷新 18/18 失败根因）。
+    """
+    ext_source = "tqsdk"
+    ext_rows: pd.DataFrame = ext
+    if ext.empty:
+        return ext_source, ext_rows
+    col = _load_collector_daily(sym0, start, end)
+    if "datetime" not in col.columns:
+        return ext_source, ext_rows  # 采集湖 POC 无日线 → 回落 tqsdk
+    col = col.set_index("datetime")
+    col_ext = col[col.index > lake_last]
+    if not col_ext.empty:
+        ext_source = "collector"
+        ext_rows = col_ext.reindex(ext.index).combine_first(
+            ext[~ext.index.isin(col_ext.index)])
+    return ext_source, ext_rows
+
+
 def _underlying_upper(tq_symbol: str) -> str:
     """KQ.m@SHFE.ag → AG（对齐 pandadata 样本的大写基础代码）。"""
     return tq_symbol.split("@")[1].split(".")[-1].upper()
@@ -246,27 +275,19 @@ def main() -> int:
 
             # 扩展区换月疑点守卫
             ext = tqs[tqs.index > lake_last]
-            ext_source = "tqsdk"
-            ext_rows: pd.DataFrame | None = ext
-            if not ext.empty:
-                col = _load_collector_daily(sym0, start, end).set_index("datetime")
-                col_ext = col[col.index > lake_last]
-                if not col_ext.empty:
-                    ext_source = "collector"
-                    ext_rows = col_ext.reindex(ext.index).combine_first(
-                        ext[~ext.index.isin(col_ext.index)])
-                prev_close = tqs["close"].shift(1)
-                ret = (ext_rows["close"] / prev_close.loc[ext_rows.index] - 1.0).abs()
-                jump_lim = PRICE_JUMP_PCT.get(sym0, PRICE_JUMP_DEFAULT)
-                if bool((ret > jump_lim * 1.02).any()):
-                    raise ValueError(f"ROLLOVER_SUSPECT: 扩展区 {ret.idxmax().date()} 价格跳变 "
-                                     f"{ret.max():.2%} > 限幅{jump_lim:.1%}×1.02（疑换月，k 不可外推）")
-                oi = ext_rows["open_interest"]
-                oi_prev = tqs["open_interest"].shift(1).reindex(ext_rows.index)
-                oi_ret = ((oi - oi_prev) / oi_prev.clip(lower=1.0)).abs()
-                if bool((oi_ret > OI_JUMP_PCT).any()):
-                    raise ValueError(f"ROLLOVER_SUSPECT: 扩展区 OI 单日跳变超 {OI_JUMP_PCT:.0%}"
-                                     f"（疑换月，k 不可外推）")
+            ext_source, ext_rows = _augment_ext_with_collector(sym0, start, end, ext, lake_last)
+            prev_close = tqs["close"].shift(1)
+            ret = (ext_rows["close"] / prev_close.loc[ext_rows.index] - 1.0).abs()
+            jump_lim = PRICE_JUMP_PCT.get(sym0, PRICE_JUMP_DEFAULT)
+            if bool((ret > jump_lim * 1.02).any()):
+                raise ValueError(f"ROLLOVER_SUSPECT: 扩展区 {ret.idxmax().date()} 价格跳变 "
+                                 f"{ret.max():.2%} > 限幅{jump_lim:.1%}×1.02（疑换月，k 不可外推）")
+            oi = ext_rows["open_interest"]
+            oi_prev = tqs["open_interest"].shift(1).reindex(ext_rows.index)
+            oi_ret = ((oi - oi_prev) / oi_prev.clip(lower=1.0)).abs()
+            if bool((oi_ret > OI_JUMP_PCT).any()):
+                raise ValueError(f"ROLLOVER_SUSPECT: 扩展区 OI 单日跳变超 {OI_JUMP_PCT:.0%}"
+                                 f"（疑换月，k 不可外推）")
 
             # 发射：扩展日 + 对齐稳定段重叠日（未对齐日绝不发射）
             base = _underlying_upper(TQ_SYMBOLS[sym0])
