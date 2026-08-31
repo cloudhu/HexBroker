@@ -447,7 +447,11 @@ class TradingScheduler:
         acct = self._broker.snapshot(marks)
         atr = self._default_atr_pct * quote.price
         pos_ctx = self._broker.position_ctx(symbol, quote, atr)
-        decision = self._risk_gate.evaluate(sig, quote, acct, pos_ctx)
+        # ③ 加固：与 _process_symbol 对齐，显式透传 ma_price。
+        # 否则 RiskState.ma_price=None → sell_engine S1（趋势破坏止损）在「仅风控」模式下被整体跳过。
+        bars = self._cached_bars(symbol, day)
+        _, _, ma_price = self._aux_from_bars(bars)
+        decision = self._risk_gate.evaluate(sig, quote, acct, pos_ctx, ma_price=ma_price)
         plan = self._planner.update_from_signal(sig, decision, quote=quote, equity=acct.equity)
         event = self._broker.execute_plan(plan, quote, now)
         if event is not None:

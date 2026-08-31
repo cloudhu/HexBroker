@@ -93,12 +93,58 @@ def _win_pid_alive(pid: int) -> bool:
         kernel32.CloseHandle(process)
 
 
+def _win_pid_creation_time(pid: int) -> Optional[int]:
+    """返回进程创建时间（Windows FILETIME 64-bit）；进程不存在/不可访问返回 None。
+
+    用于 PID 锁身份校验：配合 ``_is_pid_alive`` 区分「同一进程仍存活」与
+    「PID 被无关进程复用（僵尸锁）」——二者 ``_is_pid_alive`` 同为 True 但创建时间不同。
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+    PROCESS_QUERY_INFORMATION = 0x0400
+    process = kernel32.OpenProcess(PROCESS_QUERY_INFORMATION, False, pid)
+    if not process:
+        return None
+    try:
+        ct = wintypes.FILETIME()
+        et = wintypes.FILETIME()
+        kt = wintypes.FILETIME()
+        ut = wintypes.FILETIME()
+        if not kernel32.GetProcessTimes(
+            process, ctypes.byref(ct), ctypes.byref(et),
+            ctypes.byref(kt), ctypes.byref(ut),
+        ):
+            return None
+        return (ct.dwHighDateTime << 32) | ct.dwLowDateTime
+    finally:
+        kernel32.CloseHandle(process)
+
+
+def _pid_creation_time(pid: int) -> Optional[int]:
+    """跨平台进程创建时间指纹（用于 PID 锁身份校验）。
+
+    - Windows：``GetProcessTimes`` 的 creation FILETIME。
+    - POSIX：``/proc/<pid>/stat`` 第 22 字段（starttime，单位时钟滴答，单调可比）。
+    """
+    if sys.platform.startswith("win"):
+        return _win_pid_creation_time(pid)
+    try:
+        with open(f"/proc/{pid}/stat", encoding="utf-8") as f:
+            parts = f.read().split()
+        return int(parts[21])  # starttime 字段（0-based index 21）
+    except Exception:
+        return None
+
+
 def _read_pid_file(pid_path: Path) -> Optional[int]:
     try:
         if not pid_path.exists():
             return None
         text = pid_path.read_text(encoding="utf-8").strip()
-        pid = int(text)
+        # 兼容新格式 ``PID:CREATION_TIME``（见 paper_trading_main._try_acquire_pid_lock）
+        pid = int(text.split(":")[0])
     except Exception:
         return None
     if _is_pid_alive(pid):

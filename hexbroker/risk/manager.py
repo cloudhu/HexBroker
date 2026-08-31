@@ -30,6 +30,9 @@ from .rules import (
 from .sell_engine import detect_sell_signals, strongest
 from .stoploss import ATRRatchet, compute_stop, trailing_stop
 from .types import ATRTier, RiskDecision, RiskState
+from ..utils.logging import get_logger
+
+log = get_logger("RISK")
 
 
 def _apply(ctx: RiskContext, adj: RiskAdjustment) -> None:
@@ -109,6 +112,16 @@ class RiskManager:
 
         # ATR 三档 ratchet（只增不减）+ 止损价（按品种隔离记忆）
         sym = state.symbol or "default"
+        if sym == "default":
+            # ④ 加固：正常生产流 state.symbol 恒非空（来自 self._symbols），此兜底仅当上游 bug。
+            # 不发 fail-fast（会误伤单测中对 manager 的 symbol-less 隔离测试），改为可观测告警，
+            # 使潜在跨品种止损串扰（缺陷④同构路径）从静默变为可发现。
+            if not getattr(self, "_warned_default_symbol", False):
+                self._warned_default_symbol = True
+                log.warning(
+                    "RiskManager.evaluate 收到 symbol 缺失的 RiskState，回落 'default' 共享桶；"
+                    "若多品种同时命中将致跨品种止损串扰（稳定性缺陷④同构路径），请排查上游 symbol 注入。"
+                )
         ratchet = self._ratchets.setdefault(sym, ATRRatchet(ATRTier.HIGH))
         prev_stop = self._prev_stops.get(sym)
         ratchet.update(

@@ -34,22 +34,51 @@ def _print_error(msg: str) -> None:
 def _try_acquire_pid_lock(pid_path: Path) -> bool:
     """尝试获取 PID 锁（启动互斥，根除多实例并发导致 trades.log 会话重放 3× 伪增）。
 
-    返回 True：成功取得锁（已写入本进程 PID），或锁文件不可写（降级，不阻塞启动）。
-    返回 False：检测到既有**存活**实例，调用方应拒绝启动（exit 1）。
+    返回 True：成功取得锁（已写入本进程 PID + 创建时间指纹），或锁文件不可写（降级，不阻塞启动）。
+    返回 False：检测到「同一进程」仍存活的实例，调用方应拒绝启动（exit 1）。
+
+    加固（PID 复用防御）：锁文件格式由纯 PID 升级为 ``PID:CREATION_TIME``（创建时间
+    FILETIME，跨平台可比）。读锁时若 PID 存活但创建时间不符 → 判定为僵尸锁（PID 被
+    无关进程复用）→ 覆盖而非拒启，避免误判存活导致模拟盘无法启动。旧格式（纯整型）
+    维持原「存活即拒绝」语义，向后兼容。
     """
-    from hexbroker.diagnostics.health_check import _is_pid_alive
+    from hexbroker.diagnostics.health_check import _is_pid_alive, _pid_creation_time
 
     try:
         pid_path.parent.mkdir(parents=True, exist_ok=True)
         if pid_path.exists():
-            try:
-                old_pid = int(pid_path.read_text(encoding="utf-8").strip())
-            except Exception:
-                old_pid = None
+            raw = pid_path.read_text(encoding="utf-8").strip()
+            old_pid: Optional[int] = None
+            old_ct: Optional[int] = None
+            if ":" in raw:
+                try:
+                    _p, _c = raw.split(":", 1)
+                    old_pid = int(_p)
+                    old_ct = int(_c)
+                except Exception:
+                    old_pid, old_ct = None, None
+            else:
+                try:
+                    old_pid = int(raw)
+                except Exception:
+                    old_pid = None
             if old_pid is not None and _is_pid_alive(old_pid):
-                return False
-            # 僵尸 PID 文件（进程已死）：覆盖之
-        pid_path.write_text(str(os.getpid()), encoding="utf-8")
+                if old_ct is None:
+                    # 旧格式（无时间指纹）：维持原始「存活即拒绝」行为，不引入新风险
+                    return False
+                cur_ct = _pid_creation_time(old_pid)
+                if cur_ct is None:
+                    # 无法读取创建时间 → 保守拒绝（与原始「存活即拒绝」一致，防双开）
+                    return False
+                if cur_ct == old_ct:
+                    return False  # 同一进程仍存活 → 拒绝重复启动
+                # 否则：PID 复用（僵尸锁）→ 落入覆盖分支
+            # 僵尸 PID / PID 复用 / 无锁文件 → 覆盖
+        my_ct = _pid_creation_time(os.getpid())
+        pid_path.write_text(
+            f"{os.getpid()}:{my_ct}" if my_ct is not None else str(os.getpid()),
+            encoding="utf-8",
+        )
         return True
     except Exception:
         # 锁文件不可写：降级（仅健康检查「已启动实例」检测缺失），不阻塞启动

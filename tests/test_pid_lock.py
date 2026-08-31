@@ -12,7 +12,7 @@ from scripts.paper_trading_main import _try_acquire_pid_lock
 def test_pid_lock_no_file(tmp_path: Path) -> None:
     p = tmp_path / "paper.pid"
     assert _try_acquire_pid_lock(p) is True
-    assert p.read_text(encoding="utf-8").strip() == str(os.getpid())
+    assert p.read_text(encoding="utf-8").strip().split(":")[0] == str(os.getpid())
 
 
 def test_pid_lock_alive_rejected(tmp_path: Path) -> None:
@@ -20,7 +20,7 @@ def test_pid_lock_alive_rejected(tmp_path: Path) -> None:
     p = tmp_path / "paper.pid"
     p.write_text(str(os.getpid()), encoding="utf-8")
     assert _try_acquire_pid_lock(p) is False
-    assert p.read_text(encoding="utf-8").strip() == str(os.getpid())
+    assert p.read_text(encoding="utf-8").strip().split(":")[0] == str(os.getpid())
 
 
 def test_pid_lock_zombie_overwrite(tmp_path: Path) -> None:
@@ -28,7 +28,7 @@ def test_pid_lock_zombie_overwrite(tmp_path: Path) -> None:
     p = tmp_path / "paper.pid"
     p.write_text("999999999", encoding="utf-8")
     assert _try_acquire_pid_lock(p) is True
-    assert p.read_text(encoding="utf-8").strip() == str(os.getpid())
+    assert p.read_text(encoding="utf-8").strip().split(":")[0] == str(os.getpid())
 
 
 def test_pid_lock_garbage_overwrite(tmp_path: Path) -> None:
@@ -36,4 +36,4 @@ def test_pid_lock_garbage_overwrite(tmp_path: Path) -> None:
     p = tmp_path / "paper.pid"
     p.write_text("not-a-pid", encoding="utf-8")
     assert _try_acquire_pid_lock(p) is True
-    assert p.read_text(encoding="utf-8").strip() == str(os.getpid())
+    assert p.read_text(encoding="utf-8").strip().split(":")[0] == str(os.getpid())
