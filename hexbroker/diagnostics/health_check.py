@@ -148,13 +148,22 @@ def signal_freshness_days(latest_ts: Any, asof: Any = None) -> Optional[int]:
     if latest_ts is None:
         return None
     try:
-        from ..paper.signals import _to_date, _trading_lag, load_trading_calendar
+        from ..paper.signals import (
+            _to_date,
+            _trading_lag,
+            augment_calendar,
+            load_trading_calendar,
+        )
 
         sig_day = _to_date(latest_ts)
         if sig_day is None:
             return None
         ref = asof if asof is not None else datetime.now()
-        lag = _trading_lag(sig_day, ref, load_trading_calendar())
+        # ⛔ 必须增补日历：主湖日线次日才补数，夜盘时刻主湖恒无当日 → R 无法命中
+        #    当日 → lag=None（无法判定）。「今天是不是交易日」是独立知识，
+        #    不该由「数据有没有补进来」回答。增补后给出可执行的确定值（落后 N 日）。
+        cal = augment_calendar(load_trading_calendar(), _to_date(ref))
+        lag = _trading_lag(sig_day, ref, cal)
         return None if lag is None else int(lag)
     except Exception:
         return None

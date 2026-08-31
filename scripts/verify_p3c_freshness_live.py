@@ -19,6 +19,21 @@
     V7 日历不可用         → 保守拦截 + 显式告警（门禁绝不放无法判定的信号）
     V8 前视泄露检验       p_up[T] 与 T+5 收益相关性 > T 当日收益
 
+⚠️⛔ V4 的历史教训：**不要用事后完整日历验证历史事故**（2026-08-31 QA 揪出）
+    事故当时主湖只到 08-21，日历里**没有** 08-24。V4 用今天的完整日历跑出
+    lag=1 拦截 —— 结论对，但**证据是事后补数造出来的假象**，无法证明事故发生时
+    门禁拦得住。故新增 V9/V10/V11，全部用**事故当时的日历**验证：
+
+    V9  夜盘缓存停更 1 交易日（主湖无当日）    → lag=1    → ⛔ 拦截（旧版 lag=0 放行 = 失明）
+    V10 夜盘行为反转修复（缓存有当日信号但主湖无当日 bar）
+                                              → lag=0    → ✅ 放行（未增补则 None 拦截 = 反转）
+    V11 P0-3 **事故当时日历**（截断至 08-21）  → lag=1    → ⛔ 拦截（V4 的诚实版）
+
+    ⛔ V9/V11 现在给出**确定值**而非 None，靠的是日历与「数据是否已补」解耦：
+    「今天是不是交易日」是独立知识（周一至周五 + 节假日表），不该由「主湖有没有
+    那天的 bar」回答。解耦后守卫才能报「落后 1 个交易日」这种**可执行**的结论，
+    而不是「无法判定」。
+
 只读，不写任何生产文件。
 """
 
@@ -130,6 +145,55 @@ def main() -> int:
     print(f"  V7 {'✅ PASS' if ok_v7 else '❌ FAIL'}：无法判定 → 保守拦截并告警，不静默放行\n")
     results["V7"] = ok_v7
 
+    # ---------------- V9/V10/V11：夜盘门禁（用**事故当时**的日历，不用事后完整日历）----
+    # QA 揪出的 P0 缺陷：旧版 `bisect_right(cal, ref_day) - 1` 在 ref_day 不在日历时
+    # 静默回退到上一交易日 → 夜盘缓存停更整一个交易日却算出 lag=0 放行（门禁失明）；
+    # 且 20:30 刷出当日信号的反因当日不在日历而被拦（行为反转）。
+    print("=== V9~V11  夜盘门禁（事故当时日历，非事后完整日历）===")
+    lake_last = cal[-1]                      # 主湖并集末位（当前 2026-08-28）
+    cal_no_today = [d for d in cal if d <= lake_last]   # 主湖无当日 —— 夜盘补数前的真实状态
+
+    # V9：夜盘缓存停更 1 个交易日。asof 用主湖末位**之后**的第一个自然日（周一），
+    #     当日已收盘但主湖没有 → R 必须严格命中当日 → 不在日历 → None → 拦截
+    v9_asof_day = lake_last.fromordinal(lake_last.toordinal() + 3)   # 08-28(五) → 08-31(一)
+    v9 = make_engine(_mini_cache(SYMBOLS, lake_last.isoformat()), tmpdir,
+                     freshness_threshold_trading_days=thr, trading_calendar=cal_no_today)
+    sig9 = v9.latest_signal("rb0", f"{v9_asof_day.isoformat()} 21:30")
+    lag9 = sig9.freshness_days if sig9 else None
+    ok_v9 = lag9 == 1 and sig9.is_effective is False    # 确定值 1（旧版为 0 → 漏放）
+    print(f"  V9  夜盘缓存停更1交易日  信号={lake_last} asof={v9_asof_day} 21:30")
+    print(f"      → lag={lag9}（期望 1=落后一个交易日）ef={sig9.is_effective}（期望 False）  "
+          f"{'✅ PASS' if ok_v9 else '❌ FAIL'}")
+    print("      （旧版在此算 lag=0 放行 —— 门禁失明，P0-3 事故原样复现）")
+    results["V9"] = ok_v9
+
+    # V10：行为反转修复。同样主湖无当日，但缓存**当天已刷出当日信号** →
+    #      `_calendar_for` 把「缓存中 ≤ ref_day 的信号日」并入日历 → R 命中当日 → lag=0 放行
+    v10 = make_engine(_mini_cache(SYMBOLS, v9_asof_day.isoformat()), tmpdir,
+                      freshness_threshold_trading_days=thr, trading_calendar=cal_no_today)
+    sig10 = v10.latest_signal("rb0", f"{v9_asof_day.isoformat()} 21:30")
+    lag10 = sig10.freshness_days if sig10 else None
+    ok_v10 = lag10 == 0 and sig10.is_effective is True
+    print(f"  V10 夜盘当日已刷新（主湖仍无当日）信号={v9_asof_day} asof={v9_asof_day} 21:30")
+    print(f"      → lag={lag10}（期望 0）ef={sig10.is_effective}（期望 True）  "
+          f"{'✅ PASS' if ok_v10 else '❌ FAIL'}")
+    print("      （旧版在此返回 None 拦截 —— 越新的信号越被拦 = 行为反转）")
+    results["V10"] = ok_v10
+
+    # V11：P0-3 事故的**当时**日历（主湖截断至 08-21），夜盘 08-24 用 08-21 信号
+    cal_0821 = [d for d in cal if d <= date(2026, 8, 21)]
+    v11 = make_engine(_mini_cache(SYMBOLS, "2026-08-21"), tmpdir,
+                      freshness_threshold_trading_days=thr, trading_calendar=cal_0821)
+    sig11 = v11.latest_signal("rb0", "2026-08-24 21:30")
+    lag11 = sig11.freshness_days if sig11 else None
+    ok_v11 = lag11 == 1 and sig11.is_effective is False   # 确定值 1（不依赖事后补数）
+    print("  V11 P0-3 事故当时日历（止 08-21） 信号=2026-08-21 asof=2026-08-24 21:30")
+    print(f"      → lag={lag11}（期望 1=落后一个交易日）ef={sig11.is_effective}（期望 False）  "
+          f"{'✅ PASS' if ok_v11 else '❌ FAIL'}")
+    print("      判定得出同样的 1，事故发生时即成立 —— 这才是 V4 应有的诚实证据）")
+    results["V11"] = ok_v11
+    print()
+
     # ---------------- V8：前视泄露检验（horizon=5）----------------
     print("=== V8  前视泄露检验（horizon=5）===")
     HORIZON = 5
@@ -175,7 +239,8 @@ def main() -> int:
         print(f"  {k}: {'✅ PASS' if v else '❌ FAIL'}")
     print("=" * 74)
     all_ok = all(results.values())
-    print(f"总判定（口径 V1~V7）：{'✅ 全部 PASS' if all_ok else '⛔ 存在未通过项'}")
+    print(f"总判定（口径 V1~V7 + 夜盘门禁 V9~V11）："
+          f"{'✅ 全部 PASS' if all_ok else '⛔ 存在未通过项'}")
     return 0 if all_ok else 1
 
 

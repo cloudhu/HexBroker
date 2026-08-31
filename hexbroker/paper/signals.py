@@ -43,8 +43,11 @@ from .types import SignalFrame
 
 log = get_logger("PAPER")
 
-# 主湖日线目录（交易日历的唯一数据源：天然含法定休市，不依赖外部 MCP/节假日表）
+# 主湖日线目录（交易日历**经验**数据源：天然含法定休市，不依赖外部 MCP）
 DEFAULT_LAKE_DIR = Path(__file__).resolve().parents[2] / "data" / "raw" / "processed"
+
+# 节假日表（交易日**判定**数据源）。⛔ 与主湖并集是两回事，见 augment_calendar。
+DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "configs" / "paper.yaml"
 
 # 日盘收盘时刻（中国商品期货日盘统一 15:00 收盘，本项目 18 个品种一致）。
 # 用于判定「截至某时刻，最新已收盘交易日是当日还是前一交易日」，见 _trading_lag。
@@ -101,24 +104,28 @@ def load_trading_calendar(lake_dir: str | None = None) -> tuple[date, ...]:
 
     取自主湖实际存在的日期 → 天然含法定休市，无需维护节假日表，不依赖外部 MCP。
 
-    ⚠️ **已知边界：日历新鲜度依赖主湖**（2026-08-31 实测）。
+    ⛔⛔ **已知边界已升级为设计约束：日期历必须与「数据是否已补」解耦**（2026-08-31）
 
-    日盘收盘后、次日 08:00 补数之前，主湖还没有当日 bar → 当日不在日历里。
-    此时 :func:`_trading_lag` 的 R 会被钉在「主湖最后一天」。
+    主湖并集只回答「**哪天有 bar**」，回答不了「**哪天是交易日**」。
+    日盘收盘后、次日 08:00 补数之前，主湖没有当日 bar → 当日不在并集里，
+    于是夜盘的 R 无法命中当日 → ``lag=None``（无法判定 → 保守拦截）。
 
-    - **日盘**（asof 时刻 < 15:00）：R 本就取上一交易日，**不受影响**，
-      行为与日历已更新时完全一致。
-    - **夜盘**（asof 时刻 ≥ 15:00）：R 回落到上一交易日 → 门禁**偏松**。
-      若 20:30 的补数也失败了，缓存停在上一交易日会被判 lag=0 而放行。
+    ⛔ 这里有一段**已被证伪的论证，勿回退**（我此前的错误判断）：
 
-    为什么可接受：20:30 的信号刷新本身依赖当日 bar（特征取自主湖），
-    补数失败时信号也**不可能**更 fresher；且启动期守卫
-    （``scripts/p6_4_backfill_guard.py``，传**纯 date** → R 恒取上一交易日）
-    不依赖当日是否在日历里，仍会正确报 NEED_BACKFILL。
-    即：**守卫拦得住，引擎偏松**，分层仍然闭合。
+        「夜盘偏松可接受：20:30 刷新本身依赖当日 bar，补数失败时信号也不可能更
+        fresher；且守卫传纯 date → R 恒取上一交易日，仍会报 NEED_BACKFILL。
+        即守卫拦得住、引擎偏松，分层仍然闭合。」
 
-    运维提示：观察 ``judge()`` JSON 输出时若发现当日不在日历，属正常（补数未跑），
-    不是日历缺陷。
+    错在两点：
+    1. **夜盘正是 P0-3 事故发生的场景**，引擎在这一层失明，守卫只在启动期跑一次，
+       长驻进程 21:00 不会重跑 —— 夜里没有任何一层在管；
+    2. 把「有没有更 fresher 的信号」和「门禁该不该放」混为一谈。门禁的意义是
+       **没有足够新的信息就不要开仓**，不是「反正没有更好的」。
+
+    正解是把两件事分开（见 :func:`augment_calendar`）：
+    - 「今天是不是交易日」→ **独立知识**（周一至周五 + 节假日表），与补数无关；
+    - 「今天的 bar 有没有进来」→ **数据问题**，由 ``lag`` 回答。
+    增补后夜盘不再返回 ``None``，而是给出**可执行的确定值**（落后 1 个交易日）。
 
     Args:
         lake_dir: 主湖根目录；``None`` 用 :data:`DEFAULT_LAKE_DIR`。
@@ -152,6 +159,119 @@ def load_trading_calendar(lake_dir: str | None = None) -> tuple[date, ...]:
     elif n_bad:
         log.warning("交易日历载 {} 天，跳过 {} 个损坏文件（日历仍可用）", len(days), n_bad)
     return tuple(sorted(days))
+
+
+@lru_cache(maxsize=1)
+def load_market_holidays() -> frozenset[date]:
+    """独立交易日判定所需的节假日表（``configs/paper.yaml`` → ``paper.holidays_2026``）。
+
+    与 :func:`load_trading_calendar` 是**两个不同的数据源**，分工不可混淆：
+
+    ==========================  =====================  ================================
+    数据源                      回答的问题              缺了会怎样
+    ==========================  =====================  ================================
+    主湖并集（经验）            哪天**有 bar**         夜盘 R 无当日可命中 → None
+    节假日表（判定）            哪天**是交易日**        —— 不依赖补数，恒可回答
+    ==========================  =====================  ================================
+
+    ⛔ 读取失败的退化方向必须是**保守**的：退化为「仅按周一至周五判定」时，
+    法定节假日会被误判成交易日 → 夜盘 R 取到休市日 → ``lag`` 被高估 → 拦截。
+    门禁只会更紧，**不会漏放**。
+    """
+    try:
+        import yaml  # 局部导入：signals 是热路径，yaml 只在首次调用时需要
+    except Exception:  # noqa: BLE001
+        log.warning("PyYAML 不可用 → 退化为「仅按周一至周五」判定交易日")
+        return frozenset()
+    try:
+        raw = yaml.safe_load(DEFAULT_CONFIG_PATH.read_text(encoding="utf-8")) or {}
+    except Exception as exc:  # noqa: BLE001
+        log.warning("节假日表读取失败 → 退化为「仅按周一至周五」判定交易日：{}", exc)
+        return frozenset()
+    items = (raw.get("paper") or {}).get("holidays_2026") or []
+    out: set[date] = set()
+    for s in items:
+        try:
+            out.add(datetime.strptime(str(s), "%Y-%m-%d").date())
+        except ValueError:
+            log.warning("节假日表条目无法解析，已跳过：{}", s)
+    return frozenset(out)
+
+
+@lru_cache(maxsize=8)
+def _trading_day_session(holidays: frozenset[date]) -> Any:
+    """按节假日表构造**仅用于交易日判定**的会话对象（frozenset 可哈希 → 可缓存）。"""
+    from .sessions import TradingSession  # 局部导入：避免与 sessions 形成导入环
+
+    return TradingSession(symbol_sessions={}, holidays=set(holidays))
+
+
+def is_market_trading_day(
+    d: Optional[date], holidays: Optional[frozenset[date]] = None
+) -> bool:
+    """独立交易日判定 —— 复用 ``TradingSession`` 的实现，**不复制其逻辑**。
+
+    ⛔ 不要在这里重写 ``weekday() < 5 and d not in holidays``：
+    那份逻辑属于 ``sessions.py``，复制一份就是口径漂移的起点。
+    """
+    if d is None:
+        return False
+    hol = load_market_holidays() if holidays is None else holidays
+    return bool(_trading_day_session(hol).is_trading_day(d))
+
+
+def augment_calendar(
+    calendar: Sequence[date],
+    ref_day: Optional[date],
+    signal_days: Optional[Any] = None,
+    holidays: Optional[frozenset[date]] = None,
+) -> tuple[date, ...]:
+    """生效日历 = 主湖并集 ∪ 独立交易日判定 ∪ 缓存信号日（均截断到 ``ref_day``）。
+
+    三层增补，各自堵一个洞：
+
+    1. **独立交易日判定**（主要手段）：``ref_day`` 若按节假日表是交易日，
+       就纳入日历。主湖日线次日才补数，夜盘时刻主湖恒无当日；但「今天是不是
+       交易日」是**独立知识**，不该由「数据有没有补进来」回答。增补后夜盘不再
+       返回 ``None``（无法判定），而是给出**可执行的确定值**（落后 N 个交易日）。
+    2. **缓存信号日**（兜底）：信号是对已有 bar 打分的，所以「缓存里存在某日
+       信号」本身就是「该日是交易日」的证据，可防节假日表不全（如只到 2026 年）。
+    3. **截断到 ``ref_day``**：缓存里混入的未来日期（数据污染）不得改变 R 的判定。
+
+    ⛔ 第 3 条不可省：否则未来日期会把 R 推到未来，门禁失真。
+
+    ⛔⛔ **覆盖规则（最重要）**：以上三层只会**填补主湖覆盖之外（``> cal_max``）**
+    的日期，**绝不改写主湖已知的历史区间**。原因见函数体注释 —— 主湖并集对
+    它覆盖到的区间是权威记录，该区间内「不在主湖里」就等于「不是交易日」，
+    不需要、也不允许用任何启发式（含第 2 层）去推断。
+    """
+    cal = tuple(calendar)
+    if not cal or ref_day is None:
+        return cal
+
+    # ⛔⛔ 主铁律：**只补主湖覆盖范围之外（> cal_max）的日期，绝不改写主湖已知的历史**
+    # （2026-08-31 QA 独立复核揪出；脏信号日污染的修复关键）
+    #
+    # 生产缓存实测含 4 个**非交易日**信号日：2020-10-02 / 2021-10-01（国庆）、
+    # 2022-04-04（清明）、2024-06-10（端午）。若允许它们进入日历，日盘的
+    # R = bisect_left(cal, T) - 1 会被推到这个脏日期上，把健康信号误判为 lag=1（误拦）。
+    #
+    # ⛔ 光靠 is_market_trading_day 过滤**修不掉**：holidays_2026 只覆盖 2026 年，
+    # 对 2020-10-02（周五）会返回 True。真正可靠的分界是 cal_max ——
+    # 主湖并集对它覆盖到的区间是**权威记录**（天然含法定休市），
+    # 该区间内「不在主湖里」就等于「不是交易日」，不需要、也不允许推断。
+    cal_max = cal[-1]
+    extra: set[date] = set()
+    # 层 1：独立交易日判定（当日超出主湖覆盖 → 用节假日表补）
+    if ref_day > cal_max and is_market_trading_day(ref_day, holidays):
+        extra.add(ref_day)
+    # 层 2：缓存信号日（同样只补超出主湖覆盖的部分，且须通过独立交易日判定）
+    for d in (signal_days or ()):
+        if cal_max < d <= ref_day and is_market_trading_day(d, holidays):
+            extra.add(d)
+    if not extra or extra <= set(cal):
+        return cal
+    return tuple(sorted(set(cal) | extra))
 
 
 def _closed_by(ref: Any, day_close: time) -> bool:
@@ -192,14 +312,34 @@ def _trading_lag(
     长假后首日 10:30（信号=节前）     节前           节前                 0 ✅
     ==============================  ============  ==================  ======
 
-    ⛔ 第三行即 **P0-3 事故场景**（2026-08-24 夜盘误用 08-21 信号）：
-    若按「ref 之前的最后一个交易日」取 R（= 08-21），会算出 lag=0 而**放行**，
-    等于漏掉整整一个已收盘交易日的信息。必须按「当日日盘是否已收盘」决定是否纳入当日。
+    ⛔ 第三行即 **P0-3 事故场景**（2026-08-24 夜盘误用 08-21 信号）。
 
-    - ``None`` → 无法判定（日历缺失 / 信号日不在日历 / ref 早于日历起点）
-      → 调用方按**保守拦截**处理。
-    - ``lag`` 可为**负数**：信号来自 R 之后（如夜盘用当日信号后，次日日盘 R 回退到 T-1）。
-      负值表示比「标准 T+1」更新，放行。
+    ⛔⛔ **夜盘必须严格命中当日，不得回退**（P3-C 补丁，2026-08-31；QA 独立复核揪出）：
+
+    初版写法是 ``bisect_right(cal, ref_day) - 1``。**当 ref_day 不在日历里时
+    （主湖尚未补数，夜盘时刻的常态），它不会报错，而是静默退到上一交易日**
+    → 缓存停更整整一个交易日却算出 ``lag=0`` → **放行**。
+    这等于 P0-3 事故原样复现，而夜盘**正是事故发生的场景**。
+
+    取证（2026-08-31，主湖末位 08-28，今日 08-31 周一已收盘）：
+
+    ==========================================  ========  ==========
+    场景                                         初版     应有
+    ==========================================  ========  ==========
+    夜盘，缓存停更在 08-28（落后 1 个交易日）      lag=0    ⛔ 拦截
+    P0-3 还原（日历 max=08-21，夜盘用 08-21）      lag=0    ⛔ 拦截
+    夜盘，20:30 已刷出当日信号                     None     ✅ 放行
+    ==========================================  ========  ==========
+
+    前两行是**门禁失明**，第三行是**行为反转**（越新的信号越被拦）。
+    根因同一个：把「日历里没有」当成「往前找一个」，而不是「无法判定」。
+    **无法判定必须保守拦截**，绝不能退而求其次。
+
+    - ``None`` → 无法判定（日历缺失 / 夜盘当日不在日历 / 信号日不在日历 /
+      ref 早于日历起点）→ 调用方按**保守拦截**处理。
+    - ``lag`` 可为**负数**：信号来自 R 之后（如守卫传纯 date → R 回退到 T-1，
+      而缓存已是当日信号 → -1）。负值表示比「标准 T+1」更新，放行。
+      ⛔ 保留符号，勿取绝对值 —— 否则守卫分不清「夜盘已刷新」与「刷新漏跑」。
     """
     if sig_day is None or ref is None or not calendar:
         return None
@@ -209,11 +349,17 @@ def _trading_lag(
     ref_day = _to_date(ref)
     if ref_day is None:
         return None
-    # 已收盘 → 允许 R 取 ref 当日（bisect_right 含自身）；未收盘 → 严格取之前的交易日
-    i_ref = (bisect.bisect_right(cal, ref_day) if _closed_by(ref, day_close)
-             else bisect.bisect_left(cal, ref_day)) - 1
-    if i_ref < 0:
-        return None
+    if _closed_by(ref, day_close):
+        # 夜盘：当日日盘已收盘 → R **必须**是当日。日历里没有 = 无法判定。
+        # ⛔ 绝不用 bisect_right 回退到上一交易日（见 docstring 的失明取证）。
+        i_ref = bisect.bisect_left(cal, ref_day)
+        if i_ref >= len(cal) or cal[i_ref] != ref_day:
+            return None
+    else:
+        # 日盘：当日未收盘 → R = 严格早于当日的最后一个交易日
+        i_ref = bisect.bisect_left(cal, ref_day) - 1
+        if i_ref < 0:
+            return None
     i_sig = bisect.bisect_left(cal, sig_day)
     if i_sig >= len(cal) or cal[i_sig] != sig_day:
         # 信号日不是交易日（异常）→ 无法判定，交调用方保守处理
@@ -257,6 +403,7 @@ class SignalEngine:
         cache_paths: list[str | Path] | None = None,
         freshness_threshold_trading_days: int = 0,
         trading_calendar: Sequence[date] | None = None,
+        holidays: Any = None,
         fast_ma: int = 5,
         slow_ma: int = 20,
         atr_window: int = 14,
@@ -276,6 +423,11 @@ class SignalEngine:
             tuple(sorted(trading_calendar)) if trading_calendar is not None else None
         )
         self._day_close = DAY_SESSION_CLOSE
+        # 独立交易日判定的节假日表；None = 用 load_market_holidays()（懒加载，可注入覆盖）
+        self._holidays: Optional[frozenset[date]] = (
+            frozenset(holidays) if holidays is not None else None
+        )
+        self._signal_days_cache: Optional[frozenset[date]] = None
         self._fast_ma = int(fast_ma)
         self._slow_ma = int(slow_ma)
         self._atr_window = int(atr_window)
@@ -379,18 +531,46 @@ class SignalEngine:
             sig_ts = sig.ts
         # ⛔ 必须传**完整 asof**（含时刻）而非仅日期：夜盘时当日日盘已收盘，
         #    ref 应取当日；只传日期会被判为未收盘，漏掉一个已收盘交易日（P0-3 事故口径）。
-        lag = _trading_lag(
-            _to_date(sig_ts), asof, self.trading_calendar, self._day_close
-        )
+        cal = self._calendar_for(_to_date(asof))
+        lag = _trading_lag(_to_date(sig_ts), asof, cal, self._day_close)
         if lag is None:
             # ⛔ 静默放行是门禁最危险的行为：无法判定时必须显式告警 + 保守拦截
+            # ⛔ 占位符必须是 loguru 的 {} 风格：get_logger 走 str.format，写 %s 会原样输出
             log.warning(
-                "新鲜度无法判定 → 保守拦截（symbol=%s, sig_ts=%s, asof=%s, 日历天数=%d）；"
+                "新鲜度无法判定 → 保守拦截（symbol={}, sig_ts={}, asof={}, 日历天数={}）；"
                 "检查主湖日线是否缺失或信号日是否为非交易日",
-                symbol, sig_ts, asof, len(self.trading_calendar),
+                symbol, sig_ts, asof, len(cal),
             )
             return 10 ** 9
         return int(lag)
+
+    # ------------------------------------------------------------------
+    # 日历增补（P3-C 补丁：消除「刷新成功反被拦」的行为反转）
+    # ------------------------------------------------------------------
+    def _signal_days(self) -> frozenset[date]:
+        """缓存中出现过的全部信号日（跨所有源，进程内缓存）。"""
+        if self._signal_days_cache is None:
+            days: set[date] = set()
+            for df in self._caches:
+                if df.empty or "ts" not in df.columns:
+                    continue
+                days |= set(pd.to_datetime(df["ts"]).dt.date)
+            self._signal_days_cache = frozenset(days)
+        return self._signal_days_cache
+
+    def _calendar_for(self, ref_day: Optional[date]) -> tuple[date, ...]:
+        """生效日历（委托 :func:`augment_calendar`，勿在此另写一套增补逻辑）。
+
+        ⛔ 为什么必须增补（P3-C 补丁，2026-08-31；QA 独立复核揪出）：
+
+        主湖日线要等次日 08:00 补数才入库，于是**夜盘时刻主湖永远没有当日**。
+        打上「夜盘 R 必须严格命中当日」的补丁后，若日历仍只有主湖数据，就会出现
+        **行为反转** —— 20:30 老老实实刷新出当日信号的，因为当日不在日历而
+        ``lag=None`` 被拦；刷新漏跑、缓存停在昨天的，反而被放行。
+        """
+        return augment_calendar(
+            self.trading_calendar, ref_day, self._signal_days(), self._holidays
+        )
 
     def has_symbol(self, symbol: str) -> bool:
         return any(symbol in set(df["symbol"].unique()) for df in self._caches)
