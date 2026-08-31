@@ -69,8 +69,14 @@ EXIT_CONFIG_ERROR = 3
 EXIT_NEED_BACKFILL = 10
 EXIT_UNKNOWN = 11
 
-# --session → 期望 fd：夜盘当日已收盘（fd=0）；日盘用隔夜信号（fd=1）
-SESSION_EXPECT_FD: Dict[str, int] = {"night": 0, "day": 1}
+# --session → 期望 fd（**交易日 lag**，P3-C 口径，可为负）：
+#   night = -1：夜盘 20:30 刷新后缓存应覆盖**当日**（signal 日就是 asof 日 → lag=-1）。
+#               若刷新漏跑，缓存停在上一交易日 → lag=0 > -1 → NEED_BACKFILL。
+#   day   =  0：日盘用**上一交易日**收盘信号（标准 T+1 → lag=0）。
+#               周一用周五信号、假期后首日用节前信号同样 lag=0 → 放行（P3-B 正是误拦此处）。
+# ⛔ 负值不是异常：lag<0 表示信号比「标准 T+1」更新（来自当日或之后）。
+#    必须保留符号，否则夜盘守卫无法区分「已刷新」与「刷新漏跑」（两者都会被截断成 0）。
+SESSION_EXPECT_FD: Dict[str, int] = {"night": -1, "day": 0}
 
 
 class _AttrView:
@@ -235,7 +241,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--session",
         choices=sorted(SESSION_EXPECT_FD),
         default="night",
-        help="会话窗口：night=夜盘（期望 fd=0，当日已收盘）；day=日盘前（期望 fd=1，隔夜信号）",
+        help="会话窗口：night=夜盘（期望 lag=-1，缓存已覆盖当日）；day=日盘前（期望 lag=0，隔夜信号）",
     )
     ap.add_argument(
         "--expect-fd",

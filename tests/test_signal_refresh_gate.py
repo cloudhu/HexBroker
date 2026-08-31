@@ -1,8 +1,29 @@
-"""B+C 防再发批次测试：信号新鲜度探测 / 醒目横幅 / 可选自动刷新 / 0 开仓显性汇总。"""
+"""B+C 防再发批次测试：信号新鲜度探测 / 醒目横幅 / 可选自动刷新 / 0 开仓显性汇总。
+
+P3-C（2026-08-31）口径同步说明
+------------------------------
+新鲜度由「自然日差」改为**交易日历 lag** 后，凡用 ``datetime.now()`` ± N 天
+构造缓存时间戳的用例都失去了确定性：
+
+- 判定依赖**当日是否交易日**、**当前时刻是否过了日盘收盘**，两者都随运行时刻变化；
+- CI 主湖缺失 → 日历为空 → 全部判「无法判定」。
+
+故本文件的探测类用例统一改为：**注入迷你日历 + 显式 ``asof``**。
+``asof`` 一律取 ``2026-08-28 21:30``（周五夜盘，当日日盘已收盘 → R = 08-28），
+于是 lag 对信号日的映射是确定的：
+
+=================  ==========  ==========================
+信号日             lag         含义
+=================  ==========  ==========================
+2026-08-28         **0**       当日已刷新（标准 T+1 之上）
+2026-08-27         1           落后 1 个交易日
+2026-08-25         3           落后 3 个交易日
+=================  ==========  ==========================
+"""
 from __future__ import annotations
 
 import subprocess
-from datetime import datetime, timedelta
+from datetime import date, datetime
 from pathlib import Path
 
 import pandas as pd
@@ -21,32 +42,76 @@ from hexbroker.diagnostics.signal_refresh import (
 )
 from hexbroker.paper.scheduler import TradingScheduler
 
+# 迷你日历区间 / 固定基准时刻（见模块 docstring）
+CAL_START = date(2026, 8, 1)
+CAL_END = date(2026, 9, 30)
+ASOF_NIGHT = datetime(2026, 8, 28, 21, 30)  # 周五夜盘，当日日盘已收盘 → R = 08-28
+ASOF_DAY = datetime(2026, 8, 28, 10, 30)  # 周五日盘，未收盘 → R = 08-27
 
-def _mk_cache(tmp_path: Path, name: str, ts: datetime) -> Path:
+
+def _cache_dir(tmp_path: Path) -> Path:
+    """缓存目录（不存在则创建）。"""
     d = tmp_path / "caches"
     d.mkdir(exist_ok=True)
-    pd.DataFrame({"symbol": ["rb0"], "ts": [ts], "p_up": [0.6]}).to_parquet(d / name)
+    return d
+
+
+def _mk_cache(d: Path, name: str, ts) -> Path:
+    """在**已存在的**缓存目录 ``d`` 下写入一个缓存文件，返回目录本身。
+
+    ⛔ 不要在这里再拼 ``caches`` 子目录：原实现 ``d = tmp_path / "caches"`` 会把
+    第二次调用落到 ``caches/caches/``，文件落在被探测目录之外而被静默跳过
+    （2026-08-31 修复：原用例未断言探测条数，缺陷一直潜伏）。
+    """
+    pd.DataFrame({"symbol": ["rb0"], "ts": [pd.Timestamp(ts)], "p_up": [0.6]}).to_parquet(d / name)
     return d
 
 
 # ---- probe ----
-def test_probe_detects_stale_and_fresh(tmp_path: Path):
-    d = _mk_cache(tmp_path, "old.parquet", datetime.now() - timedelta(days=3))
-    _mk_cache(d, "new.parquet", datetime.now())  # 同一目录再放一个新鲜缓存
-    probes = probe(d, threshold=0)
+def test_probe_detects_stale_and_fresh(use_calendar, tmp_path: Path):
+    """落后 3 个交易日 → stale；当日已刷新 → fresh（同一目录内对照）。"""
+    use_calendar(CAL_START, CAL_END)
+    d = _cache_dir(tmp_path)
+    _mk_cache(d, "old.parquet", "2026-08-25 15:00")  # lag=3
+    _mk_cache(d, "new.parquet", "2026-08-28 15:00")  # lag=0
+    probes = probe(d, threshold=0, asof=ASOF_NIGHT)
+    assert len(probes) == 2
     stale = stale_of(probes)
-    assert any(p.name == "old.parquet" and p.stale for p in stale)
-    assert all(not p.stale for p in probes if p.name == "new.parquet")
+    assert any(p.name == "old.parquet" and p.stale and p.fd == 3 for p in stale)
+    assert all(not p.stale and p.fd == 0 for p in probes if p.name == "new.parquet")
 
 
 def test_probe_missing_dir_returns_empty(tmp_path: Path):
     assert probe(tmp_path / "nope", threshold=0) == []
 
 
-def test_probe_threshold_one_tolerates_overnight(tmp_path: Path):
-    d = _mk_cache(tmp_path, "y.parquet", datetime.now() - timedelta(days=1))
-    assert stale_of(probe(d, threshold=0)) != []      # 阈值0：隔夜即过期
-    assert stale_of(probe(d, threshold=1)) == []      # 阈值1：容忍隔夜
+def test_probe_threshold_tolerance(use_calendar, tmp_path: Path):
+    """落后 1 个交易日：阈值 0 → stale；阈值 1 → 容忍放行。
+
+    ⛔ 与 P3-B 之前的语义**相反**：旧口径「隔夜（相邻交易日）= 陈旧」，
+    新口径下「相邻交易日」正是标准 T+1（lag=0），**不是**陈旧。
+    故判据必须用 lag=1 的样本，隔夜样本已不再具备鉴别力。
+    """
+    use_calendar(CAL_START, CAL_END)
+    d = _cache_dir(tmp_path)
+    _mk_cache(d, "y.parquet", "2026-08-27 15:00")  # lag=1
+    assert stale_of(probe(d, threshold=0, asof=ASOF_NIGHT)) != []
+    assert stale_of(probe(d, threshold=1, asof=ASOF_NIGHT)) == []
+
+
+def test_probe_overnight_is_fresh_not_stale(use_calendar, tmp_path: Path):
+    """⛔ 回归护栏：隔夜信号（上一交易日收盘 → 当日执行）必须判**新鲜**。
+
+    P3-B 自然日差口径下跨周末 fd=3 > 阈值 1 → 误判陈旧，是周一/假期后首日
+    主源被静默禁用的直接原因（全历史实测误拦 21.36%）。
+    """
+    use_calendar(CAL_START, CAL_END)
+    d = _cache_dir(tmp_path)
+    _mk_cache(d, "overnight.parquet", "2026-08-27 15:00")  # 上一交易日
+    probes = probe(d, threshold=0, asof=ASOF_DAY)  # 日盘 10:30 → R = 08-27 → lag=0
+    assert [p.fd for p in probes] == [0]
+    assert stale_of(probes) == []
+    assert unknown_of(probes) == []
 
 
 # ---- banner ----
@@ -121,13 +186,19 @@ def test_signal_refresh_lives_under_paper_section():
     assert "signal_refresh" in cfg["paper"]
 
 
-def test_probe_files_missing_path_is_unknown_not_silent(tmp_path: Path):
+def test_probe_files_missing_path_is_unknown_not_silent(use_calendar, tmp_path: Path):
     """D2：缺失文件必须产出"无法判定"探测项，不得静默丢弃（空列表=假绿）。"""
-    ok = _mk_cache(tmp_path, "ok.parquet", datetime.now())
-    probes = probe_files([str(ok / "ok.parquet"), str(tmp_path / "ghost.parquet")], threshold=0)
+    use_calendar(CAL_START, CAL_END)
+    ok = _mk_cache(_cache_dir(tmp_path), "ok.parquet", "2026-08-28 15:00")
+    probes = probe_files(
+        [str(ok / "ok.parquet"), str(tmp_path / "ghost.parquet")],
+        threshold=0,
+        asof=ASOF_NIGHT,
+    )
     assert len(probes) == 2, "缺失路径被静默丢弃 → 会退化成假绿"
     ghost = [p for p in probes if p.name == "ghost.parquet"][0]
     assert ghost.exists is False and ghost.unknown is True
+    # 存在且可判定的那个不得被算进 unknown
     assert unknown_of(probes) == [ghost]
 
 

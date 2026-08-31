@@ -129,22 +129,33 @@ def _probe_http(url: str, headers: dict[str, str], timeout: float) -> tuple[bool
 
 
 def signal_freshness_days(latest_ts: Any, asof: Any = None) -> Optional[int]:
-    """信号缓存最新时间戳距 ``asof``（默认今日）的**自然日差**（P0-3 新鲜度自检）。
+    """信号缓存最新时间戳距 ``asof``（默认今日）的**交易日历 lag**（P0-3 新鲜度自检）。
 
-    与 ``hexbroker.paper.signals._calendar_days`` 同口径（P3-B，2026-08-31：
-    原 ``np.busday_count`` 工作日差无法区分「正常隔夜」与「跨周末/跨假期」），
-    直接复用该实现以避免两处逻辑漂移；依赖不可用/时间戳无法解析时返回 ``None``（跳过检查）。
+    与 ``hexbroker.paper.signals._trading_lag`` 同口径（P3-C，2026-08-31）：
+    ``lag = idx(上一交易日) - idx(信号日)``，``0`` = 覆盖最近一个已收盘交易日（标准 T+1）。
+    直接复用该实现以避免两处逻辑漂移。
+
+    ⛔ 口径两度变更：P0-3 用工作日差、P3-B 改用自然日差（误伤周一/假期后首日 21.36%），
+    现为交易日历 lag。详情见 ``scripts/verify_freshness_caliber_options.py --full-history``。
+
+    ⚠️ ``asof`` 缺省取 ``datetime.now()``（**含时刻**）而非 ``date.today()``：
+    时刻决定「当日日盘是否已收盘」，进而决定 ref 取当日还是前一交易日。
+    夜盘自检若用纯日期会被判为未收盘，从而漏报「20:30 刷新没跑」这种落后一整个
+    已收盘交易日的情形（P0-3 事故口径）。测试可注入纯 ``date`` 以固定语义。
+
+    无法解析 / 日历不可用 → 返回 ``None``（调用方跳过检查，不阻断启动）。
     """
     if latest_ts is None:
         return None
     try:
-        from ..paper.signals import _calendar_days, _to_date
+        from ..paper.signals import _to_date, _trading_lag, load_trading_calendar
 
         sig_day = _to_date(latest_ts)
-        ref_day = _to_date(asof) if asof is not None else date.today()
-        if sig_day is None or ref_day is None:
+        if sig_day is None:
             return None
-        return int(_calendar_days(sig_day, ref_day))
+        ref = asof if asof is not None else datetime.now()
+        lag = _trading_lag(sig_day, ref, load_trading_calendar())
+        return None if lag is None else int(lag)
     except Exception:
         return None
 
@@ -193,7 +204,8 @@ def check_data_sources(
 
     # 1c. 信号缓存（本地 parquet，多源级联）+ P0-3 新鲜度防护（陈旧 → WARN，不阻断）
     caches = paper_cfg.get("signal_caches") or [paper_cfg.get("signal_cache")]
-    threshold = int(paper_cfg.get("freshness_threshold_days", 0) or 0)
+    # P3-C：口径为「交易日 lag」（非自然日差），与 SignalEngine 同源
+    threshold = int(paper_cfg.get("freshness_threshold_trading_days", 0) or 0)
     if not caches:
         items.append(CheckItem("WARN", "信号缓存", "未配置 signal_caches / signal_cache"))
     for cache in caches:
@@ -216,7 +228,7 @@ def check_data_sources(
             syms = sorted(set(df["symbol"].tolist())) if "symbol" in df.columns else []
             fd = signal_freshness_days(latest_ts, asof)
             if fd is not None and fd > threshold:
-                # 陈旧缓存：阈值 0 时隔夜即过期 → 主源信号不驱动开仓（技术兜底接手）
+                # 陈旧缓存（交易日 lag > 阈值）→ 主源信号不驱动开仓（技术兜底接手）
                 items.append(
                     CheckItem(
                         "WARN",
@@ -302,7 +314,7 @@ def check_lifecycle(paper_cfg: Any) -> list[CheckItem]:
     open_delay = paper_cfg.get("open_delay_min", 5)
     close_buf = paper_cfg.get("close_buffer_min", 10)
     eval_days = paper_cfg.get("evaluation_days", 20)
-    fresh = paper_cfg.get("freshness_threshold_days", 0)
+    fresh = paper_cfg.get("freshness_threshold_trading_days", 0)
     bar_freq = paper_cfg.get("bar_freq", "1d")
     bar_days = paper_cfg.get("bar_days", 120)
 
@@ -312,19 +324,19 @@ def check_lifecycle(paper_cfg: Any) -> list[CheckItem]:
     items.append(CheckItem("INFO", "开盘延迟", f"{open_delay}min（跳过集合竞价，Q6）"))
     items.append(CheckItem("INFO", "收盘复盘缓冲", f"{close_buf}min（日盘收盘 + 缓冲后触发复盘，P1-3）"))
     items.append(CheckItem("INFO", "评估周期", f"满 {eval_days} 个交易日自动输出评估摘要（Q5）"))
-    # P3-B（2026-08-31）：口径由「工作日差」改为「自然日差」，文案同步；
-    # 阈值 0 在新口径下属病态配置（fd=0 盘中不可达 → 永不主源开仓），需显式提示。
-    if int(fresh or 0) == 0:
-        fresh_extra = "，⚠️0=仅当天（信号为回溯性，盘中不可达 → 等效禁用主源，见 P3-B）"
-    elif int(fresh or 0) == 1:
-        fresh_extra = "，1=允许相邻交易日（跨周末/假期过期，P0-3）"
+    # P3-C（2026-08-31）：口径为「交易日 lag」，阈值 0 = 标准 T+1（正常值），≥1 = 放宽。
+    # ⛔ 注意与两代旧口径的语义相反：P0-3 的 0 是病态值（自然日差下盘中不可达 → 永不主源开仓），
+    #    本口径的 0 才是正确生产值。文案须明确区分，避免后人照旧注释误改。
+    fresh_val = int(fresh or 0)
+    if fresh_val <= 0:
+        fresh_extra = "，0=信号须覆盖最近一个已收盘交易日（标准 T+1，周一用周五信号/假期后首日用节前信号均放行）"
     else:
-        fresh_extra = ""
+        fresh_extra = f"，{fresh_val}=放宽至落后 {fresh_val} 个交易日仍放行"
     items.append(
         CheckItem(
             "INFO",
             "信号新鲜度阈值",
-            f"{fresh} 自然日（过期→技术兜底/禁开+告警，§8.2）{fresh_extra}",
+            f"lag<={fresh_val} 交易日（过期→技术兜底/禁开+告警，§8.2）{fresh_extra}",
         )
     )
     items.append(CheckItem("INFO", "技术兜底 K线", f"{bar_freq} / 近 {bar_days} 天（信号缺口时双均线+ATR 通道）"))

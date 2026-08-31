@@ -19,13 +19,20 @@ paper:
   signal_caches:
     - artifacts/signals_cache18_grouped_v8_tail_ext.parquet   # 主源：P22 末折评估窗延长变体，覆盖至 2026-08-24（修复信号过期；隔夜过期阈值0下仅信号当日有效）
     - artifacts/signals_cache18_grouped_v8.parquet            # 兜底：v8 生产基线（止 2026-06-29，fold 边界限制）
-  freshness_threshold_days: 1      # 信号新鲜度阈值（**自然日差**；过期→技术兜底/禁开+告警，§8.2）
-                                   # P0-3 + P3-B 修正（2026-08-31）：1=允许相邻交易日（正常隔夜 fd<=1）；
-                                   # 跨周末（周五→周一=3）/ 跨假期（>=2）即过期。
-                                   # ⛔ 阈值不可取 0：信号为回溯性（盘中最新信号日恒为上一交易日，
-                                   # 湖数据止于 T-1 → 信号止于 T-1），fd=0 盘中结构性不可达，
-                                   # 阈值 0 等价于「日盘永不主源开仓」（见 artifacts/_p3b_freshness_rootcause_20260831.md）。
-                                   # 度量口径见 hexbroker/paper/signals.py::_calendar_days（原 np.busday_count 工作日差）。
+  # 信号新鲜度阈值，单位 = **交易日 lag**（P3-C，2026-08-31；口径见 _trading_lag）
+  #   lag = idx(上一交易日) - idx(信号日)
+  #   0 = 信号须覆盖最近一个已收盘交易日（标准 T+1）→ 放行
+  #   ≥1 = 缓存停更 N 个交易日 → 过期 → 技术兜底/禁开+告警（§8.2）
+  #
+  # ⛔ 口径已两度变更，勿回退（全历史实测健康态误拦率，rb0 2097 天样本）：
+  #   P0-3 工作日差/阈值0 → 盘中 lag 恒≥1，等价于「日盘永不主源开仓」
+  #   P3-B 自然日差/阈值1 → 周一+假期后首日误拦 448 天 = 21.36%（结构性，逐年稳定）
+  #   P3-C 交易日历 lag/阈值0 → 误拦 0 天 = 0.00%，停更 1 日即拦 ✅
+  # 复跑验证：scripts/verify_freshness_caliber_options.py --full-history
+  #
+  # ⚠️ 此处的 0 与 P0-3 的 0 语义不同：本口径下盘中 lag 可达 0（= 标准 T+1）。
+  # ⛔ 已废弃键 freshness_threshold_days（自然日差口径）不得复用。
+  freshness_threshold_trading_days: 0
   technical:                       # 技术指标兜底参数（§8.1 c0 信号缺口）
     fast_ma: 5
     slow_ma: 20
@@ -186,7 +193,7 @@ paper:
   # cache_paths 留空 = 继承 paper.signal_caches（与 SignalEngine 同口径，缺陷 D2 修复）。
   # ===========================================================================
   signal_refresh:
-    threshold: 0                # fd>0 即陈旧（与 P0-3 隔夜过期口径一致）
+    threshold: 0                # 交易日 lag>0 即陈旧（与 P3-C 门禁同口径，见 freshness_threshold_trading_days）
     auto_enabled: false         # 默认关：不自动跑 tail_ext
     timeout_sec: 900            # 自动刷新超时保护
     cache_paths: []             # 留空→继承 paper.signal_caches；显式填则覆盖（调试用）

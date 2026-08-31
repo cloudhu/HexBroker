@@ -2,6 +2,10 @@
 
 全部用例用 ``tmp_path`` 自建配置与缓存——**不依赖本地真实产物**
 （2026-08-28 CI 假失败教训：依赖本地才有的文件 → CI 全新 checkout 必然假失败）。
+
+P3-C（2026-08-31）口径同步：新鲜度由「自然日差」改为**交易日历 lag**，
+故所有用例必须**注入迷你日历**（``use_calendar`` 夹具），否则 CI 主湖缺失时
+日历为空 → 全部判「无法判定」→ 用例结果与真实语义脱节。
 """
 from __future__ import annotations
 
@@ -30,6 +34,10 @@ ASOF = date(2026, 8, 28)
 SATURDAY = date(2026, 8, 29)
 HOLIDAY = date(2026, 9, 25)  # 中秋
 
+# 迷你日历区间：覆盖 ASOF-44（07-15）至 HOLIDAY 之后，全部工作日（无节假日）
+CAL_START = date(2026, 7, 1)
+CAL_END = date(2026, 9, 30)
+
 
 def _write_cfg(tmp_path: Path, cache_names: list[str], holidays: list[str] | None = None) -> Path:
     cfg = {
@@ -38,7 +46,7 @@ def _write_cfg(tmp_path: Path, cache_names: list[str], holidays: list[str] | Non
             # 空串必须原样保留（用于测"解析为空"分支）——
             # Path(tmp) / "" 会退化成目录本身，不是空串。
             "signal_caches": [(str(tmp_path / n) if n else n) for n in cache_names],
-            "freshness_threshold_days": 0,
+            "freshness_threshold_trading_days": 0,
             "holidays_2026": holidays if holidays is not None else ["2026-09-25"],
         }
     }
@@ -53,54 +61,73 @@ def _write_cache(tmp_path: Path, name: str, ts: date) -> None:
     )
 
 
-# ---------------- 期望 fd 口径 ----------------
+# ---------------- 期望 fd 口径（交易日 lag，P3-C） ----------------
 def test_session_expect_fd_contract():
-    """夜盘当日已收盘 → fd=0；日盘前用隔夜信号 → fd=1。"""
-    assert SESSION_EXPECT_FD["night"] == 0
-    assert SESSION_EXPECT_FD["day"] == 1
+    """夜盘当日已收盘 → 期望 lag=-1（缓存应覆盖当日）；日盘前用隔夜信号 → lag=0。
+
+    ⛔ 负值不是异常：lag<0 表示信号比「标准 T+1」更新。守卫传的 ``asof`` 是
+    **纯 date**（无时刻 → 视为盘前 → R 回退到上一交易日），故当日信号 = -1。
+    """
+    assert SESSION_EXPECT_FD["night"] == -1
+    assert SESSION_EXPECT_FD["day"] == 0
 
 
 # ---------------- 核心判定 ----------------
-def test_need_backfill_when_lag(tmp_path: Path):
-    """夜盘口径（期望 fd=0）：缓存停在上一交易日 → 判定落后。"""
-    _write_cache(tmp_path, "main.parquet", ASOF - timedelta(days=1))
+def test_need_backfill_when_lag(use_calendar, tmp_path: Path):
+    """夜盘口径（期望 lag=-1）：缓存停在上一交易日（lag=0）→ 判定落后 1 个交易日。"""
+    use_calendar(CAL_START, CAL_END)
+    _write_cache(tmp_path, "main.parquet", ASOF - timedelta(days=1))  # 08-27 周四
     cfg = _write_cfg(tmp_path, ["main.parquet"])
     paper = load_paper_cfg(cfg)
 
-    res = judge(paper, ASOF, expect_fd=0)
+    res = judge(paper, ASOF, expect_fd=SESSION_EXPECT_FD["night"])
     assert res["verdict"] == "NEED_BACKFILL"
-    assert res["system_fd"] == 1
+    assert res["system_fd"] == 0
     assert res["lag"] == 1
     assert main(["--config", str(cfg), "--asof", ASOF.isoformat(), "--session", "night"]) == (
         EXIT_NEED_BACKFILL
     )
 
 
-def test_ok_when_meets_expectation(tmp_path: Path):
-    """日盘口径（期望 fd=1）：隔夜信号是**正确**状态，不得误报需补刷。"""
+def test_ok_when_meets_expectation(use_calendar, tmp_path: Path):
+    """日盘口径（期望 lag=0）：隔夜信号是**正确**状态，不得误报需补刷。"""
+    use_calendar(CAL_START, CAL_END)
     _write_cache(tmp_path, "main.parquet", ASOF - timedelta(days=1))
     cfg = _write_cfg(tmp_path, ["main.parquet"])
     paper = load_paper_cfg(cfg)
 
-    res = judge(paper, ASOF, expect_fd=1)
+    res = judge(paper, ASOF, expect_fd=SESSION_EXPECT_FD["day"])
     assert res["verdict"] == "OK"
-    assert res["system_fd"] == 1
+    assert res["system_fd"] == 0
     assert main(["--config", str(cfg), "--asof", ASOF.isoformat(), "--session", "day"]) == EXIT_OK
 
 
-def test_stale_fallback_cache_does_not_distort_verdict(tmp_path: Path):
-    """兜底缓存本就陈旧（fd=44），不得把系统级判定拖成 NEED_BACKFILL。
+def test_night_session_fresh_signal_is_ok(use_calendar, tmp_path: Path):
+    """夜盘口径：缓存已覆盖**当日**（lag=-1）→ OK（20:30 刷新成功态）。"""
+    use_calendar(CAL_START, CAL_END)
+    _write_cache(tmp_path, "main.parquet", ASOF)
+    cfg = _write_cfg(tmp_path, ["main.parquet"])
+    paper = load_paper_cfg(cfg)
 
-    系统级 fd 取 **min**（最好的那个），与"只要有一个缓存达标即可交易"一致。
+    res = judge(paper, ASOF, expect_fd=SESSION_EXPECT_FD["night"])
+    assert res["verdict"] == "OK"
+    assert res["system_fd"] == -1
+
+
+def test_stale_fallback_cache_does_not_distort_verdict(use_calendar, tmp_path: Path):
+    """兜底缓存本就陈旧（lag=31），不得把系统级判定拖成 NEED_BACKFILL。
+
+    系统级 lag 取 **min**（最好的那个），与"只要有一个缓存达标即可交易"一致。
     """
-    _write_cache(tmp_path, "main.parquet", ASOF - timedelta(days=1))  # fd=1（隔夜，日盘合规）
+    use_calendar(CAL_START, CAL_END)
+    _write_cache(tmp_path, "main.parquet", ASOF - timedelta(days=1))  # lag=0（日盘合规）
     _write_cache(tmp_path, "fallback.parquet", ASOF - timedelta(days=44))
     cfg = _write_cfg(tmp_path, ["main.parquet", "fallback.parquet"])
     paper = load_paper_cfg(cfg)
 
-    res = judge(paper, ASOF, expect_fd=1)
+    res = judge(paper, ASOF, expect_fd=SESSION_EXPECT_FD["day"])
     assert res["verdict"] == "OK", "最差缓存污染了系统级判定"
-    assert res["system_fd"] == 1
+    assert res["system_fd"] == 0
 
 
 # ---------------- 无法判定：绝不当 OK ----------------
@@ -145,9 +172,10 @@ def test_blank_cache_entry_is_unknown(tmp_path: Path):
     assert "signal_caches" in res["reason"]
 
 
-def test_partially_unknown_still_judges_by_known(tmp_path: Path):
+def test_partially_unknown_still_judges_by_known(use_calendar, tmp_path: Path):
     """部分缓存不可判定时，按可判定的那些下结论，并把 unknown 显性列出。"""
-    _write_cache(tmp_path, "main.parquet", ASOF)  # fd=0，达标
+    use_calendar(CAL_START, CAL_END)
+    _write_cache(tmp_path, "main.parquet", ASOF)  # lag=-1，达标
     cfg = _write_cfg(tmp_path, ["main.parquet", "__missing.parquet"])
     paper = load_paper_cfg(cfg)
 
@@ -172,8 +200,9 @@ def test_missing_config_file_is_config_error(tmp_path: Path):
 
 
 # ---------------- --json 契约 ----------------
-def test_json_output_is_parseable(tmp_path: Path, capsys):
+def test_json_output_is_parseable(use_calendar, tmp_path: Path, capsys):
     """自动化靠 --json 做判断，结构必须稳定可解析。"""
+    use_calendar(CAL_START, CAL_END)
     _write_cache(tmp_path, "main.parquet", ASOF - timedelta(days=1))
     cfg = _write_cfg(tmp_path, ["main.parquet"])
 
@@ -181,12 +210,14 @@ def test_json_output_is_parseable(tmp_path: Path, capsys):
     assert rc == EXIT_NEED_BACKFILL
     payload = json.loads(capsys.readouterr().out)
     assert payload["verdict"] == "NEED_BACKFILL"
-    assert payload["expect_fd"] == 0
-    assert payload["system_fd"] == 1
+    assert payload["expect_fd"] == SESSION_EXPECT_FD["night"]  # -1
+    assert payload["system_fd"] == 0
+    assert payload["lag"] == 1
     assert payload["asof"] == ASOF.isoformat()
 
 
-def test_quiet_suppresses_stdout(tmp_path: Path, capsys):
+def test_quiet_suppresses_stdout(use_calendar, tmp_path: Path, capsys):
+    use_calendar(CAL_START, CAL_END)
     _write_cache(tmp_path, "main.parquet", ASOF - timedelta(days=1))
     cfg = _write_cfg(tmp_path, ["main.parquet"])
     main(["--config", str(cfg), "--asof", ASOF.isoformat(), "--quiet"])

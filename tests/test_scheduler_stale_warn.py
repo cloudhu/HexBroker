@@ -116,7 +116,7 @@ def _paper_cfg() -> OmegaConf:
             "open_delay_min": 5,
             "evaluation_days": 20,
             "default_atr_pct": 0.01,
-            "freshness_threshold_days": 0,
+            "freshness_threshold_trading_days": 0,
             "symbols": {
                 "rb0": {
                     "display": "SHFE.rb",
