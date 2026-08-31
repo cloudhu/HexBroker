@@ -331,7 +331,7 @@ def main() -> int:
                 encoding="utf-8",
             )
             cmd = [py, str(P6_4), "--stage", "parse", str(clean), "--sym", sym0,
-                   "--seg", seg, "--force"]
+                   "--seg", seg, "--force", "--scale", "1.0"]
             print(f"\n[PARSE] {sym0} seg={seg} rows={len(df)}")
             r = subprocess.run(cmd, cwd=str(PROJECT_ROOT), capture_output=True, text=True)
             if r.returncode != 0:

@@ -24,6 +24,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -218,6 +219,8 @@ class RebuildResult:
     replaced: list[str] = field(default_factory=list)
     #: 真值新追加的行日期
     appended: list[str] = field(default_factory=list)
+    #: 调用方显式要求剔除的既有行日期（仅 ``drop_dates`` 生效时非空）
+    dropped: list[str] = field(default_factory=list)
     #: 真值未覆盖、仍挂 provisional 标记的日期（missing 场景下真值不足年同样记此）
     uncovered: list[str] = field(default_factory=list)
     rows_before: int = 0
@@ -238,6 +241,7 @@ def _norm_dates(values) -> list[pd.Timestamp]:
 
 def rebuild_partition(
     root: Path, item: RebuildNeeded, truth: pd.DataFrame,
+    *, drop_dates: Iterable | None = None,
 ) -> RebuildResult:
     """用一个年度分区的真值执行重建。
 
@@ -249,6 +253,17 @@ def rebuild_partition(
     - 写回经 ``DataLake.save_processed``，manifest 按"最近一次写入"语义
       重算（``source="lake"``，字段只描述本次写入的分区）；重建来源信息
       由调用方（驱动器）日志/报告承载，manifest 不承载。
+
+    参数 ``drop_dates``（仅关键字，序 3 幽灵行清理）
+    --------------------------------------------------
+    默认 ``None`` = 只替换 + 追加，**绝不删除**任何既有行（历史语义，
+    不允许回归）。显式传入日期集合时，这些日期会先从既有分区剔除，再
+    走替换/追加流程 —— 用于清理源端写入的**节假日幽灵行**（三品种同一
+    日期、``adj_close`` 恰为 ``raw_close`` 的拷贝）。
+
+    调用方（``scripts/p11_truth_rebuild.py --drop-uncovered``）必须先完成
+    三重校验并打印完整待删清单，才允许传此参数；本函数不做业务判断，
+    只负责忠实执行。
     """
     root = Path(root)
     res = RebuildResult(symbol=item.symbol, freq=item.freq, year=item.year,
@@ -269,6 +284,13 @@ def rebuild_partition(
         cur = read_parquet(target)
         cur["datetime"] = pd.to_datetime(cur["datetime"]).dt.tz_localize(None)
         res.rows_before = int(len(cur))
+        if drop_dates is not None:
+            drop_set = {pd.Timestamp(d).normalize() for d in drop_dates}
+            hit = cur["datetime"].isin(drop_set)
+            res.dropped = [f"{d:%Y-%m-%d}" for d in sorted(
+                set(cur.loc[hit, "datetime"]))]
+            if hit.any():
+                cur = cur.loc[~hit].reset_index(drop=True)
         if set(truth.columns) != set(cur.columns):
             res.status = "SKIPPED"
             res.reason = (

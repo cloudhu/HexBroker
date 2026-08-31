@@ -109,6 +109,36 @@ RAW_SCALE_FIX = {
     "ag0": 1.4505499241026856,
 }
 
+# ⛔⛔⛔ 证伪留档（序 3，2026-08-30）—— 上面的推导前提是错的，勿再采信 ⛔⛔⛔
+#
+# 原文前提："au0/ag0/m0 既有序列为【未复权原始价格】口径"（L95）。
+# 该前提已被独立取证推翻：
+#   1. pandadata MCP 单合约名义价交叉验证（ag0 2019-03-15）：
+#        湖内 raw_close = 3596.00，AG1906.SHF 名义价 = 3596.0（逐位相同）
+#        → 既有序列的 raw_close **就是**名义价，正确无误。
+#   2. 同日 pandadata get_future_daily_post(method="close_pcr") 后复权真值
+#        = 2846.45498，而湖内 adj_close = 3596.0000
+#        → 既有 **adj_close 列才是坏的**（名义价的拷贝，非后复权价）。
+#   3. 对照组 rb0 同日：湖内 adj_close = 3303.1173，pandadata close_pcr
+#        = 3303.117259085565（逐位相同）→ 证明管线本身健康，
+#        只有 au0/ag0/m0 三品种的 adj_close 被污染。
+#
+# 因此 RAW_SCALE_FIX 是把**正确的** close_pcr 真值乘常数去"对齐"
+# **错误的**既有序列，属于方向性错误：它把对的改成了错的。
+# 该常数的另一硬伤："比率逐日恒定"仅在 2024-08~2026-08 这一小段成立，
+# 物理上 nominal/复权 比值是**每个 dominant 段一个常数、段间跳变**，
+# 不可能用单一常数表示。实测佐证：2025/2026 段若 1.4505 正确，ag0 的
+# k = adj/raw 应恰好 = 1，实测 2025 k=0.986、2026 k=0.9937
+# （偏离 1.4% / 0.6%），常数假设不成立。
+#
+# 处置：
+#   - 序 3 起，三品种（ag0/au0/m0）口径重建**必须**显式传
+#     ``normalize_new_df(..., scale=1.0)`` 禁用本常数（见该函数 docstring）。
+#   - 保留本表仅因 P6-4 历史补洞路径仍依赖其拼接连续性语义，乱删会引入
+#     20%~216% 伪跳变。
+#   - 待三品种 27 个分区全部用 close_pcr 真值重建完毕后，本表应**整体废弃**
+#     并删除（届时既有序列已是正确后复权口径，无需任何换算）。
+
 
 # --------------------------------------------------------------------------- #
 # 数据读取 / 日历
@@ -426,8 +456,25 @@ def normalize_new_df(df: pd.DataFrame,
                      underlying: str,
                      sym0: str,
                      seg_start: date,
-                     seg_end: date) -> pd.DataFrame:
-    """把源 DataFrame 映射为目标 schema，过滤品种与日期区间。"""
+                     seg_end: date,
+                     *,
+                     scale: float | None = None) -> pd.DataFrame:
+    """把源 DataFrame 映射为目标 schema，过滤品种与日期区间。
+
+    参数 ``scale``（仅关键字）控制价格口径换算：
+
+    - ``scale is None``（默认，历史行为）→ 查 ``RAW_SCALE_FIX.get(sym0, 1.0)``。
+      P6-4 补洞路径依赖此行为保证拼接连续性，**不允许回归**；
+    - ``scale`` 显式给定 → 直接采用，不再查 ``RAW_SCALE_FIX``。
+
+    ⚠️ **序 3 口径重建（ag0/au0/m0 adj_close 污染修复）必须显式传
+    ``scale=1.0`` 以禁用 RAW_SCALE_FIX** —— 该常数基于"既有序列是未复权
+    原始价口径"的错误前提（已被 pandadata 单合约名义价 + close_pcr 双源
+    交叉验证推翻，详见 ``RAW_SCALE_FIX`` 处的 ⛔ 证伪留档），且
+    nominal/复权 比值**每个 dominant 段一个常数、段间跳变**，单一常数
+    物理上不成立。传入真值后若再乘该常数，等于把正确的 close_pcr 后复权
+    价倒过来污染成名义价，与修复目标完全相反。
+    """
     if df is None or df.empty:
         return pd.DataFrame(columns=SCHEMA_COLUMNS)
 
@@ -466,9 +513,12 @@ def normalize_new_df(df: pd.DataFrame,
         return pd.Series(default, index=df.index)
 
     close = num("close")
-    scale = RAW_SCALE_FIX.get(sym0, 1.0)
+    if scale is None:
+        scale = RAW_SCALE_FIX.get(sym0, 1.0)
     if scale != 1.0:
         print(f"[SCALE] {sym0} close_pcr → 既有原始口径 系数 {scale:.8f}")
+    else:
+        print(f"[SCALE] {sym0} 系数 1.0（不换算，原样采用 close_pcr 后复权真值）")
     out = pd.DataFrame({
         "symbol": sym0,
         "datetime": df["datetime"],
@@ -625,7 +675,7 @@ def compute_overlap_ratio(old: pd.DataFrame, new: pd.DataFrame) -> float:
 
 def stage_parse(persisted: str, sym_arg: str, seg: str,
                 force: bool = False, dry_run: bool = False,
-                skip_nominal: bool = False) -> int:
+                skip_nominal: bool = False, scale: float | None = None) -> int:
     """解析单次拉取结果并合并写回（写前备份；幂等；--dry-run 不写盘）。"""
     underlying, sym0 = normalize_sym_arg(sym_arg)
     seg_start, seg_end = parse_seg_label(seg)
@@ -646,7 +696,7 @@ def stage_parse(persisted: str, sym_arg: str, seg: str,
     df = load_persisted_rows(path)
     print(f"[PARSE] 持久化文件共 {len(df)} 行，列: {list(df.columns)[:12]}...")
 
-    new_df = normalize_new_df(df, underlying, sym0, seg_start, seg_end)
+    new_df = normalize_new_df(df, underlying, sym0, seg_start, seg_end, scale=scale)
     if new_df.empty:
         print(f"[WARN] 无 {underlying} 在 {seg_start}~{seg_end} 的数据，不写盘、不记录")
         return 0
@@ -867,6 +917,12 @@ def main() -> int:
     ap.add_argument("--skip-nominal", action="store_true",
                     help="parse 阶段：跳过 P1-c 名义价回填（离线场景）,"
                          "raw_close 将保持 adj 复制品并打印 WARN")
+    ap.add_argument("--scale", type=float, default=None,
+                    help="parse 阶段：显式价格口径换算系数，覆盖 RAW_SCALE_FIX。"
+                         "传 1.0 即禁用 RAW_SCALE_FIX（与 p11 --no-scale-fix 等价）。"
+                         "⚠️ 序 3 已证伪 RAW_SCALE_FIX 推导前提（见 RAW_SCALE_FIX 处留档），"
+                         "日常刷新/apply 路径务必传 --scale 1.0，否则会把正确的 close_pcr 后复权"
+                         "价乘错常数倒推成名义价（k=1 污染）。默认 None=查 RAW_SCALE_FIX（历史补洞兼容）。")
     ap.add_argument("--plan", type=str, default=None,
                     help="verify 阶段：指定计划 JSON 路径（默认 artifacts/p6_4_pull_plan.json）")
     args = ap.parse_args()
@@ -880,7 +936,7 @@ def main() -> int:
         try:
             return stage_parse(args.persisted, args.sym, args.seg,
                                force=args.force, dry_run=args.dry_run,
-                               skip_nominal=args.skip_nominal)
+                               skip_nominal=args.skip_nominal, scale=args.scale)
         except (ValueError, KeyError) as exc:
             print(f"[FAIL] {exc}")
             return 2
