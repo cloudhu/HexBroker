@@ -88,6 +88,7 @@ class TradingScheduler:
         self._day_news: dict[date, list[NewsItem]] = {}
         self._day_trades: dict[date, list[TradeEvent]] = {}
         self._all_trades: list[TradeEvent] = []
+        self._seen_trade_ids: set[str] = set()  # 成交去重哨兵（按 trade_id，防御重入/重复 append 致聚合计数翻倍）
         self._c0_intraday: dict[date, dict[str, float]] = {}
         self._bars_cache: dict[str, tuple[date, pd.DataFrame]] = {}
 
@@ -351,9 +352,7 @@ class TradingScheduler:
         # ---- 撮合 ----
         event = self._broker.execute_plan(plan, quote, now)
         if event is not None:
-            self._day_trades.setdefault(day, []).append(event)
-            self._all_trades.append(event)
-            self._logger.trade(event)
+            self._record_trade(event, day)
             # P0-2：仅在实际开仓时更新指纹（预算拒绝/冷却拦截不更新 → 下次同信号仍可重试或继续拦截）
             if (
                 self._signal_cooldown_enabled
@@ -424,6 +423,24 @@ class TradingScheduler:
     # ------------------------------------------------------------------
     # 风控专用（有持仓仅风控，不开新仓）
     # ------------------------------------------------------------------
+    def _record_trade(self, event: "TradeEvent", day: date) -> None:
+        """记录成交到内存聚合器，按 ``trade_id`` 对称防御性去重。
+
+        同时保护 ``_day_trades`` / ``_all_trades`` 与审计日志，避免同一事件被
+        重复记录（潜在重入 / 重复调用导致评估期成交计数翻倍）。
+
+        ⚠️ 边界：``trade_id`` 为单调序列（``T{n:06d}``，见 ``broker.py``），
+        本守卫仅覆盖「同一 event 对象被重复记录」类；真正的重入执行
+        （``execute_plan`` 产生新 trade_id）需由 ``execute_plan`` 幂等性保障，
+        属独立设计项，不在本防御范围内。
+        """
+        if event.trade_id in self._seen_trade_ids:
+            return
+        self._seen_trade_ids.add(event.trade_id)
+        self._day_trades.setdefault(day, []).append(event)
+        self._all_trades.append(event)
+        self._logger.trade(event)
+
     def _risk_manage_only(self, symbol: str, quote: Quote, marks: dict[str, float], day: date, now: datetime) -> None:
         sig = self._signals.neutral_signal(symbol, now)
         self._day_signals.setdefault(day, []).append(sig)
@@ -434,9 +451,7 @@ class TradingScheduler:
         plan = self._planner.update_from_signal(sig, decision, quote=quote, equity=acct.equity)
         event = self._broker.execute_plan(plan, quote, now)
         if event is not None:
-            self._day_trades.setdefault(day, []).append(event)
-            self._all_trades.append(event)
-            self._logger.trade(event)
+            self._record_trade(event, day)
 
     # ------------------------------------------------------------------
     # 行情辅助
