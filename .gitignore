@@ -14,6 +14,9 @@ __pycache__/
 .venv/
 *.egg-info/
 .pytest_cache/
+.pytest_tmp/
+.xingtai_result.json
+.xingtai_result.txt
 .mypy_cache/
 .ruff_cache/
 # submodule 内部

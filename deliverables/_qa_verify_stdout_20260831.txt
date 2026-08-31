@@ -1,0 +1,78 @@
+=== 生成时间 ===
+Mon Aug 31 17:54:22     2026
+=== 基线 md5（必须与此一致）===
+cdd3f8e8bd9e40c3e10ba401a0f271c6 *hexbroker/paper/signals.py
+af11553e4d12f4373168ea943eb1dc59 *hexbroker/diagnostics/health_check.py
+8547679b12b98262dbf8713650c947eb *scripts/verify_freshness_caliber_options.py
+40e5a11206fe466700e465f1551311e9 *scripts/verify_p3c_freshness_live.py
+afe104f7615fa97ed38050b56cbc4131 *scripts/p6_4_backfill_guard.py
+86cf845d6946a137fc3c873557b18bc3 *tests/test_signal_freshness.py
+7130bbd750cfe25aecbc29db39a1351d *.gitignore
+
+=== [1] pytest tests/test_signal_freshness.py -q ===
+................................................                         [100%]
+
+=== [2] ruff ===
+All checks passed!
+
+=== [3] verify_p3c_freshness_live.py ===
+  V2 常规隔夜（周四→周五）
+    信号=2026-08-27  asof=2026-08-28  →  lag=0（期望 0）  放行=True（期望 True）  ✅ PASS
+    [对照·自然日差] 1  ← P3-B 口径，注意它与信息陈旧无关
+  V3 假期后首日（春节前→后）
+    信号=2026-02-13  asof=2026-02-24  →  lag=0（期望 0）  放行=True（期望 True）  ✅ PASS
+    [对照·自然日差] 11  ← P3-B 口径，注意它与信息陈旧无关
+  V4 P0-3 真病灶（夜盘漏刷）
+    信号=2026-08-21  asof=2026-08-24  →  lag=1（期望 1）  放行=False（期望 False）  ✅ PASS
+    [对照·自然日差] 3  ← P3-B 口径，注意它与信息陈旧无关
+  V4b 同信号在日盘（对照）
+    信号=2026-08-21  asof=2026-08-24  →  lag=0（期望 0）  放行=True（期望 True）  ✅ PASS
+    [对照·自然日差] 3  ← P3-B 口径，注意它与信息陈旧无关
+  V5 缓存停更 5 个交易日
+    信号=2026-08-21  asof=2026-08-28  →  lag=5（期望 5）  放行=False（期望 False）  ✅ PASS
+    [对照·自然日差] 7  ← P3-B 口径，注意它与信息陈旧无关
+  V6 夜盘（当日信号已刷新）
+    信号=2026-08-28  asof=2026-08-28  →  lag=0（期望 0）  放行=True（期望 True）  ✅ PASS
+    [对照·自然日差] 0  ← P3-B 口径，注意它与信息陈旧无关
+  V6b 负 lag（盘前 asof + 当日信号）
+    信号=2026-08-28  asof=2026-08-28  →  lag=-1（期望 -1）  放行=True（期望 True）  ✅ PASS
+    [对照·自然日差] 0  ← P3-B 口径，注意它与信息陈旧无关
+
+=== V7  交易日历不可用 → 必须保守拦截 ===
+  空日历 → lag=1000000000  effective=False
+  V7 ✅ PASS：无法判定 → 保守拦截并告警，不静默放行
+
+=== V9~V11  夜盘门禁（事故当时日历，非事后完整日历）===
+  V9  夜盘缓存停更1交易日  信号=2026-08-28 asof=2026-08-31 21:30
+      → lag=1（期望 1=落后一个交易日）ef=False（期望 False）  ✅ PASS
+      （旧版在此算 lag=0 放行 —— 门禁失明，P0-3 事故原样复现）
+  V10 夜盘当日已刷新（主湖仍无当日）信号=2026-08-31 asof=2026-08-31 21:30
+      → lag=0（期望 0）ef=True（期望 True）  ✅ PASS
+      （旧版在此返回 None 拦截 —— 越新的信号越被拦 = 行为反转）
+  V11 P0-3 事故当时日历（止 08-21） 信号=2026-08-21 asof=2026-08-24 21:30
+      → lag=1（期望 1=落后一个交易日）ef=False（期望 False）  ✅ PASS
+      判定得出同样的 1，事故发生时即成立 —— 这才是 V4 应有的诚实证据）
+
+=== V8  前视泄露检验（horizon=5）===
+  rb0  n=68   corr(当日)=-0.1889  corr(T+5)=-0.0420   ⚠️ 复核
+  ag0  n=68   corr(当日)=-0.1926  corr(T+5)=-0.2456   ✅ 正常
+  cu0  n=68   corr(当日)=-0.2002  corr(T+5)=-0.2103   ✅ 正常
+  ni0  n=68   corr(当日)=-0.3101  corr(T+5)=+0.1538   ⚠️ 复核
+  V8 ⚠️ 观察项
+     （信号质量观察项，不计入口径判定；显著性须用分块自助法复核）
+
+==========================================================================
+  V1: ✅ PASS
+  V2: ✅ PASS
+  V3: ✅ PASS
+  V4: ✅ PASS
+  V4b: ✅ PASS
+  V5: ✅ PASS
+  V6: ✅ PASS
+  V6b: ✅ PASS
+  V7: ✅ PASS
+  V9: ✅ PASS
+  V10: ✅ PASS
+  V11: ✅ PASS
+==========================================================================
+总判定（口径 V1~V7 + 夜盘门禁 V9~V11）：✅ 全部 PASS
