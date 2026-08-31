@@ -58,10 +58,53 @@
 
 ---
 
+## 2026-08-31 追加：潜伏加固债 ①③④ 落地（防御性新增，不翻转已闭环判定）
+
+> 主理人延续指令：推进四缺陷已闭环后剩余的潜伏加固债 ①③④。
+
+- **① PID 锁进程身份校验（防 PID 复用误判存活）**
+  - 根因：`paper_trading_main._try_acquire_pid_lock` 此前仅用 `health_check._is_pid_alive`（存活探测）判重，
+    不校验进程身份。旧实例崩溃未清 `paper.pid`（绕过 finally 删除）→ 该 PID 被无关进程复用 →
+    误判「存活」→ 拒绝新实例启动。
+  - 加固：锁文件格式由纯 `PID` 升级为 `PID:CREATION_TIME`（创建时间 FILETIME，跨平台可比）。读锁时
+    PID 存活但创建时间不符 → 判定僵尸锁（PID 复用）→ 覆盖而非拒启；创建时间吻合 → 拒绝（真·同进程）。
+    旧格式（纯整型）维持原「存活即拒绝」语义，向后兼容。
+  - 同步修复第二读取方 `health_check._read_pid_file`（`int(text)` → `int(text.split(":")[0])`），
+    避免新格式致健康检查误判「模拟盘未运行」。
+  - 新增 `tests/test_pid_lock_identity.py`（同进程拒绝 / PID 复用覆盖 / 旧格式兼容）。
+
+- **③ `_risk_manage_only` 显式透传 ma_price**
+  - 根因：`_process_symbol` 从 K 线算 `ma_price` 并传入 `risk_gate.evaluate(... ma_price=ma_price)`，
+    而 `_risk_manage_only` 调用 `evaluate(sig, quote, acct, pos_ctx)` **未传 ma_price**（默认 None）
+    → `RiskState.ma_price=None` → `sell_engine.S1`（趋势破坏止损）在「仅风控」模式下被整体跳过。
+  - 加固：在 `_risk_manage_only` 中补 `bars = self._cached_bars(symbol, day)` +
+    `_, _, ma_price = self._aux_from_bars(bars)`，透传 `evaluate(... ma_price=ma_price)`，与 `_process_symbol` 对齐。
+  - 新增 `tests/test_scheduler_risk_manage_ma_price.py`（fake-object 探针捕获 evaluate 收到的 ma_price，
+    30 日收盘均线 = 119.5 非 None）。
+
+- **④ `"default"` 哨兵改为可观测告警（非 fail-fast）**
+  - 根因：`risk/manager.py` 原 `sym = state.symbol or "default"`——若 `RiskState.symbol` 为 falsy，
+    所有无符号状态共享同一 `"default"` 桶的 ratchet/prev_stop，是已修复的④跨品种串扰的同构复发路径。
+  - 取证修正（无证据不翻转）：测试 `test_risk_priority.py` 的 `_state` fixture **不设 symbol**
+    （`RiskState(symbol=None)`）→ 硬 fail-fast 会误伤单测隔离。故改 **warn-and-continue**（告警一次、不抛异常），
+    使潜在跨品种串扰从静默变可发现；正常生产流 `state.symbol` 恒非空（来自 `self._symbols`），该路径不触发。
+  - 新增 `tests/test_risk_manager_default_sentinel.py`（首触发置位标记、二次不再重复告警、返回正常）。
+
+- **验证**：新增 3 测试 + 更新 `test_pid_lock.py`（格式兼容断言）；回归 pid/scheduler/risk/health_check 相关
+  **94 例全绿**；import 自检通过；`git fsck --no-dangling` 干净。
+- **Commit**：feat（4 源文件 + 4 测试）/ docs（本报告追加）。
+- **判定**：潜伏加固债 ①③④ = 已落地 ✅（防御性新增，未触碰任何已闭环缺陷状态，零回归）。
+
+---
+
 ## 主理人裁决
 - **四项稳定性缺陷 = 已闭环 ✅**（证据见上表，测试全覆盖）。
 - **本轮零 git 改动**（严守"无证据不翻转"：已修不重改、避免回归）。
 - **唯一待办**：③语义债作为可选优化项挂账，待主理人裁决是否立项。
+- **🔧 2026-08-31 更正（追加，不改原结论）**：上述「本轮零 git 改动」指 08-28 取证轮；
+  同日（08-31）在主线程下另立三项**防御性加固**，均经独立取证 + 测试零回归，未翻转任何已闭环判定：
+  ① PID 锁进程身份校验（commit 见 feat）、② 内存聚合器 trade_id 去重（c5f73db）、
+  ③ `_risk_manage_only` 透传 ma_price、④ `"default"` 哨兵可观测告警（见上三条追加节）。
 
 ## 文件清单（本次产出，未入库）
 - `deliverables/software-company/futures-research/13-stability-defects-forensics.md`（本报告）
