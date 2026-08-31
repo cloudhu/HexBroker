@@ -19,9 +19,13 @@ paper:
   signal_caches:
     - artifacts/signals_cache18_grouped_v8_tail_ext.parquet   # 主源：P22 末折评估窗延长变体，覆盖至 2026-08-24（修复信号过期；隔夜过期阈值0下仅信号当日有效）
     - artifacts/signals_cache18_grouped_v8.parquet            # 兜底：v8 生产基线（止 2026-06-29，fold 边界限制）
-  freshness_threshold_days: 0      # 信号新鲜度阈值（交易日；过期→技术兜底/禁开+告警，§8.2）
-                                   # P0-3：0=隔夜过期，仅当天（同一交易日）信号有效；
-                                   # 忘记开盘前刷新缓存 → 主源全部过期 → 仅技术兜底开仓（见 deliverables/2026-08-25_p0_signal_refresh.md）
+  freshness_threshold_days: 1      # 信号新鲜度阈值（**自然日差**；过期→技术兜底/禁开+告警，§8.2）
+                                   # P0-3 + P3-B 修正（2026-08-31）：1=允许相邻交易日（正常隔夜 fd<=1）；
+                                   # 跨周末（周五→周一=3）/ 跨假期（>=2）即过期。
+                                   # ⛔ 阈值不可取 0：信号为回溯性（盘中最新信号日恒为上一交易日，
+                                   # 湖数据止于 T-1 → 信号止于 T-1），fd=0 盘中结构性不可达，
+                                   # 阈值 0 等价于「日盘永不主源开仓」（见 artifacts/_p3b_freshness_rootcause_20260831.md）。
+                                   # 度量口径见 hexbroker/paper/signals.py::_calendar_days（原 np.busday_count 工作日差）。
   technical:                       # 技术指标兜底参数（§8.1 c0 信号缺口）
     fast_ma: 5
     slow_ma: 20
@@ -101,7 +105,9 @@ paper:
       display: SHFE.ag
       sina_code: nf_AG0
       multiplier: 15
-      min_tick: 0.01
+      min_tick: 1.0                 # 上期所白银最小变动价位 1 元/千克（2026-08-30 修正：
+                                    # 旧值 0.01 致滑点成本低估 100 倍；tqsdk 真行情
+                                    # 300 根 + 主湖历史价均为 1.0 整数倍双证）
       mode: trade                  # trade=完整启用（v8 信号+实时行情）
       sessions:
         day: [["09:00","10:15"],["10:30","11:30"],["13:30","15:00"]]

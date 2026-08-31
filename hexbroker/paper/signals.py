@@ -2,7 +2,14 @@
 
 - 主源：v8 信号缓存（``artifacts/signals_cache18_grouped_v8.parquet``，含 ag0/rb0，**不含 c0**）。
 - 新鲜度检测：信号日距当前交易日的距离超过阈值 → 标记过期（有持仓仅风控 / 无持仓禁开+告警，§8.2）。
-  P0-3：阈值默认 **0 = 隔夜过期**，仅同一交易日（fd=0）的信号可驱动开仓。
+  P0-3：阈值默认 **1 = 允许相邻交易日（自然日差 ≤1）**，跨周末/跨假期（自然日差 ≥2）即过期。
+
+  ⚠️ **度量口径为「自然日差」而非「工作日差」**（P3-B，2026-08-31）：
+  信号是**回溯性**的（对已有 bar 打分，不为未来外推），因此盘中最新信号日恒为
+  **上一交易日**，`fd=0` 在盘中结构性不可达 → 阈值 `0` 等价于「禁止一切主源开仓」，
+  属 P0-3 的过度矫正。改用自然日差后：正常隔夜=1、周五→周一=3、长假后≥2，
+  可精确区分「信息衰减 1 天」与「跨周末/跨假期」，P0-3 的真实意图（拦 08-24 事故：
+  周五信号周一用）完整保留（3 > 1 → 仍拦截）。
 - 技术指标兜底（c0 或信号缺失时）：双均线 + ATR 通道（§4.3 决策建议）。
 """
 
@@ -41,12 +48,38 @@ def _to_date(ts: Any) -> Optional[date]:
     return None
 
 
-def _business_days(a: date, b: date) -> int:
-    """两个日期之间的工作日（交易日近似）数量。"""
+def _calendar_days(a: date, b: date) -> int:
+    """两个日期之间的**自然日**差（P0-3 信息衰减度量口径）。
+
+    ⛔ 口径说明（P3-B，2026-08-31）——**为什么是自然日而不是工作日**：
+
+    新鲜度要度量的是「信号信息随时间衰减了多少」，而衰减按**自然时间**发生，
+    不按交易所开关门计数。原实现用 ``np.busday_count``（工作日差）存在致命缺陷：
+
+    ==========  ==================  ============  ============
+    场景        自然日跨度          工作日差        自然日差
+    ==========  ==================  ============  ============
+    周一→周二   隔夜 1 天           **1**          **1**
+    周五→周一   跨周末 3 天         **1**          **3**
+    节前→节后   跨假期 4~10 天      **1**          **4~10**
+    ==========  ==================  ============  ============
+
+    工作日差把后两者都算成 1，**与前者不可区分** → 当年为拦「周五信号周一用」
+    （2026-08-24 事故），只能把阈值压到 0，结果**连正常隔夜一起误杀**。
+    而由于信号是回溯性的（盘中最新信号日恒为上一交易日），``fd=0`` 盘中不可达，
+    阈值 0 实际等价于「日盘永不主源开仓」。
+
+    改自然日差后，阈值取 1 即可精确命中：正常隔夜（=1）放行，
+    跨周末（=3）与跨假期（≥2）拦截，P0-3 意图完整保留。
+    """
     if a is None or b is None:
         return 10 ** 9
-    d0, d1 = min(a, b), max(a, b)
-    return int(np.busday_count(d0, d1))
+    return abs((b - a).days)
+
+
+# 向后兼容别名：历史脚本/外部引用（health_check、QA 脚本）仍用旧名。
+# ⚠️ 语义已变更为自然日差，勿按「工作日」字面理解。
+_business_days = _calendar_days
 
 
 class SignalEngine:
@@ -59,10 +92,14 @@ class SignalEngine:
     Args:
         cache_path: 单信号缓存路径（向后兼容，等价 ``cache_paths=[cache_path]``）。
         cache_paths: 多源级联信号缓存路径（优先于 ``cache_path``）。
-        freshness_threshold_days: 信号新鲜度阈值（工作日/交易日近似差）。
-            **默认 0 = 隔夜过期**（P0-3）：仅 ``fd == 0``（同一交易日）的信号视为新鲜，
-            ``fd >= 1``（隔夜、含周五信号周一用）即过期 → ``is_effective=False``
+        freshness_threshold_days: 信号新鲜度阈值（**自然日差**，见 ``_calendar_days``）。
+            **默认 1 = 允许相邻交易日**（P0-3 + P3-B 修正）：
+            ``fd <= 1``（正常隔夜，如周二→周三）视为新鲜；
+            ``fd >= 2``（跨周末如周五→周一 =3、跨假期 ≥2）即过期 → ``is_effective=False``
             → 有持仓仅风控 / 无持仓禁开（§8.2），由技术兜底接手。
+
+            ⚠️ 阈值不再取 0：信号为回溯性（盘中最新信号日恒为上一交易日），
+            ``fd=0`` 盘中不可达，阈值 0 等价于「日盘永不主源开仓」。
         fast_ma: 技术兜底快均线窗口。
         slow_ma: 技术兜底慢均线窗口。
         atr_window: 技术兜底 ATR 窗口。
@@ -73,7 +110,7 @@ class SignalEngine:
         self,
         cache_path: str | Path | None = None,
         cache_paths: list[str | Path] | None = None,
-        freshness_threshold_days: int = 0,
+        freshness_threshold_days: int = 1,
         fast_ma: int = 5,
         slow_ma: int = 20,
         atr_window: int = 14,
@@ -95,7 +132,7 @@ class SignalEngine:
 
     @property
     def freshness_threshold(self) -> int:
-        """信号新鲜度阈值（交易日；0=隔夜过期，仅当天信号有效）。
+        """信号新鲜度阈值（自然日差；1=允许相邻交易日，跨周末/假期过期）。
 
         供调用方（调度器运行时告警 / 健康自检）判定信号是否陈旧，避免各处重复读配置。
         """
@@ -169,14 +206,14 @@ class SignalEngine:
         )
 
     def freshness_days(self, symbol: str, asof: Any, sig_ts: Any = None) -> int:
-        """信号新鲜度（交易日数）。无信号返回超大值。"""
+        """信号新鲜度（自然日数，见 ``_calendar_days``）。无信号返回超大值。"""
         if sig_ts is None:
             sig = self.latest_signal(symbol, asof)
             if sig is None:
                 return 10 ** 9
             sig_ts = sig.ts
         a, b = _to_date(sig_ts), _to_date(asof)
-        return _business_days(a, b)
+        return _calendar_days(a, b)
 
     def has_symbol(self, symbol: str) -> bool:
         return any(symbol in set(df["symbol"].unique()) for df in self._caches)

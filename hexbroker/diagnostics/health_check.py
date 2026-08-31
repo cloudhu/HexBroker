@@ -129,21 +129,22 @@ def _probe_http(url: str, headers: dict[str, str], timeout: float) -> tuple[bool
 
 
 def signal_freshness_days(latest_ts: Any, asof: Any = None) -> Optional[int]:
-    """信号缓存最新时间戳距 ``asof``（默认今日）的工作日差（P0-3 新鲜度自检）。
+    """信号缓存最新时间戳距 ``asof``（默认今日）的**自然日差**（P0-3 新鲜度自检）。
 
-    与 ``hexbroker.paper.signals._business_days`` 同口径（``np.busday_count``），
+    与 ``hexbroker.paper.signals._calendar_days`` 同口径（P3-B，2026-08-31：
+    原 ``np.busday_count`` 工作日差无法区分「正常隔夜」与「跨周末/跨假期」），
     直接复用该实现以避免两处逻辑漂移；依赖不可用/时间戳无法解析时返回 ``None``（跳过检查）。
     """
     if latest_ts is None:
         return None
     try:
-        from ..paper.signals import _business_days, _to_date
+        from ..paper.signals import _calendar_days, _to_date
 
         sig_day = _to_date(latest_ts)
         ref_day = _to_date(asof) if asof is not None else date.today()
         if sig_day is None or ref_day is None:
             return None
-        return int(_business_days(sig_day, ref_day))
+        return int(_calendar_days(sig_day, ref_day))
     except Exception:
         return None
 
@@ -311,12 +312,19 @@ def check_lifecycle(paper_cfg: Any) -> list[CheckItem]:
     items.append(CheckItem("INFO", "开盘延迟", f"{open_delay}min（跳过集合竞价，Q6）"))
     items.append(CheckItem("INFO", "收盘复盘缓冲", f"{close_buf}min（日盘收盘 + 缓冲后触发复盘，P1-3）"))
     items.append(CheckItem("INFO", "评估周期", f"满 {eval_days} 个交易日自动输出评估摘要（Q5）"))
-    fresh_extra = "，0=隔夜过期（仅当天信号有效，P0-3）" if int(fresh or 0) == 0 else ""
+    # P3-B（2026-08-31）：口径由「工作日差」改为「自然日差」，文案同步；
+    # 阈值 0 在新口径下属病态配置（fd=0 盘中不可达 → 永不主源开仓），需显式提示。
+    if int(fresh or 0) == 0:
+        fresh_extra = "，⚠️0=仅当天（信号为回溯性，盘中不可达 → 等效禁用主源，见 P3-B）"
+    elif int(fresh or 0) == 1:
+        fresh_extra = "，1=允许相邻交易日（跨周末/假期过期，P0-3）"
+    else:
+        fresh_extra = ""
     items.append(
         CheckItem(
             "INFO",
             "信号新鲜度阈值",
-            f"{fresh} 交易日（过期→技术兜底/禁开+告警，§8.2）{fresh_extra}",
+            f"{fresh} 自然日（过期→技术兜底/禁开+告警，§8.2）{fresh_extra}",
         )
     )
     items.append(CheckItem("INFO", "技术兜底 K线", f"{bar_freq} / 近 {bar_days} 天（信号缺口时双均线+ATR 通道）"))

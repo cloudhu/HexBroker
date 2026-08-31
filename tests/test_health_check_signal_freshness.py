@@ -1,12 +1,16 @@
 """P0-3 启动自检：信号缓存新鲜度 WARN（不阻断启动）。
 
 覆盖：
-① 陈旧缓存（latest 早于基准日若干工作日）→ CheckItem WARN + 刷新命令提示；
+① 陈旧缓存（latest 早于基准日若干**自然日**）→ CheckItem WARN + 刷新命令提示；
 ② 新鲜缓存（同一交易日）→ CheckItem OK；
 ③ 阈值取配置值（缺失回退 0）；
 ④ 缓存文件缺失 → FAIL（原语义不变）；
-⑤ ``signal_freshness_days`` 与 ``SignalEngine`` 工作日口径一致；
-⑥ 生命周期参数展示阈值 0 的语义说明。
+⑤ ``signal_freshness_days`` 与 ``SignalEngine`` **自然日口径**一致；
+⑥ 生命周期参数展示阈值语义说明。
+
+口径变更（P3-B，2026-08-31）：工作日差 → 自然日差，与
+``hexbroker.paper.signals._calendar_days`` 同口径。跨周末（周五→周一）由 1 变 3，
+跨整周由 5 变 7，春节跨越由 5 变 10。
 
 注：不写真实 parquet（沙箱可能缺 pyarrow），改为注入 ``pandas.read_parquet``。
 """
@@ -24,7 +28,7 @@ from hexbroker.diagnostics.health_check import (
     check_lifecycle,
     signal_freshness_days,
 )
-from hexbroker.paper.signals import _business_days, _to_date
+from hexbroker.paper.signals import _calendar_days, _to_date
 
 ASOF = date(2026, 8, 24)  # 周一
 
@@ -66,21 +70,21 @@ def _cache_items(items: list) -> list:
 # ① 陈旧缓存 → WARN
 # ---------------------------------------------------------------------------
 def test_stale_cache_reports_warn(fake_cache):
-    """08-21 缓存在 08-24 自检 → fd=1 > 阈值 0 → WARN + 刷新命令。"""
+    """08-21(周五) 缓存在 08-24(周一) 自检 → fd=3 > 阈值 0 → WARN + 刷新命令。"""
     path = fake_cache("signals_stale.parquet", "2026-08-21 15:00")
     items = _cache_items(check_data_sources(_cfg([path]), offline=True, asof=ASOF))
     assert len(items) == 1
     assert items[0].status == "WARN"
-    assert "信号陈旧 fd=1>阈值0" in items[0].detail
+    assert "信号陈旧 fd=3>阈值0" in items[0].detail  # 自然日差口径（工作口径为 1）
     assert "p22_tail_ext.py --skip-eval" in items[0].detail
     assert "2026-08-21 15:00" in items[0].detail
 
 
-def test_very_stale_cache_reports_business_day_gap(fake_cache):
-    """06-29 缓存在 08-24 自检 → fd 为工作日差（>>0）→ WARN。"""
+def test_very_stale_cache_reports_calendar_day_gap(fake_cache):
+    """06-29 缓存在 08-24 自检 → fd 为自然日差（>>0）→ WARN。"""
     path = fake_cache("signals_v8.parquet", "2026-06-29 15:00")
     items = _cache_items(check_data_sources(_cfg([path]), offline=True, asof=ASOF))
-    expected = _business_days(_to_date("2026-06-29"), ASOF)
+    expected = _calendar_days(_to_date("2026-06-29"), ASOF)
     assert items[0].status == "WARN"
     assert f"fd={expected}>阈值0" in items[0].detail
 
@@ -101,11 +105,11 @@ def test_fresh_cache_reports_ok(fake_cache):
 # ③ 阈值取配置（宽松阈值 → 隔夜仍 OK；缺失 → 回退 0）
 # ---------------------------------------------------------------------------
 def test_threshold_from_config_allows_stale_when_relaxed(fake_cache):
-    """配置阈值 5 时 fd=1 → 仍判 OK（阈值来源于配置，非硬编码）。"""
+    """配置阈值 5 时 fd=3（跨周末）→ 仍判 OK（阈值来源于配置，非硬编码）。"""
     path = fake_cache("signals_relaxed.parquet", "2026-08-21 15:00")
     items = _cache_items(check_data_sources(_cfg([path], threshold=5), offline=True, asof=ASOF))
     assert items[0].status == "OK"
-    assert "fd=1<=阈值5" in items[0].detail
+    assert "fd=3<=阈值5" in items[0].detail
 
 
 def test_threshold_defaults_to_zero_when_missing(fake_cache):
@@ -131,11 +135,16 @@ def test_missing_cache_still_fails(tmp_path):
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize(
     "sig_day,expected",
-    [("2026-08-24", 0), ("2026-08-21", 1), ("2026-08-20", 2), ("2026-08-17", 5)],
+    [
+        ("2026-08-24", 0),   # 同日（周一）
+        ("2026-08-21", 3),   # 周五 → 跨周末（工作口径为 1）
+        ("2026-08-20", 4),   # 周四
+        ("2026-08-17", 7),   # 跨整周（工作口径为 5）
+    ],
 )
 def test_freshness_days_matches_signal_engine_semantics(sig_day: str, expected: int):
     assert signal_freshness_days(pd.Timestamp(f"{sig_day} 15:00"), ASOF) == expected
-    assert signal_freshness_days(pd.Timestamp(f"{sig_day} 15:00"), ASOF) == _business_days(
+    assert signal_freshness_days(pd.Timestamp(f"{sig_day} 15:00"), ASOF) == _calendar_days(
         _to_date(sig_day), ASOF
     )
 
@@ -145,6 +154,7 @@ def test_freshness_days_none_when_no_timestamp():
 
 
 def test_lifecycle_shows_zero_threshold_semantics():
+    """阈值 0 → 提示该配置在新口径下属病态（fd=0 盘中不可达 → 等效禁用主源）。"""
     cfg = OmegaConf.create(
         {
             "freshness_threshold_days": 0,
@@ -154,5 +164,20 @@ def test_lifecycle_shows_zero_threshold_semantics():
     )
     items = [it for it in check_lifecycle(cfg) if it.name == "信号新鲜度阈值"]
     assert len(items) == 1
-    assert "0 交易日" in items[0].detail
-    assert "隔夜过期" in items[0].detail
+    assert "0 自然日" in items[0].detail
+    assert "盘中不可达" in items[0].detail
+
+
+def test_lifecycle_shows_one_threshold_semantics():
+    """阈值 1（生产配置）→ 提示「允许相邻交易日，跨周末/假期过期」。"""
+    cfg = OmegaConf.create(
+        {
+            "freshness_threshold_days": 1,
+            "symbols": {"ag0": {"mode": "trade"}},
+            "holidays_2026": [],
+        }
+    )
+    items = [it for it in check_lifecycle(cfg) if it.name == "信号新鲜度阈值"]
+    assert len(items) == 1
+    assert "1 自然日" in items[0].detail
+    assert "允许相邻交易日" in items[0].detail
