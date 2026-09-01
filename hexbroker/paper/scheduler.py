@@ -584,7 +584,10 @@ class TradingScheduler:
             _bucket[_reason] = _bucket.get(_reason, 0) + 1
 
         # ---- 计划 ----
-        plan = self._planner.update_from_signal(sig, decision, quote=quote, equity=acct.equity)
+        # P0-4：传入 atr —— 决策无 stop_price 时，风险预算法用它兜底定价单笔风险。
+        plan = self._planner.update_from_signal(
+            sig, decision, quote=quote, equity=acct.equity, atr=atr
+        )
 
         # ---- P1-1 决策 trace（在撮合前落盘，冻结"决策当下"的全部上下文）----
         # 位置刻意选在 update_from_signal 之后、execute_plan 之前：既含风控原始决策
@@ -713,7 +716,10 @@ class TradingScheduler:
         bars = self._cached_bars(symbol, day)
         _, _, ma_price = self._aux_from_bars(bars)
         decision = self._risk_gate.evaluate(sig, quote, acct, pos_ctx, ma_price=ma_price)
-        plan = self._planner.update_from_signal(sig, decision, quote=quote, equity=acct.equity)
+        # P0-4：同上，透传 atr 供风险预算法兜底定价。
+        plan = self._planner.update_from_signal(
+            sig, decision, quote=quote, equity=acct.equity, atr=atr
+        )
         # P1-1 决策 trace：仅风控路径同样留痕（c0 accumulate 模式有持仓时走这里）。
         # 注意本路径 recent_returns/recent_volumes 为 None（S2 量价背离不参与）。
         self._emit_decision_trace(

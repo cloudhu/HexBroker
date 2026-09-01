@@ -85,6 +85,21 @@ def _try_acquire_pid_lock(pid_path: Path) -> bool:
         return True
 
 
+def _max_position_pct(paper_cfg: Any) -> float:
+    """从风控配置读 ``max_position_pct``（P0-4 名义敞口硬顶，**仅用于告警**）。
+
+    放在模块级而非 lambda 内：OmegaConf 只在 ``_load_paper_config`` 局部导入，
+    直接在 lambda 里引用会 NameError。读取失败时保守回退 0.30（与 risk 配置同默认）。
+    """
+    try:
+        from omegaconf import OmegaConf
+
+        path = ROOT / str(paper_cfg.get("risk_config", "configs/risk/v4_atr.yaml"))
+        return float(OmegaConf.load(path).get("max_position_pct", 0.30))
+    except Exception:
+        return 0.30
+
+
 def _load_paper_config(config_path: str) -> Any:
     """加载 paper.yaml（经 hexbroker.config.load_config 合并默认配置）。"""
     from omegaconf import OmegaConf
@@ -206,6 +221,11 @@ def build_components_safe(paper_cfg: Any, offline: bool = False) -> dict[str, tu
             multipliers={s: float(paper_cfg.symbols[s].multiplier) for s in symbols},
             risk_reward_ratio=float(paper_cfg.get("risk_reward_ratio", 1.5)),
             plans_dir=paper_cfg.get("plans_dir", "trade_plans"),
+            # ---- P0-4（2026-09-01）仓位粒度放大防护 ----
+            size_by_risk=bool(paper_cfg.get("size_by_risk", False)),
+            risk_per_trade=float(paper_cfg.get("risk_per_trade", 0.01)),
+            risk_stop_atr_mult=float(paper_cfg.get("risk_stop_atr_mult", 2.5)),
+            max_position_pct=_max_position_pct(paper_cfg),
         ),
         "intel": lambda: IntelligenceService.from_config(paper_cfg),
         "logger": lambda: TradeLogger(log_file=paper_cfg.get("trades_log", "data/paper/trades.log")),
