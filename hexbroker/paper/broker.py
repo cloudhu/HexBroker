@@ -366,7 +366,24 @@ class PaperBroker:
         ltd = payload.get("last_trading_day")
         self._last_trading_day = date.fromisoformat(ltd) if ltd else None
         self._trade_seq = int(payload.get("trade_seq", 0))
-        log.info("账户快照已恢复：equity={:.2f} positions={}", self._broker.initial_capital, self._broker.positions)
+        # ⛔ P1-4（2026-09-01）：原实现打的是 ``initial_capital`` 而非**真实 equity**。
+        # 后果极严重：08:58:53 恢复日志显示 equity=100000.00，而 3 秒后的保存日志显示
+        # 94967.46 —— 两者其实是**同一个值**（100000 − realized 5032.54），从未变化；
+        # 但误导复盘推断出「恢复瞬间 drawdown 被抹平为 0，风控按零回撤放行」，
+        # 进而误立了一条 P1 缺陷。实测（artifacts/_tmp/p1_4_realized_restore_audit.py）：
+        # realized / peak_equity **均已正确还原**，恢复瞬间 drawdown 就是 5.13%。
+        # 故本条只改日志，不改还原逻辑。
+        try:
+            restored_snap = self.snapshot()
+            log.info(
+                "账户快照已恢复：equity={:.2f} peak={:.2f} drawdown={:.2%} realized={:.2f} "
+                "positions={}",
+                restored_snap.equity, restored_snap.peak_equity, restored_snap.drawdown,
+                sum(self._broker.realized.values()), self._broker.positions,
+            )
+        except Exception as exc:  # noqa: BLE001 —— 日志不得阻断启动
+            log.warning("账户快照已恢复（equity 计算失败，回退显示初始资金）: {}", exc)
+            log.info("账户快照已恢复：positions={}", self._broker.positions)
         return True
 
     # ------------------------------------------------------------------

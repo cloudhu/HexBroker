@@ -291,12 +291,31 @@ def _production_planner(size_by_risk: bool):
 
 
 def test_config_keys_are_read_from_paper_yaml():
-    """四个新键必须来自配置文件，而不是构造器的默认值兜底。"""
+    """新键必须来自配置文件，而不是构造器的默认值兜底。"""
     _, pm = _production_planner(False)
-    assert pm._max_position_pct == pytest.approx(0.30)   # 读自 configs/risk/v4_atr.yaml
     assert pm._risk_per_trade == pytest.approx(0.01)
     assert pm._risk_stop_atr_mult == pytest.approx(2.5)
     assert pm._size_by_risk is False
+
+
+def test_max_position_pct_prefers_risk_overrides_over_risk_config():
+    """⛔ 优先级：``risk_overrides``(0.50) > ``risk_config``(0.30)。
+
+    生产 ``RiskGate`` 吃的是 overrides，只从 ``configs/risk/v4_atr.yaml`` 读会拿到
+    0.30 → 告警判据比实际风控**严格**（rb0 的 33.46% 在 0.50 口径下并未越界）。
+    """
+    ptm = _load_entry_module()
+    cfg = ptm._load_paper_config("configs/paper.yaml")
+    assert float(cfg.risk_overrides.max_position_pct) == pytest.approx(0.50)
+    assert ptm._max_position_pct(cfg) == pytest.approx(0.50)
+
+
+def test_risk_per_trade_by_symbol_is_wired_from_config():
+    """D2-C：``risk_per_trade_by_symbol`` 必须真的从 yaml 读进来。"""
+    _, pm = _production_planner(True)
+    assert pm.risk_budget_for("ag0") == pytest.approx(0.01)     # 显式覆盖
+    assert pm.risk_budget_for("rb0") == pytest.approx(0.01)     # 未列出 → 继承全局
+    assert pm.risk_budget_for("c0") == pytest.approx(0.01)
 
 
 def test_config_default_keeps_legacy_behavior():
@@ -313,3 +332,49 @@ def test_config_flip_enables_risk_budget_end_to_end():
     v = SYMBOLS["ag0"]
     lots = pm._size_qty("ag0", 0.30, v["price"], EQUITY, stop=_stop("ag0"), atr=v["atr"])
     assert lots == pytest.approx(0.0)
+
+
+# ----------------------------------------------------------------------
+# ⑦ D2-C（2026-09-01 主理人裁决）：按品种覆盖单笔风险预算
+# ----------------------------------------------------------------------
+def test_risk_budget_for_prefers_symbol_override():
+    pm = _planner(
+        size_by_risk=True, risk_per_trade=0.01, risk_per_trade_by_symbol={"ag0": 0.30}
+    )
+    assert pm.risk_budget_for("ag0") == pytest.approx(0.30)   # 覆盖生效
+    assert pm.risk_budget_for("rb0") == pytest.approx(0.01)   # 其余继承全局
+
+
+def test_per_symbol_override_can_rescue_a_blocked_symbol():
+    """同一品种、同一行情，只改预算就能从「拦下」变「放行」——证明覆盖真的参与计算。"""
+    v = SYMBOLS["ag0"]
+    stop = _stop("ag0")
+    blocked = _planner(size_by_risk=True, risk_per_trade=0.01)
+    rescued = _planner(
+        size_by_risk=True, risk_per_trade=0.01, risk_per_trade_by_symbol={"ag0": 0.30}
+    )
+    assert blocked._size_qty("ag0", 0.30, v["price"], EQUITY, stop=stop, atr=v["atr"]) == 0.0
+    assert rescued._size_qty("ag0", 0.30, v["price"], EQUITY, stop=stop, atr=v["atr"]) == 1.0
+
+
+def test_size_metrics_reports_effective_budget():
+    """trace 归因需要知道**本品种实际生效**的预算，不然日志里的数字对不上配置。"""
+    pm = _planner(
+        size_by_risk=True, risk_per_trade=0.01, risk_per_trade_by_symbol={"ag0": 0.30}
+    )
+    v = SYMBOLS["ag0"]
+    m = pm.size_metrics("ag0", 0.30, v["price"], EQUITY, stop=_stop("ag0"), atr=v["atr"])
+    assert m["risk_budget"] == pytest.approx(0.30)
+    assert m["capped_by"] == "notional"      # 预算放行后，由名义口径封顶
+    assert m["final_lots"] == 1
+
+
+def test_per_symbol_override_never_breaks_only_reduce_invariant():
+    """放宽容许度也不能突破名义口径 —— final = min(名义, 风险) 恒成立。"""
+    pm = _planner(
+        size_by_risk=True, risk_per_trade=0.01, risk_per_trade_by_symbol={"rb0": 0.99}
+    )
+    v = SYMBOLS["rb0"]
+    m = pm.size_metrics("rb0", 0.30, v["price"], EQUITY, stop=_stop("rb0"), atr=v["atr"])
+    assert m["lots_risk"] > m["lots_notional"]      # 风险口径极宽
+    assert m["final_lots"] == m["lots_notional"]    # 但仍被名义口径封顶

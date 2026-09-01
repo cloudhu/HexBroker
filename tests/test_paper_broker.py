@@ -191,6 +191,68 @@ def test_snapshot_roundtrip(tmp_path):
     assert b2.snapshot().peak_equity == pytest.approx(100_500.0)
 
 
+# ---------------------------------------------------------------------------
+# P1-4（2026-09-01）：账户恢复必须还原 realized / drawdown
+#
+# ⛔ 原指控「恢复瞬间 drawdown 被抹平为 0」经实测**推翻**
+#    （artifacts/_tmp/p1_4_realized_restore_audit.py）：realized 与 peak_equity
+#    均被正确还原，恢复瞬间 drawdown=5.13%。真缺陷是恢复日志打的是
+#    initial_capital 而非真实 equity，导致复盘误判出一条不存在的 P1。
+#    下面的测试锁死**状态契约**，防止将来真的改坏还原逻辑。
+# ---------------------------------------------------------------------------
+def test_load_snapshot_restores_realized_pnl(tmp_path):
+    """已实现盈亏必须随快照还原，否则 equity 会被凭空抬高、亏损被抹掉。"""
+    b = _broker()
+    b.execute_plan(_plan("rb0", 1), _quote("rb0", 3000.0), ts=datetime(2026, 8, 24, 10, 0))
+    b.execute_plan(_plan("rb0", 0), _quote("rb0", 2900.0), ts=datetime(2026, 8, 24, 11, 0))
+    realized_before = dict(b.broker.realized)
+    assert sum(realized_before.values()) < 0, "前置条件：本用例需要一笔已实现亏损"
+
+    path = tmp_path / "account.json"
+    b.save_snapshot(path)
+
+    b2 = _broker()
+    assert b2.load_snapshot(path) is True
+    assert b2.broker.realized == pytest.approx(realized_before)
+    assert b2.snapshot().equity < 100_000.0, "亏损必须体现在恢复后的 equity 上"
+
+
+def test_drawdown_is_nonzero_immediately_after_restore(tmp_path):
+    """⛔ 核心契约：恢复**瞬间** drawdown 就必须是真实值，不得为 0。
+
+    drawdown=0 会让风控按「零回撤」放行（R1 不降级：intent 0.30 vs R1 的 0.15），
+    相邻 tick 间意图翻转 2 倍。
+    """
+    b = _broker()
+    b.execute_plan(_plan("rb0", 1), _quote("rb0", 3000.0), ts=datetime(2026, 8, 24, 10, 0))
+    b.execute_plan(_plan("rb0", 0), _quote("rb0", 2900.0), ts=datetime(2026, 8, 24, 11, 0))
+    b._peak_equity = 100_000.0
+    path = tmp_path / "account.json"
+    b.save_snapshot(path)
+
+    b2 = _broker()
+    b2.load_snapshot(path)
+    snap = b2.snapshot()
+    assert snap.peak_equity == pytest.approx(100_000.0)
+    assert snap.drawdown > 0.0, "恢复瞬间 drawdown=0 = 回撤恢复态失效，风控按零回撤放行"
+
+
+def test_restore_keeps_historical_peak_not_current_equity(tmp_path):
+    """peak_equity 必须还原为**历史峰值**，不得被当前 equity 覆盖（否则 drawdown 恒为 0）。"""
+    b = _broker()
+    b.execute_plan(_plan("rb0", 1), _quote("rb0", 3000.0), ts=datetime(2026, 8, 24, 10, 0))
+    b.execute_plan(_plan("rb0", 0), _quote("rb0", 2900.0), ts=datetime(2026, 8, 24, 11, 0))
+    b._peak_equity = 102_000.0          # 历史峰值高于初始资金
+    path = tmp_path / "account.json"
+    b.save_snapshot(path)
+
+    b2 = _broker()
+    b2.load_snapshot(path)
+    snap = b2.snapshot()
+    assert snap.peak_equity == pytest.approx(102_000.0)
+    assert snap.drawdown == pytest.approx((102_000.0 - snap.equity) / 102_000.0)
+
+
 def test_load_snapshot_missing_returns_false(tmp_path):
     b = _broker()
     assert b.load_snapshot(tmp_path / "nope.json") is False

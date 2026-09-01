@@ -30,6 +30,7 @@ class PlanManager:
         # ---- P0-4（2026-09-01）仓位粒度放大防护 ----
         size_by_risk: bool = False,
         risk_per_trade: float = 0.01,
+        risk_per_trade_by_symbol: Optional[dict[str, float]] = None,
         risk_stop_atr_mult: float = 2.5,
         max_position_pct: float = 0.30,
     ) -> None:
@@ -41,9 +42,19 @@ class PlanManager:
         # P0-4：见 ``_size_qty`` 文档串。默认 False = 沿用历史行为（不静默改变实盘）。
         self._size_by_risk = bool(size_by_risk)
         self._risk_per_trade = float(risk_per_trade)
+        # D2-C（2026-09-01）：按品种覆盖单笔风险预算。不同品种「1 手」的绝对风险
+        # 差异数量级（rb0 0.86% vs ag0 24.89% 权益），一把尺子量到底必然是
+        # 「要么全放行、要么拦死某个品种」。未列出的品种沿用 ``risk_per_trade``。
+        self._risk_per_trade_by_symbol = {
+            str(k): float(v) for k, v in (risk_per_trade_by_symbol or {}).items()
+        }
         # 无止损价可用时的兜底止损距离倍率（= ATRTier.HIGH 最宽档 2.5，与生产 compute_stop 同参）
         self._risk_stop_atr_mult = float(risk_stop_atr_mult)
         self._max_position_pct = float(max_position_pct)
+
+    def risk_budget_for(self, symbol: str) -> float:
+        """该品种的单笔风险预算（D2-C：优先取按品种覆盖值，未覆盖则用全局）。"""
+        return float(self._risk_per_trade_by_symbol.get(symbol, self._risk_per_trade))
 
     # ------------------------------------------------------------------
     # 信号 → 计划
@@ -138,9 +149,11 @@ class PlanManager:
         供日志、trace 与端到端验证使用（不产生副作用）。
         """
         multiplier = float(self._multipliers.get(symbol, 10.0))
+        budget = self.risk_budget_for(symbol)
         out = {
             "symbol": symbol,
             "multiplier": multiplier,
+            "risk_budget": budget,          # D2-C：本品种实际生效的预算（便于 trace 归因）
             "raw_lots": 0.0,
             "lots_notional": 0,
             "notional_pct": 0.0,
@@ -174,7 +187,7 @@ class PlanManager:
         risk_per_lot = dist * multiplier
         out["risk_per_lot"] = risk_per_lot
         out["risk_pct_1lot"] = risk_per_lot / equity
-        lots_risk = int((equity * self._risk_per_trade) / risk_per_lot) if risk_per_lot > 0 else 0
+        lots_risk = int((equity * budget) / risk_per_lot) if risk_per_lot > 0 else 0
         out["lots_risk"] = lots_risk
 
         if not self._size_by_risk:
@@ -206,18 +219,28 @@ class PlanManager:
 
         ⚠️ P0-4（2026-09-01 实证）：期货**最小交易单位是 1 手**，所以「风控批准 0.4454 手
         → 实开 1 手」是粒度约束，不是笔误；但它会让**实际名义敞口越过风控自身的
-        ``max_position_pct``（rb0 15%→33.7%，ag0 15%→**257.6%**）。而 broker 第二道防线是
-        **按保证金**把关（ag0 保证金仅占 30.9%，预算 40% 内放行），兜不住名义敞口。
+        ``max_position_pct``（rb0 15%→33.5%，ag0 30%→**256.9%**）。而 broker 第二道防线是
+        **按保证金**把关（ag0 保证金仅占 ~31%，预算 40% 内放行），兜不住名义敞口。
+
+        ⛔ 危害窗口：ag0 **只在意图 ≥ ~25.8% 时**才被放大（15% 时 raw=0.058 < 0.10
+        阈值直接不开仓）。而 ``risk_default_intent=0.30`` 恰在区间内 —— 只看 15% 会漏掉。
 
         两难：① 放行 = 越过硬顶；② 向下取整 = 小账户（10 万）在 ag0/rb0 上永不交易。
 
         ✅ 解法（``size_by_risk=True`` 时启用）——**按风险预算法定价**，绕开粒度死结：
-            单笔亏损 = |price - stop| × multiplier × lots  ≤  equity × risk_per_trade
+            单笔亏损 = |price - stop| × multiplier × lots  ≤  equity × 本品种预算
         即以「止损距离」而非「名义敞口」定手数。实测（equity 94,868，止损 2.5×ATR）：
-            ag0  1 手风险 25.49% 权益 → **0 手（拦下）**
-            rb0  1 手风险  0.82% 权益 → 1 手（与现状一致）
+            ag0  1 手风险 24.89% 权益 → **0 手（拦下）**
+            rb0  1 手风险  0.86% 权益 → 1 手（与现状一致）
             c0   1 手风险  0.59% 权益 → 1 手（与现状一致）
         → 只拦真正风险过大的品种，其余**零行为变化**。
+
+        **D2-C（2026-09-01 主理人裁决）**：不同品种「1 手」的绝对风险差一个数量级，
+        一把尺子量到底必然是「要么全放行、要么拦死某品种」。故支持
+        ``risk_per_trade_by_symbol`` 按品种覆盖，见 ``risk_budget_for``。
+        ⚠️ 但须知悉：ag0 属**结构性不可交易** —— 1 手风险 24.89% 是合约乘数（15×）
+        与最小手数决定的，任何 <24.89% 的预算都会拦它；把预算抬到 25% 则等于
+        放弃风控。要让 ag0 在 1% 风险下可开 1 手，**需权益 ≈ 236 万**。
 
         止损距离优先用 ``decision.stop_price``（真实值）；缺失时按 ``risk_stop_atr_mult × atr``
         兜底（默认 2.5 = ATRTier.HIGH 最宽档，与生产 ``compute_stop`` 同参，保守侧）。
@@ -236,9 +259,10 @@ class PlanManager:
             )
         if m["capped_by"] == "risk_budget":
             log.warning(
-                "P0-4 风险预算拦截 symbol={} 1手风险={:.2%} 权益 > risk_per_trade={:.2%}"
-                "（止损距离={:.2f}）→ 不开仓",
-                symbol, m["risk_pct_1lot"] or 0.0, self._risk_per_trade, m["risk_dist"] or 0.0,
+                "P0-4 风险预算拦截 symbol={} 1手风险={:.2%} 权益 > 预算={:.2%}"
+                "（止损距离={:.2f}；需权益≥{:.0f} 才能开 1 手）→ 不开仓",
+                symbol, m["risk_pct_1lot"] or 0.0, m["risk_budget"], m["risk_dist"] or 0.0,
+                (m["risk_per_lot"] or 0.0) / m["risk_budget"] if m["risk_budget"] > 0 else 0.0,
             )
         if m["final_lots"] <= 0:
             return 0.0

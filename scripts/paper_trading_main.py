@@ -86,17 +86,28 @@ def _try_acquire_pid_lock(pid_path: Path) -> bool:
 
 
 def _max_position_pct(paper_cfg: Any) -> float:
-    """从风控配置读 ``max_position_pct``（P0-4 名义敞口硬顶，**仅用于告警**）。
+    """读**生效的** ``max_position_pct``（P0-4 名义敞口硬顶，**仅用于告警**）。
+
+    ⛔ 优先级必须是 ``risk_overrides`` > ``risk_config`` —— 生产 ``RiskGate``
+    吃的是 overrides（`configs/paper.yaml::risk_overrides.max_position_pct = 0.50`），
+    只从 risk_config 读会拿到 0.30，**告警判据比实际风控严格**（rb0 的 33.46%
+    在 0.50 口径下并未越界，却会被误报）。
 
     放在模块级而非 lambda 内：OmegaConf 只在 ``_load_paper_config`` 局部导入，
     直接在 lambda 里引用会 NameError。读取失败时保守回退 0.30（与 risk 配置同默认）。
     """
     try:
+        override = dict(paper_cfg.get("risk_overrides", {}) or {}).get("max_position_pct")
+        if override is not None:
+            return float(override)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
         from omegaconf import OmegaConf
 
         path = ROOT / str(paper_cfg.get("risk_config", "configs/risk/v4_atr.yaml"))
         return float(OmegaConf.load(path).get("max_position_pct", 0.30))
-    except Exception:
+    except Exception:  # noqa: BLE001
         return 0.30
 
 
@@ -224,6 +235,11 @@ def build_components_safe(paper_cfg: Any, offline: bool = False) -> dict[str, tu
             # ---- P0-4（2026-09-01）仓位粒度放大防护 ----
             size_by_risk=bool(paper_cfg.get("size_by_risk", False)),
             risk_per_trade=float(paper_cfg.get("risk_per_trade", 0.01)),
+            # D2-C（2026-09-01 主理人裁决）：按品种覆盖单笔风险预算
+            risk_per_trade_by_symbol={
+                str(k): float(v)
+                for k, v in dict(paper_cfg.get("risk_per_trade_by_symbol", {}) or {}).items()
+            },
             risk_stop_atr_mult=float(paper_cfg.get("risk_stop_atr_mult", 2.5)),
             max_position_pct=_max_position_pct(paper_cfg),
         ),
