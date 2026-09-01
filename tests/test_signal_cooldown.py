@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import date, datetime, time, timedelta
 
 import pandas as pd
@@ -105,7 +106,15 @@ def _paper_cfg() -> OmegaConf:
             },
             "holidays_2026": [],
             "risk_gate": {"cost_gate_enabled": True, "cost_gate_min_ratio": 2.0},
-            "signal_cooldown": {"enabled": True, "p_up_tol": 0.01, "exp_ret_tol": 0.001},
+            # 与 configs/paper.yaml 对齐的生产取值：TTL 30min / 当日最多重开 2 次 / 持久化开
+            "signal_cooldown": {
+                "enabled": True,
+                "p_up_tol": 0.01,
+                "exp_ret_tol": 0.001,
+                "ttl_minutes": 30,
+                "max_reentries_per_day": 2,
+                "persist": True,
+            },
         }
     )
 
@@ -162,6 +171,8 @@ def _scheduler(tmp_path, sig: SignalFrame | None) -> tuple[TradingScheduler, dic
     paper_cfg = _paper_cfg()
     paper_cfg.account_file = str(tmp_path / "account.json")
     paper_cfg.c0_daily_csv = str(tmp_path / "c0_daily.csv")
+    # P0-1：冷却状态落盘路径必须指向 tmp，否则单测会写脏生产 data/paper/cooldown.json
+    paper_cfg.cooldown_file = str(tmp_path / "cooldown.json")
     quotes = CooldownQuotes()
     signals = CooldownSignals(sig)
     risk_gate = _risk_gate()
@@ -231,7 +242,12 @@ def test_cooldown_allows_first_open(tmp_path):
     sched._process_symbol("rb0", now, _q(3038.0, now), {"rb0": 3038.0})
     assert abs(sched._broker.position("rb0")) > 0
     assert len(sched._all_trades) == 1
-    assert sched._last_sig_fp["rb0"] == (0.7, 0.5, "test")
+    # P0-1：指纹升级为 CooldownRecord（首开 → 重开计数 0，TTL 起算点 = 开仓时刻）
+    rec = sched._last_sig_fp["rb0"]
+    assert rec.fp == (0.7, 0.5, "test")
+    assert rec.opened_at == now
+    assert rec.day == "2026-08-24"
+    assert rec.reentries == 0
 
 
 # ---------------------------------------------------------------------------
@@ -251,7 +267,9 @@ def test_cooldown_blocks_reopen_on_unchanged_signal(tmp_path):
     sched._process_symbol("rb0", now + timedelta(minutes=1), _q(3038.0, now + timedelta(minutes=1)), {"rb0": 3038.0})
     assert sched._broker.position("rb0") == 0.0
     assert len(sched._all_trades) == 1  # 只有第 1 轮的开仓
-    assert sched._last_sig_fp["rb0"] == (0.7, 0.5, "test")  # 指纹未被覆盖
+    # TTL=30min > 1min → 仍拦截；指纹未被覆盖（开仓时刻仍是第 1 轮）
+    assert sched._last_sig_fp["rb0"].fp == (0.7, 0.5, "test")
+    assert sched._last_sig_fp["rb0"].opened_at == now
 
 
 # ---------------------------------------------------------------------------
@@ -288,7 +306,7 @@ def test_cooldown_allows_open_on_signal_change(tmp_path):
     ctx["signals"]._sig = _sig(p_up=0.55, exp_ret=0.3)
     sched._process_symbol("rb0", now + timedelta(minutes=1), _q(3038.0, now + timedelta(minutes=1)), {"rb0": 3038.0})
     assert abs(sched._broker.position("rb0")) > 0
-    assert sched._last_sig_fp["rb0"] == (0.55, 0.3, "test")
+    assert sched._last_sig_fp["rb0"].fp == (0.55, 0.3, "test")
 
 
 # ---------------------------------------------------------------------------
@@ -306,7 +324,7 @@ def test_cooldown_treats_source_change_as_change(tmp_path):
     ctx["signals"]._sig = _sig(p_up=0.7, exp_ret=0.5, source="technical")
     sched._process_symbol("rb0", now + timedelta(minutes=1), _q(3038.0, now + timedelta(minutes=1)), {"rb0": 3038.0})
     assert abs(sched._broker.position("rb0")) > 0
-    assert sched._last_sig_fp["rb0"] == (0.7, 0.5, "technical")
+    assert sched._last_sig_fp["rb0"].fp == (0.7, 0.5, "technical")
 
 
 # ---------------------------------------------------------------------------
@@ -325,3 +343,161 @@ def test_cooldown_within_tolerance_still_blocks(tmp_path):
     sched._process_symbol("rb0", now + timedelta(minutes=1), _q(3038.0, now + timedelta(minutes=1)), {"rb0": 3038.0})
     assert sched._broker.position("rb0") == 0.0
     assert len(sched._all_trades) == 1
+
+
+# ---------------------------------------------------------------------------
+# P0-1（2026-09-01）指纹生命周期：TTL / 当日重开预算 / 跨窗口持久化
+#
+# ⚠️ 时间选取：_DAY = [09:00-10:15, 10:30-11:30, 13:30-15:00]，TTL=30min。
+#    所有 tick 必须落在交易时段内，否则 is_tradable 早返回 → 断言假通过。
+# ---------------------------------------------------------------------------
+
+def _tick_at(sched, when: datetime):
+    return sched._process_symbol("rb0", when, _q(3038.0, when), {"rb0": 3038.0})
+
+
+def test_p01_ttl_expiry_allows_reopen(tmp_path):
+    """⑦ TTL 到期 → 放行重开，且重开计数 +1。
+
+    这是 P0-1 的核心：修复前冷却「永不过期」，信号缓存日内恒定导致平仓后当日停摆
+    （取证：rb0 08-31 停摆 1.94h / 09-01 停摆 2.36h）。
+    """
+    sched, _ = _scheduler(tmp_path, _sig())
+    t0 = datetime(2026, 8, 24, 9, 10)
+    _tick_at(sched, t0)
+    assert abs(sched._broker.position("rb0")) > 0
+    assert sched._last_sig_fp["rb0"].reentries == 0
+    sched._broker.execute_plan(_flat_plan(), _q(3038.0, t0), t0)
+
+    # +31min > TTL 30min → 冷却到期；当日重开计数 0 < 上限 2 → 放行
+    t1 = t0 + timedelta(minutes=31)
+    _tick_at(sched, t1)
+    assert abs(sched._broker.position("rb0")) > 0, "TTL 到期后应允许重开，否则退化为当日停摆"
+    rec = sched._last_sig_fp["rb0"]
+    assert rec.opened_at == t1
+    assert rec.reentries == 1
+    # 注意：直接调 _broker.execute_plan 的强制平仓不经过 _record_trade，
+    # 故 _all_trades 只统计「经 _process_symbol 的开仓」= 2 条。
+    assert len(sched._all_trades) == 2
+
+
+def test_p01_daily_reentry_budget_blocks_after_cap(tmp_path):
+    """⑧ 当日重开预算耗尽 → 拦截（reason=signal_cooldown_budget）。
+
+    只加 TTL 会让 60s 开-平-开-平循环以 TTL 为周期复活；预算是该循环的硬顶。
+    max_reentries_per_day=2 → 当日最多 3 次开仓（首开 + 2 次重开）。
+    """
+    sched, _ = _scheduler(tmp_path, _sig())
+    t0 = datetime(2026, 8, 24, 9, 10)
+    # 首开（reentries=0）→ 重开 1 → 重开 2，每次间隔 31min > TTL
+    stamps = [t0, t0 + timedelta(minutes=31), t0 + timedelta(minutes=62)]
+    for i, ts in enumerate(stamps):
+        _tick_at(sched, ts)
+        assert abs(sched._broker.position("rb0")) > 0, f"第 {i + 1} 次开仓应放行"
+        assert sched._last_sig_fp["rb0"].reentries == i
+        sched._broker.execute_plan(_flat_plan(), _q(3038.0, ts), ts)
+
+    # 第 4 次：TTL 已到期（+31min），但当日重开预算 2/2 耗尽 → 拦截
+    t3 = t0 + timedelta(minutes=93)
+    _tick_at(sched, t3)
+    assert sched._broker.position("rb0") == 0.0, "预算耗尽后不得再重开"
+    assert len(sched._all_trades) == 3  # 3 次经 _process_symbol 的开仓
+    # 拦截原因须与 TTL 未到期区分开（运维要能分辨「等一等」和「今天到此为止」）
+    assert sched._block_reasons[date(2026, 8, 24)].get("signal_cooldown_budget") == 1
+
+
+def test_p01_reentry_budget_resets_on_new_trading_day(tmp_path):
+    """⑨ 换交易日 → 重开计数归零（新交易日 = 新交易机会）。"""
+    sched, _ = _scheduler(tmp_path, _sig())
+    t0 = datetime(2026, 8, 24, 9, 10)
+    _tick_at(sched, t0)
+    sched._broker.execute_plan(_flat_plan(), _q(3038.0, t0), t0)
+    t1 = t0 + timedelta(minutes=31)
+    _tick_at(sched, t1)
+    assert sched._last_sig_fp["rb0"].reentries == 1
+    assert sched._last_sig_fp["rb0"].day == "2026-08-24"
+    sched._broker.execute_plan(_flat_plan(), _q(3038.0, t1), t1)
+    assert sched._broker.position("rb0") == 0.0
+
+    # 次一交易日同信号 → 计数归零
+    t2 = datetime(2026, 8, 25, 9, 10)
+    _tick_at(sched, t2)
+    rec = sched._last_sig_fp["rb0"]
+    assert rec.day == "2026-08-25"
+    assert rec.reentries == 0
+
+
+def test_p01_state_survives_restart(tmp_path):
+    """⑩ 跨窗口重启（08:55/13:25/20:55）不丢失冷却状态。
+
+    修复前指纹仅存内存，一天三次重启 = 三次「免费重开」，TTL 形同虚设。
+    """
+    sched, _ = _scheduler(tmp_path, _sig())
+    t0 = datetime(2026, 8, 24, 9, 10)
+    _tick_at(sched, t0)
+    assert abs(sched._broker.position("rb0")) > 0
+    cooldown_file = tmp_path / "cooldown.json"
+    assert cooldown_file.exists(), "开仓后必须立即原子落盘冷却状态"
+
+    # 模拟重启：新进程从同一文件恢复
+    sched2, _ = _scheduler(tmp_path, _sig())
+    sched2._broker.execute_plan(_flat_plan(), _q(3038.0, t0), t0)  # 对齐：空仓
+    rec = sched2._last_sig_fp["rb0"]
+    assert rec.fp == (0.7, 0.5, "test")
+    assert rec.day == "2026-08-24"
+    assert rec.reentries == 0
+    assert rec.opened_at == t0
+
+    # TTL 起算点必须沿用恢复的开仓时刻（+10min < 30min → 仍拦截）
+    _tick_at(sched2, t0 + timedelta(minutes=10))
+    assert sched2._broker.position("rb0") == 0.0, "重启不得重置冷却"
+
+
+def test_p01_corrupt_state_file_degrades_gracefully(tmp_path):
+    """⑪ 冷却状态文件损坏 → 备份 + 降级为空状态，绝不启动失败。"""
+    (tmp_path / "cooldown.json").write_text("{ 这不是 JSON", encoding="utf-8")
+    sched, _ = _scheduler(tmp_path, _sig())  # 不得抛异常
+    assert sched._last_sig_fp == {}
+    backups = list(tmp_path.glob("cooldown.json.corrupt.*"))
+    assert len(backups) == 1, "损坏文件须留证（与 broker 快照同款处理）"
+
+
+def test_p01_cooldown_fields_in_decision_trace(tmp_path):
+    """⑫ 决策 trace 携带冷却观测字段（回答「还要等多久 / 今天还能开几次」）。
+
+    2026-09-01 rb0 停摆 2h23m，只有 reason=signal_cooldown 无法判断
+    是「等 TTL」还是「已锁死」，故把剩余分钟与已重开次数一并落盘。
+    """
+    sched, _ = _scheduler(tmp_path, _sig())
+    t0 = datetime(2026, 8, 24, 9, 10)
+    _tick_at(sched, t0)
+    sched._broker.execute_plan(_flat_plan(), _q(3038.0, t0), t0)
+
+    t1 = t0 + timedelta(minutes=10)  # 仍在冷却中
+    fields = sched._cooldown_trace_fields("rb0", t1, date(2026, 8, 24))
+    assert fields["cooldown_remaining_min"] == pytest.approx(20.0, abs=0.01)
+    assert fields["cooldown_reentries"] == 0
+
+    # 冷却到期后剩余为 0（不出现负值，下游绘图/告警不炸）
+    assert sched._cooldown_trace_fields("rb0", t0 + timedelta(hours=2), date(2026, 8, 24))[
+        "cooldown_remaining_min"
+    ] == 0.0
+    # 无冷却记录的品种 → None（而非 0，语义区分「无冷却」与「已到期」）
+    assert sched._cooldown_trace_fields("ag0", t1, date(2026, 8, 24)) == {
+        "cooldown_remaining_min": None,
+        "cooldown_reentries": None,
+    }
+
+
+def test_p01_persisted_payload_is_json_roundtrip(tmp_path):
+    """⑬ 落盘格式可被本模块自己读回（schema 自洽，且 fp 三元组顺序不丢）。"""
+    sched, _ = _scheduler(tmp_path, _sig())
+    t0 = datetime(2026, 8, 24, 9, 10)
+    _tick_at(sched, t0)
+    raw = json.loads((tmp_path / "cooldown.json").read_text(encoding="utf-8"))
+    assert raw["schema_version"] == "1.0"
+    rec = raw["records"]["rb0"]
+    assert rec["fp"] == [0.7, 0.5, "test"]
+    assert rec["day"] == "2026-08-24"
+    assert rec["reentries"] == 0
+    assert datetime.fromisoformat(rec["opened_at"]) == t0

@@ -31,6 +31,17 @@
 退出码
 ------
   0 正常完成 / 非交易日安全返回 | 1 融合或 p22 失败 | 2 目录不存在 | 3 数据源拉取失败（--trading-day）
+  4 **P1-2 盘中禁写**：K 线融合已成功入湖，仅信号缓存重建被跳过/拦截（非融合失败）
+
+⚠️ P1-2 交易时段禁写（2026-09-01）
+-------------------------------
+K 线融合与信号缓存重建是**两件风险等级不同的事**：融合写入的是尚未开盘的当日数据，
+盘中做也无妨；而重写生产信号缓存会让「模拟盘进程已加载的旧信号」与「盘上重写后的
+新信号」并存，下一次窗口重启（13:25 / 20:55）将静默翻转全部开仓与成本门禁结论。
+
+故本脚本在调用 p22 前做预检：交易时段内**跳过** p22 并返回 exit 4（K 线融合结果
+保留），绝不因信号缓存被拦而把整条数据链路报成失败。p22 内部硬护栏按**落盘时刻**
+二次裁定，覆盖「盘后启动、重训超时、落盘时已开盘」的越界场景。
 
 ``--trading-day`` 体检三重判定（任一不通过 → exit 3）
 ---------------------------------------------------
@@ -59,6 +70,7 @@ if TYPE_CHECKING:  # 仅类型检查期引入，避免运行期硬依赖 pandas�
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 P6_4 = PROJECT_ROOT / "scripts" / "p6_4_fill_gaps.py"
 P22 = PROJECT_ROOT / "scripts" / "p22_tail_ext.py"
+TAIL_EXT_CACHE = PROJECT_ROOT / "artifacts" / "signals_cache18_grouped_v8_tail_ext.parquet"
 
 # p6_4_append_20260824 已验证可用的列子集（pandadata 返回的超集含这些，安全降维）
 SAFE_COLS = [
@@ -255,6 +267,44 @@ def _print_pull_failure_banner(d: Path, expect: int) -> None:
     print("=" * 66)
 
 
+def _p22_rewrite_blocked(now=None) -> tuple[bool, str]:
+    """P1-2 预检：返回 ``(是否被禁, 横幅文本)``；未被禁时横幅为空串。
+
+    背景：本脚本在 K 线融合后**无条件**调用 ``p22_tail_ext --force`` 重建生产信号缓存。
+    20:30 夜盘自动化 = 18 品种拉取 + 约 8 分钟全量重训，而 **rb0 夜盘 21:00 开盘**、
+    模拟盘 **20:55** 已启动 —— 只要链路稍有超时，落盘就跨入夜盘。2026-09-01 09:10:12
+    的盘中重写（rb0 p_up 0.8667 → 0.999999）即同构事故。
+
+    这里的预检是**提前止损**（避免白跑重训），权威闸门仍是 ``p22_tail_ext.merge_tail_ext``
+    内的硬护栏——后者按**落盘时刻**裁定，能拦住「盘后启动、重训超时、落盘时已开盘」。
+
+    ⚠️ 延迟导入：本脚本刻意不在运行期硬依赖 pandas（见文件头 TYPE_CHECKING 说明），
+    而 ``hexbroker.market.session`` → ``data.calendar`` 会带入 pandas。
+    """
+    try:
+        from hexbroker.market.session import (
+            format_cache_rewrite_block_banner,
+            is_cache_rewrite_blocked,
+        )
+    except Exception as exc:  # noqa: BLE001
+        # 守卫不可用时按**放行**处理并显式告警：本预检只是提前止损，p22 内部硬护栏
+        # 仍是权威闸门；若连 pandas 都不可用，p22 本身根本起不来，不会失去保护。
+        print(f"[WARN] P1-2 禁写预检不可用（{type(exc).__name__}: {exc}）——"
+              f"跳过预检，由 p22 内部硬护栏兜底")
+        return False, ""
+    ts = now if now is not None else datetime.now()
+    if not is_cache_rewrite_blocked(ts):
+        return False, ""
+    return True, format_cache_rewrite_block_banner(
+        ts,
+        cache_path=str(TAIL_EXT_CACHE),
+        extra="K 线融合【已完成并入湖】，仅信号缓存重建被跳过（P1-2）。"
+              "请在允许窗口（11:30–13:20 / 15:00–20:50 / 02:30–08:50）内"
+              "用 --skip-p22 重跑本脚本的融合部分、再单独跑 p22；"
+              "确需盘中重建则人工加 --force-in-session 并同步重启模拟盘进程。",
+    )
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="P步-A/B 固化应用器")
     ap.add_argument("--dir", required=True, help="含 <sym0>.json 的 persisted 目录")
@@ -355,9 +405,23 @@ def main() -> int:
         print("[SKIP] 无成功融合的品种，跳过 p22 重建")
         return 1 if fail else 0
 
+    # ---- P1-2 预检：交易时段禁止重写生产信号缓存 ----
+    blocked, banner = _p22_rewrite_blocked()
+    if blocked:
+        print("\n" + banner)
+        print("[SKIP] 信号缓存重建已跳过（P1-2 盘中禁写）；K 线融合不受影响，已入湖")
+        return 4
+
     print("\n[P22] 重建信号缓存尾折（p22_tail_ext --force，全量重训约 8 分钟）...")
     r = subprocess.run([py, str(P22), "--force"], cwd=str(PROJECT_ROOT), capture_output=True, text=True)
     if r.returncode != 0:
+        # exit 2 = 被 p22 内部硬护栏拦下（多数为「盘后启动、重训超时、落盘时已开盘」）。
+        # 此时 K 线融合同样已成功，故与预检拦截同口径返回 4，不得报成融合失败。
+        if r.returncode == 2:
+            print(r.stdout[-2000:])
+            print("[SKIP] 信号缓存重建被 p22 硬护栏拦截（落盘时刻已处于交易时段）；"
+                  "K 线融合不受影响，已入湖")
+            return 4
         print(r.stdout[-2000:])
         print(r.stderr[-2000:])
         print("[FAIL] p22_tail_ext 重建失败")

@@ -12,6 +12,8 @@
 
 from __future__ import annotations
 
+import json
+import math
 import threading
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -20,11 +22,36 @@ from typing import Any, Optional
 import numpy as np
 import pandas as pd
 
-from ..utils.logging import get_logger
+from ..utils.logging import get_logger, log_structured
 from .trade_stats import analyze_trades_log, daily_stats_alerts, summarize_daily
-from .types import NewsItem, Quote, SignalFrame, TradeEvent
+from .types import (
+    EVT_DECISION_TRACE,
+    AccountSnapshot,
+    CooldownRecord,
+    NewsItem,
+    PositionCtx,
+    Quote,
+    SignalFrame,
+    TradeEvent,
+)
 
 log = get_logger("PAPER")
+
+
+def _num(value: Any, digits: int = 6) -> Optional[float]:
+    """浮点安全取值：None / 非数值 / NaN / Inf 一律转 ``None``。
+
+    P1-1 trace 必须产出**合法 JSON**：``json.dumps`` 对 NaN/Infinity 会写出
+    ``NaN``/``Infinity`` 字面量（非 JSON 标准），下游 ``json.loads`` 虽能容错
+    但其它解析器（以及人工 grep 后的管道处理）会炸。故在此统一归一。
+    """
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(v):
+        return None
+    return round(v, digits)
 
 
 class TradingScheduler:
@@ -116,12 +143,30 @@ class TradingScheduler:
                     )
 
         # ---- P0-2 信号无变化冷却（消除 60s 开-平-开-平循环） ----
+        # ---- P0-1（2026-09-01）指纹生命周期：TTL + 当日重开预算 + 跨窗口持久化 ----
+        # 背景取证：08-31 夜盘 rb0 停摆 1.94h（117 次拦截）、09-01 日盘停摆 2.36h（127 次）。
+        # 根因：信号缓存日内恒定 → 指纹 (p_up, exp_ret, source) 永不变化 → 一旦平仓，
+        # 冷却变成「当日永不再开」。故冷却必须由**时间**而非仅「信号是否变化」解除。
         sc_cfg = cfg.get("signal_cooldown", {}) if hasattr(cfg, "get") else {}
         self._signal_cooldown_enabled = bool(sc_cfg.get("enabled", True))
         self._signal_cooldown_p_up_tol = float(sc_cfg.get("p_up_tol", 0.01))
         self._signal_cooldown_exp_ret_tol = float(sc_cfg.get("exp_ret_tol", 0.001))
-        # 每品种上一轮「实际开仓」的信号指纹 (p_up, exp_ret, source)；与 day 无关
-        self._last_sig_fp: dict[str, tuple[float, float, str]] = {}
+        # ⛔ TTL 不可为 0：那等于退回 P0-2 之前的 60s 开-平-开-平循环。
+        # 30 分钟 ≈ 日内 2~4 次重开机会（视剩余交易时长），足以跟上趋势又压住抖动。
+        self._signal_cooldown_ttl_min = float(sc_cfg.get("ttl_minutes", 30.0))
+        # 当日同一指纹最多重开次数（TTL 到期后的第二道闸，防无限循环）；0/负 = 不限制。
+        self._signal_cooldown_max_reentries = int(sc_cfg.get("max_reentries_per_day", 3))
+        self._signal_cooldown_persist = bool(sc_cfg.get("persist", True))
+        # 每品种上一轮「实际开仓」的冷却记录（指纹 + 开仓时刻 + 交易日 + 重开计数）
+        self._last_sig_fp: dict[str, CooldownRecord] = {}
+        self._cooldown_file = Path(cfg.get("cooldown_file", "data/paper/cooldown.json"))
+        # 三窗口重启（08:55 / 13:25 / 20:55）续跑：重启本身**不重置**冷却，否则
+        # 一天三次重启 = 三次免费重开，TTL 形同虚设。
+        self._load_cooldown_state()
+
+        # ---- P1-1 决策 trace 去重指纹：(reason, target_qty, position) ----
+        # 仅存内存，三窗口重启后自然重打基线（刻意行为，见 _emit_decision_trace 文档）。
+        self._trace_fp: dict[str, tuple] = {}
 
         # ---- P0-3 主源信号陈旧运行时告警（每品种每交易日仅一次，避免 60s 刷屏） ----
         self._stale_warn: dict[tuple[str, Optional[date]], bool] = {}
@@ -232,6 +277,174 @@ class TradingScheduler:
             log.exception("治理降级评估异常（已隔离，不影响交易 tick）")
 
     # ------------------------------------------------------------------
+    # P1-1 决策 trace（归因地基）
+    # ------------------------------------------------------------------
+    def _emit_decision_trace(
+        self,
+        symbol: str,
+        now: datetime,
+        day: date,
+        sig: SignalFrame,
+        quote: Quote,
+        acct: AccountSnapshot,
+        pos_ctx: PositionCtx,
+        decision: Any,
+        plan: Any,
+        atr: float,
+        ma_price: Optional[float],
+        mode: str = "trade",
+    ) -> None:
+        """落一条结构化决策快照到审计流（与 TRADE/PLAN 同一 sink）。
+
+        背景（2026-09-01 实证）：09:05:57 rb0 开多、09:06:58 即被平，日志里只有
+        ``TRADE|`` 两行，**完全看不出是谁下的平仓令**——``decision.reason`` 此前
+        只在「成本门禁告警」和「冷却拦截」两处被打印，风控驱动的平仓零留痕。
+        离线复现又与实盘矛盾 → 归因无解。本方法即补这块地基。
+
+        触发条件（满足其一即写）：
+          ① ``decision.reason != "rl_intent"`` —— 走了非默认路径（signal_cooldown /
+             halt_no_open / min_hold / cost_gate_reject / hard_stop / S1–S5 /
+             回撤 R1–R4 / 预算 / no_intent …）；
+          ② ``plan.target_qty`` 与当前持仓不一致 —— 本轮将产生真实委托。
+
+        去重（稳态压缩）：指纹 = ``(reason, target_qty, position)``，与本品种上一条
+        已写出的指纹相同则跳过。目的：60s tick 下的稳态重复（今日 127 次
+        ``signal_cooldown`` 拦截）压缩成 1 条；而**任何跃迁都不会被吞**——指纹一变
+        必写，所以「第一次出现某原因」的时刻永远在日志里。
+
+        ⚠️ 指纹仅存内存：三窗口重启（08:55 / 13:25 / 20:55）后会各重打一条基线，
+        这是刻意的——正好标记新进程起点，也便于对齐「重启丢失冷却指纹」类缺陷。
+        """
+        reason = str(getattr(decision, "reason", "") or "no_intent")
+        target_qty = _num(getattr(plan, "target_qty", 0.0), 6) or 0.0
+        position = _num(getattr(pos_ctx, "position", 0.0), 6) or 0.0
+        changed = abs(target_qty - position) > 1e-9
+
+        if reason == "rl_intent" and not changed:
+            return  # 稳态默认路径：无信息量，不写
+
+        fp = (reason, round(target_qty, 6), round(position, 6))
+        if self._trace_fp.get(symbol) == fp:
+            return
+
+        # 故障隔离：trace 是**观测设施**，绝不允许拖垮交易 tick（与 _evaluate_degradation
+        # 同款护栏）。失败按 ERROR 落一笔并继续撮合；且指纹在写出成功后才更新，
+        # 故失败会**每轮重试**——故障显性，不会静默丢失一条决策。
+        try:
+            payload = self._build_trace_payload(
+                symbol=symbol, now=now, day=day, sig=sig, quote=quote, acct=acct,
+                pos_ctx=pos_ctx, decision=decision, plan=plan, atr=atr,
+                ma_price=ma_price, mode=mode, reason=reason, target_qty=target_qty,
+                position=position, changed=changed, halt=bool(self._halt),
+            )
+            # P0-1：冷却状态随 trace 一起落盘。只有 reason 时看不出「还要等多久」——
+            # 今日 rb0 停摆 2h23m，光看 reason=signal_cooldown 无法判断是等 TTL 还是已锁死。
+            payload.update(self._cooldown_trace_fields(symbol, now, day))
+            log_structured(EVT_DECISION_TRACE, payload)
+        except Exception:
+            log.exception("决策 trace 落盘异常（已隔离，不影响交易 tick） symbol={}", symbol)
+            return
+        self._trace_fp[symbol] = fp
+
+    @staticmethod
+    def _build_trace_payload(
+        *,
+        symbol: str,
+        now: datetime,
+        day: date,
+        sig: Any,
+        quote: Any,
+        acct: Any,
+        pos_ctx: Any,
+        decision: Any,
+        plan: Any,
+        atr: float,
+        ma_price: Optional[float],
+        mode: str,
+        reason: str,
+        target_qty: float,
+        position: float,
+        changed: bool,
+        halt: bool,
+    ) -> dict[str, Any]:
+        """构造 trace payload（纯函数：不读 self，便于单测与故障隔离）。"""
+        # ⚠️ 两个枚举基类不同，序列化方式必须分开：
+        #   RecoveryStage 是 StrEnum（value="R0".."R4"，本身可读）→ 取 value；
+        #   ATRTier 是 IntEnum（value=0/1/2，裸数字不可读）→ 取 name（"HIGH"/"MID"/"LOW"）。
+        # ⚠️ 且**绝不可写 ``x or ""``**：ATRTier.HIGH.value == 0 是 falsy，会被吞成空串，
+        #    恰好把最常见也最保守的那一档记录成空白（初版实现踩过）。
+        stage_raw = getattr(decision, "stage", None)
+        tier_raw = getattr(decision, "atr_tier", None)
+        stage_val = getattr(stage_raw, "value", stage_raw)
+        tier_val = getattr(tier_raw, "name", tier_raw)
+        return {
+            "ts": now.isoformat(timespec="seconds"),
+            "symbol": symbol,
+            "day": day.isoformat(),
+            "mode": mode,
+            # ---- 决策本体 ----
+            "reason": reason,
+            "liquidate": bool(getattr(decision, "liquidate", False)),
+            "stage": "" if stage_val is None else str(stage_val),
+            "atr_tier": "" if tier_val is None else str(tier_val),
+            "sell_signals": [
+                str(getattr(s, "value", s)) for s in (getattr(decision, "sell_signals", None) or [])
+            ],
+            "kelly_fraction": _num(getattr(decision, "kelly_fraction", 0.0), 6),
+            # ---- 仓位 ----
+            "target_position": _num(getattr(decision, "target_position", 0.0), 6),
+            "target_qty": target_qty,
+            "position": position,
+            "position_changed": changed,
+            "stop_plan": _num(getattr(plan, "stop_price", None), 4),
+            "stop_decision": _num(getattr(decision, "stop_price", None), 4),
+            "tp": _num(getattr(plan, "take_profit", None), 4),
+            # ---- 价格 / 指标（口径实录，P0-2/P0-3 复权 vs 名义价取证用） ----
+            "price": _num(getattr(quote, "price", None), 4),
+            "entry_price": _num(getattr(pos_ctx, "entry_price", None), 4),
+            "atr": _num(atr, 4),
+            "ma_price": _num(ma_price, 4),
+            "bars_in_position": int(getattr(pos_ctx, "bars_in_position", 0) or 0),
+            # ---- 信号 ----
+            "p_up": _num(getattr(sig, "p_up", None), 6),
+            "exp_ret": _num(getattr(sig, "exp_ret", None), 6),
+            "sig_source": str(getattr(sig, "source", "") or ""),
+            "sig_effective": bool(getattr(sig, "is_effective", False)),
+            # ---- 账户 ----
+            "equity": _num(getattr(acct, "equity", None), 2),
+            "drawdown": _num(getattr(acct, "drawdown", None), 6),
+            "peak_equity": _num(getattr(acct, "peak_equity", None), 2),
+            "cash": _num(getattr(acct, "cash", None), 2),
+            # ---- 全局态 ----
+            "halt": bool(halt),
+        }
+
+    def _cooldown_trace_fields(self, symbol: str, now: datetime, day: Optional[date]) -> dict[str, Any]:
+        """P0-1：冷却状态的两位观测字段（供决策 trace 携带）。
+
+        返回 ``cooldown_remaining_min``（距可重开还剩几分钟，0 = 已到期/不在冷却）
+        与 ``cooldown_reentries``（当日该指纹已重开次数）。无冷却记录时两者均为 ``None``。
+
+        属性一律 ``getattr`` 取默认值：本方法会被 ``_risk_manage_only`` 路径调用，
+        而该路径存在用 ``SimpleNamespace`` 假 self 绑定的单测（不构造完整 Scheduler），
+        硬属性访问会抛 AttributeError 并被 emitter 的故障隔离吞掉 → trace 静默丢失。
+        """
+        rec = getattr(self, "_last_sig_fp", {}).get(symbol)
+        if rec is None:
+            return {"cooldown_remaining_min": None, "cooldown_reentries": None}
+        ttl = float(getattr(self, "_signal_cooldown_ttl_min", 0.0) or 0.0)
+        remaining_min = (rec.opened_at + timedelta(minutes=ttl) - now).total_seconds() / 60.0
+        same_day = (
+            self._same_trading_day(rec.day, day)
+            if hasattr(self, "_same_trading_day")
+            else True
+        )
+        return {
+            "cooldown_remaining_min": _num(max(0.0, remaining_min), 2),
+            "cooldown_reentries": rec.reentries if same_day else 0,
+        }
+
+    # ------------------------------------------------------------------
     # 单品种管道：quote → signal → risk → plan → execute → log
     # ------------------------------------------------------------------
     def _process_symbol(self, symbol: str, now: datetime, quote: Optional[Quote], marks: dict[str, float]) -> None:
@@ -287,9 +500,17 @@ class TradingScheduler:
         returns, volumes, ma_price = self._aux_from_bars(bars)
         decision = self._risk_gate.evaluate(sig, quote, acct, pos_ctx, returns, volumes, ma_price)
 
-        # ---- P0-2 信号无变化冷却（消除 60s 开-平-开-平循环） ----
+        # ---- P0-2 信号无变化冷却 + P0-1 指纹生命周期（消除 60s 开-平-开-平循环） ----
         # 仅拦截「当前无持仓 + 风控意图开仓 + 信号指纹与上一轮实际开仓相同」；
         # 已有持仓的风控动作（止损/止盈/S1-S5 平仓）永远正常走 evaluate，不受影响。
+        #
+        # P0-1 两道闸（缺一不可）：
+        #   ① TTL：距上次开仓不足 ttl_minutes → 拦截。到期即放行，避免「信号日内恒定 →
+        #      平仓后当日永不再开」的停摆（取证：rb0 08-31 停摆 1.94h / 09-01 停摆 2.36h）。
+        #   ② 当日重开预算：TTL 到期但同交易日重开次数已达上限 → 拦截。
+        #      只加 TTL 会让 60s 循环以 TTL 为周期复活，预算是该循环的硬顶。
+        # ⛔ 不得改为「平仓即清指纹」：历史日志中 open→60s→close 反复出现
+        #      （08-24 14:17/14:18、08-31 21:01/21:02、09-01 09:05/09:06），清指纹会直接复活该循环。
         if (
             self._signal_cooldown_enabled
             and abs(pos_ctx.position) < 1e-12
@@ -297,13 +518,29 @@ class TradingScheduler:
         ):
             fp = self._signal_fingerprint(sig)
             prev = self._last_sig_fp.get(symbol)
-            if prev is not None and self._signal_fp_same(prev, fp):
-                log.info(
-                    "品种 {} 信号未变化（p_up={:.4f} exp_ret={:.4f} src={}），冷却拦截重复开仓",
-                    symbol, sig.p_up, sig.exp_ret, sig.source,
-                )
-                decision.target_position = 0.0
-                decision.reason = "signal_cooldown"
+            if prev is not None and self._signal_fp_same(prev.fp, fp):
+                elapsed_min = (now - prev.opened_at).total_seconds() / 60.0
+                reentries = prev.reentries if self._same_trading_day(prev.day, day) else 0
+                if elapsed_min < self._signal_cooldown_ttl_min:
+                    log.info(
+                        "品种 {} 信号未变化（p_up={:.4f} exp_ret={:.4f} src={}），冷却拦截："
+                        "距上次开仓 {:.1f}min < TTL {:.0f}min（剩余 {:.1f}min）",
+                        symbol, sig.p_up, sig.exp_ret, sig.source,
+                        elapsed_min, self._signal_cooldown_ttl_min,
+                        self._signal_cooldown_ttl_min - elapsed_min,
+                    )
+                    decision.target_position = 0.0
+                    decision.reason = "signal_cooldown"
+                elif (
+                    self._signal_cooldown_max_reentries > 0
+                    and reentries >= self._signal_cooldown_max_reentries
+                ):
+                    log.info(
+                        "品种 {} 冷却已到期但当日重开预算耗尽（{}/{}，交易日 {}），拦截重开",
+                        symbol, reentries, self._signal_cooldown_max_reentries, day,
+                    )
+                    decision.target_position = 0.0
+                    decision.reason = "signal_cooldown_budget"
 
         # ---- P0-2 熔断态：停止开仓（防御性） ----
         # HALT 期间禁止新开仓；已有持仓的风控平仓（止损/止盈/S1-S5）仍按有效报价执行，
@@ -349,17 +586,41 @@ class TradingScheduler:
         # ---- 计划 ----
         plan = self._planner.update_from_signal(sig, decision, quote=quote, equity=acct.equity)
 
+        # ---- P1-1 决策 trace（在撮合前落盘，冻结"决策当下"的全部上下文）----
+        # 位置刻意选在 update_from_signal 之后、execute_plan 之前：既含风控原始决策
+        # （decision）也含换算后的手数（plan.target_qty），且不受撮合结果影响。
+        self._emit_decision_trace(
+            symbol, now, day, sig, quote, acct, pos_ctx,
+            decision, plan, atr, ma_price, mode=mode,
+        )
+
         # ---- 撮合 ----
         event = self._broker.execute_plan(plan, quote, now)
         if event is not None:
             self._record_trade(event, day)
             # P0-2：仅在实际开仓时更新指纹（预算拒绝/冷却拦截不更新 → 下次同信号仍可重试或继续拦截）
+            # P0-1：指纹升级为 CooldownRecord —— 记录开仓时刻（TTL 起算点）、交易日标签、
+            #       当日重开计数，并立即原子落盘（三窗口重启不丢状态）。
             if (
                 self._signal_cooldown_enabled
                 and event.is_open
                 and abs(pos_ctx.position) < 1e-12
             ):
-                self._last_sig_fp[symbol] = self._signal_fingerprint(sig)
+                prev = self._last_sig_fp.get(symbol)
+                new_fp = self._signal_fingerprint(sig)
+                # 重开计数：指纹**且**交易日都相同才累加；换信号或换交易日 → 归零（新交易机会）
+                carry = (
+                    prev is not None
+                    and self._signal_fp_same(prev.fp, new_fp)
+                    and self._same_trading_day(prev.day, day)
+                )
+                self._last_sig_fp[symbol] = CooldownRecord(
+                    fp=new_fp,
+                    opened_at=now,
+                    day=day.isoformat() if day is not None else "",
+                    reentries=(prev.reentries + 1) if carry else 0,
+                )
+                self._save_cooldown_state()
 
     # ------------------------------------------------------------------
     # accumulate 模式（c0 决策，§8.1）
@@ -453,6 +714,12 @@ class TradingScheduler:
         _, _, ma_price = self._aux_from_bars(bars)
         decision = self._risk_gate.evaluate(sig, quote, acct, pos_ctx, ma_price=ma_price)
         plan = self._planner.update_from_signal(sig, decision, quote=quote, equity=acct.equity)
+        # P1-1 决策 trace：仅风控路径同样留痕（c0 accumulate 模式有持仓时走这里）。
+        # 注意本路径 recent_returns/recent_volumes 为 None（S2 量价背离不参与）。
+        self._emit_decision_trace(
+            symbol, now, day, sig, quote, acct, pos_ctx,
+            decision, plan, atr, ma_price, mode="risk_only",
+        )
         event = self._broker.execute_plan(plan, quote, now)
         if event is not None:
             self._record_trade(event, day)
@@ -654,6 +921,109 @@ class TradingScheduler:
         )
 
     # ------------------------------------------------------------------
+    # P0-1 冷却指纹生命周期（TTL / 当日重开预算 / 跨窗口持久化）
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _same_trading_day(stored_day: str, day: Optional[date]) -> bool:
+        """持久化交易日标签与当前交易日标签是否同一交易日。
+
+        ⚠️ 必须用**交易日标签**（``TradingSession.day_label``）而非自然日：夜盘 21:00 之后
+        归属下一交易日，用自然日会把「夜盘 → 日盘」误判成两个交易日，导致当日重开预算被
+        错误重置（08-31 21:01 与 09-01 09:05 在交易日口径下**同属 09-01**）。
+
+        任一侧缺失（历史文件无 day 字段 / ``day_label`` 返回 None）时保守判为「同一日」，
+        即**不**重置重开预算——宁可少开，不可多开。
+        """
+        cur = day.isoformat() if day is not None else ""
+        if not stored_day or not cur:
+            return True
+        return stored_day == cur
+
+    def _save_cooldown_state(self) -> None:
+        """P0-1：原子落盘冷却状态（跨三窗口重启不丢失指纹 / 重开计数）。
+
+        故障隔离：落盘失败只告警，绝不中断交易 tick——冷却是节奏控制，不是账本，
+        其丢失的最坏后果是可容忍的一次重复开仓，而中断 tick 的后果是当轮全品种停摆。
+        """
+        if not self._signal_cooldown_persist:
+            return
+        try:
+            payload = {
+                "schema_version": "1.0",
+                "saved_at": datetime.now().isoformat(timespec="seconds"),
+                "records": {
+                    sym: {
+                        "fp": [rec.fp[0], rec.fp[1], rec.fp[2]],
+                        "opened_at": rec.opened_at.isoformat(timespec="seconds"),
+                        "day": rec.day,
+                        "reentries": rec.reentries,
+                    }
+                    for sym, rec in self._last_sig_fp.items()
+                },
+            }
+            path = self._cooldown_file
+            path.parent.mkdir(parents=True, exist_ok=True)
+            # G5 原子写：沙箱 safe-delete 钩子会拦截 unlink，直接覆盖会丢文件
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            tmp.replace(path)
+        except Exception:
+            log.exception(
+                "冷却状态落盘失败（已隔离，不影响交易） path={}", self._cooldown_file
+            )
+
+    def _load_cooldown_state(self) -> None:
+        """P0-1：启动时恢复冷却状态（三窗口重启续跑）。
+
+        容错：文件不存在 / JSON 损坏 / 单条记录结构异常 → 跳过该记录或清空状态，
+        绝不启动失败。语义上**重启不重置冷却**：TTL 起算点取持久化的 ``opened_at``。
+        """
+        if not self._signal_cooldown_persist:
+            return
+        path = self._cooldown_file
+        if not path.exists():
+            return
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError(f"冷却状态顶层不是对象：{type(payload).__name__}")
+            records = payload.get("records", {})
+            if not isinstance(records, dict):
+                raise ValueError(f"records 不是对象：{type(records).__name__}")
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+            backup = path.with_name(f"{path.name}.corrupt.{datetime.now():%Y%m%d%H%M%S}")
+            try:
+                path.replace(backup)
+            except OSError:
+                pass
+            log.exception("冷却状态文件损坏，已备份为 {} 并降级为空状态", backup.name)
+            self._last_sig_fp = {}
+            return
+
+        restored: dict[str, CooldownRecord] = {}
+        for sym, raw in records.items():
+            try:
+                if not isinstance(raw, dict):
+                    raise ValueError(f"记录不是对象：{type(raw).__name__}")
+                fp_raw = raw.get("fp")
+                if not isinstance(fp_raw, (list, tuple)) or len(fp_raw) != 3:
+                    raise ValueError(f"fp 非法：{fp_raw!r}")
+                restored[str(sym)] = CooldownRecord(
+                    fp=(float(fp_raw[0]), float(fp_raw[1]), str(fp_raw[2])),
+                    opened_at=datetime.fromisoformat(str(raw.get("opened_at"))),
+                    day=str(raw.get("day", "") or ""),
+                    reentries=int(raw.get("reentries", 0) or 0),
+                )
+            except Exception:
+                log.warning("冷却记录损坏已跳过 symbol={} raw={!r}", sym, raw)
+        self._last_sig_fp = restored
+        if restored:
+            log.info(
+                "冷却状态已恢复：{}",
+                {k: f"{v.day}#{v.reentries}@{v.opened_at:%m-%d %H:%M}" for k, v in restored.items()},
+            )
+
+    # ------------------------------------------------------------------
     # 情报轮询（Q3：仅备注/风险提示）
     # ------------------------------------------------------------------
     def _maybe_poll_intel(self, now: datetime) -> None:
@@ -841,4 +1211,9 @@ class TradingScheduler:
             self._logger.daily_summary(datetime.now().date(), [], acct)
         except Exception:
             log.exception("停止时保存快照失败")
+        # P0-1：独立 try —— 快照失败不得连带丢掉冷却状态（重启后冷却被抹 = 免费重开）
+        try:
+            self._save_cooldown_state()
+        except Exception:
+            log.exception("停止时保存冷却状态失败")
         log.info("模拟盘已退出")

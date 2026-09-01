@@ -45,6 +45,25 @@ min=3 / cap=0.5 / group_map(base.yaml)）；嵌套零泄漏（校准器仅用末
   python scripts/p22_tail_ext.py --only precious # 单组冒烟/续跑
   python scripts/p22_tail_ext.py --skip-train    # 仅合并已有 checkpoint + 评估
   python scripts/p22_tail_ext.py --skip-eval     # 仅重建缓存
+  python scripts/p22_tail_ext.py --force-in-session  # 逃生舱：交易时段内强制重写（事故恢复用）
+
+⚠️ P1-2 交易时段禁写（2026-09-01）
+-------------------------------
+生产缓存 ``signals_cache18_grouped_v8_tail_ext.parquet`` 的**唯一写入点**是
+``merge_tail_ext()``。该处在交易时段内**拒绝写入**（exit 2），原因：盘中重写会让
+「模拟盘进程已加载的旧信号」与「盘上重写后的新信号」并存，下一次窗口重启
+（13:25 / 20:55）将静默翻转全部开仓与成本门禁结论（09-01 rb0 p_up 0.8667 →
+0.999999 的 3.7 倍跳变即由此造成）。
+
+  禁止重写：08:50–11:30 / 13:20–15:00 / 20:50–02:30（跨午夜）
+  允许刷新：02:30–08:50 / 11:30–13:20 / 15:00–20:50 / 全部非交易日
+
+预检（main 开头）与硬护栏（merge_tail_ext 第一条语句）**两处都判**：前者提前止损
+避免白跑重训，后者才是权威闸门——因为它按**落盘时刻**裁定，能拦住「盘后启动、
+重训超时、落盘时已跨入交易时段」的场景（20:30 夜盘自动化 + 约 8 分钟重训 >
+21:00 夜盘开盘，属此类高危）。
+
+退出码：0 正常 / 2 交易时段禁写拦截（未做任何改动）
 """
 from __future__ import annotations
 
@@ -67,6 +86,10 @@ from hexbroker.feature import build_features
 from hexbroker.forecast.base import build_windows
 from hexbroker.forecast.baselines import LightGBMForecast
 from hexbroker.forecast.calibration import calibrate_signals
+from hexbroker.market.session import (
+    format_cache_rewrite_block_banner,
+    is_cache_rewrite_blocked,
+)
 from scripts.ablate_features import align_global_to_inner, load_best_params, load_global_close
 from scripts.build_signals18 import CONTRACTS18
 from scripts.group_modeling import LOCAL_MAP, load_fundamental_data
@@ -288,8 +311,41 @@ def build_tail_ext_for_group(group_name: str, gcfg: dict) -> tuple[list[dict], d
     return all_tail, group_info, ckpt
 
 
-def merge_tail_ext() -> Path:
-    """合并 8 组 checkpoint 尾信号 → tail_ext 缓存（v8 原样 + 追加尾信号）。"""
+def merge_tail_ext(force_in_session: bool = False, now: object = None) -> Path:
+    """合并 8 组 checkpoint 尾信号 → tail_ext 缓存（v8 原样 + 追加尾信号）。
+
+    ⚠️ P1-2 硬护栏：本函数是生产缓存 ``TAIL_EXT_PATH`` 的**唯一写入点**，故禁写判定
+    放在函数**第一条语句**（先于任何文件 IO）——这样：
+
+    * 无论调用方是谁（``p6_4_apply_persisted_dir`` 的子进程、``signal_refresh``
+      自动刷新、还是人手敲命令），都无法绕过；
+    * 「任务在盘后启动、落盘时已跨入交易时段」的超时场景同样被拦住
+      （20:30 夜盘自动化 + 8 分钟重训 > 21:00 夜盘开盘，即属此类）；
+    * 测试无需准备任何数据即可触发该分支。
+
+    ``force_in_session=True`` 仅在人工显式加 ``--force-in-session`` 时传入，
+    用于事故恢复——放行后**必须同步重启模拟盘进程**，否则内存与盘上信号不一致。
+    """
+    # ---- P1-2 禁写硬护栏（先于一切 IO） ----
+    _now = pd.Timestamp(now) if now is not None else pd.Timestamp.now()
+    if not force_in_session and is_cache_rewrite_blocked(_now):
+        raise SystemExit(
+            "\n" + format_cache_rewrite_block_banner(
+                _now,
+                cache_path=str(TAIL_EXT_PATH),
+                extra="tail_ext 缓存【未被改写】，已保持盘上原值。"
+                      "（本次已完成的 checkpoint 不受影响，可在允许窗口内用 --skip-train 直接合并）",
+            )
+        )
+    if force_in_session and is_cache_rewrite_blocked(_now):
+        print(
+            "\n" + "=" * 72
+            + "\n🟡 --force-in-session 已生效：本次将【盘中重写】生产信号缓存\n"
+            + f"   目标：{TAIL_EXT_PATH}\n"
+            + "   ⚠️ 写完必须同步重启模拟盘进程，否则内存中的旧信号与盘上不一致。\n"
+            + "=" * 72 + "\n"
+        )
+
     v8 = pd.read_parquet(V8_PATH)
     v8["ts"] = pd.to_datetime(v8["ts"])
     frames: list[pd.DataFrame] = []
@@ -535,7 +591,29 @@ def main() -> None:
     ap.add_argument("--skip-eval", action="store_true", help="仅重建缓存，跳过评估")
     ap.add_argument("--force", action="store_true",
                    help="重建前清空已有 checkpoint（夜间刷新用，确保尾折随最新数据延伸）")
+    ap.add_argument("--force-in-session", action="store_true",
+                   help="P1-2 逃生舱：允许在交易时段内重写生产信号缓存（事故恢复用；"
+                        "写后必须重启模拟盘进程，否则内存旧信号与盘上不一致）")
     args = ap.parse_args()
+
+    only = set(args.only.split(",")) if args.only else None
+
+    # ---- P1-2 预检（fast-fail）----
+    # 与 merge_tail_ext() 内的硬护栏**重复但必要**：那条是权威闸门（拦住
+    # 「盘后启动、落盘时已跨入交易时段」的超时场景），这条是提前止损，避免白跑
+    # ~8 分钟全量重训后才在写盘时被拦。
+    # 仅在「本次会合并生产缓存」时预检：--only 单组模式只写 CKPT_DIR 下的
+    # checkpoint，不触碰 TAIL_EXT_PATH，无需拦。
+    if not only and not args.force_in_session:
+        _chk_now = pd.Timestamp.now()
+        if is_cache_rewrite_blocked(_chk_now):
+            print("\n" + format_cache_rewrite_block_banner(
+                _chk_now,
+                cache_path=str(TAIL_EXT_PATH),
+                extra="预检拦截（exit 2）：本次运行【尚未开始】任何训练/合并，"
+                      "checkpoint 与生产缓存均未被改动。",
+            ))
+            sys.exit(2)
 
     if args.force:
         if CKPT_DIR.exists():
@@ -550,8 +628,6 @@ def main() -> None:
     print("  输出：signals_cache18_grouped_v8_tail_ext.parquet（绝不覆盖 v8）")
     print("=" * 72)
 
-    only = set(args.only.split(",")) if args.only else None
-
     if not args.skip_train:
         infos_all: list[dict] = []
         for gname, gcfg in GROUPS_V2.items():
@@ -564,13 +640,13 @@ def main() -> None:
             _, ginfo, _ = build_tail_ext_for_group(gname, gcfg)
             infos_all.append(ginfo)
         if not only:
-            merge_tail_ext()
+            merge_tail_ext(force_in_session=args.force_in_session)
         else:
             print(f"[提示] 仅重建单组（{sorted(only)}），未合并 tail_ext 缓存；"
                   f"跑完全部 8 组后再合并。")
     else:
         if not only:
-            merge_tail_ext()
+            merge_tail_ext(force_in_session=args.force_in_session)
         else:
             raise SystemExit("[FAIL] --skip-train 与 --only 不兼容（合并需全部 8 组）")
 

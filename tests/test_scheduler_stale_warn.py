@@ -175,6 +175,8 @@ def _scheduler(tmp_path, signals: StaleSignals) -> TradingScheduler:
     paper_cfg = _paper_cfg()
     paper_cfg.account_file = str(tmp_path / "account.json")
     paper_cfg.c0_daily_csv = str(tmp_path / "c0_daily.csv")
+    # P0-1：冷却状态落盘路径指向 tmp，避免单测写脏生产 data/paper/cooldown.json
+    paper_cfg.cooldown_file = str(tmp_path / "cooldown.json")
     session = TradingSession(
         symbol_sessions={"rb0": parse_sessions(_DAY, [["21:00", "23:00"]])},
         holidays=set(),

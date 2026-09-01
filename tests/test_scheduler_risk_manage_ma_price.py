@@ -36,6 +36,13 @@ def _make_recorder() -> SimpleNamespace:
     obj._record_trade = lambda *a, **k: None
     obj._cached_bars = lambda s, d: _bars(30)
     obj._aux_from_bars = Scheduler._aux_from_bars.__get__(obj)
+    # P1-1：_risk_manage_only 新增「决策 trace」协作者。假 self 绑定**真实实现**
+    # （而非 stub 掉），顺带覆盖该路径下 emitter 对 fake 输入的健壮性。
+    obj._trace_fp = {}
+    obj._halt = False
+    # P0-1：trace 会附带冷却观测字段，假 self 需提供空冷却表（否则 emitter 取不到属性）
+    obj._last_sig_fp = {}
+    obj._emit_decision_trace = Scheduler._emit_decision_trace.__get__(obj)
     return obj
 
 

@@ -129,14 +129,23 @@ def test_banner_empty_when_fresh():
 
 
 # ---- 自动刷新 ----
+# P1-2（2026-09-01）：``maybe_auto_refresh`` 新增**时间依赖**——交易时段内直接跳过，
+# 不再拉起子进程。故下列用例必须**钉死时钟**，否则套件会随运行时段时好时坏
+# （例如在 13:20–15:00 日盘下午窗口跑就会全红）。
+# 取周二 12:05 = 午休补刷窗口（is_cache_rewrite_blocked=False，确定性允许）。
+ALLOWED_NOW = datetime(2026, 9, 1, 12, 5, 0)
+
+
 def test_auto_refresh_disabled_by_default():
     probes = [FreshnessProbe("a", "x", fd=2, threshold=0)]
-    refreshed, msg = maybe_auto_refresh(probes, enabled=False)
+    refreshed, msg = maybe_auto_refresh(probes, enabled=False, now=ALLOWED_NOW)
     assert refreshed is False and "未启用" in msg
 
 
 def test_auto_refresh_skips_when_fresh():
-    refreshed, msg = maybe_auto_refresh([FreshnessProbe("a", "x", fd=0, threshold=0)], enabled=True)
+    refreshed, msg = maybe_auto_refresh(
+        [FreshnessProbe("a", "x", fd=0, threshold=0)], enabled=True, now=ALLOWED_NOW
+    )
     assert refreshed is False and "无需刷新" in msg
 
 
@@ -146,7 +155,7 @@ def test_auto_refresh_success(monkeypatch, tmp_path: Path):
         "hexbroker.diagnostics.signal_refresh.subprocess.run",
         lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout="ok", stderr=""),
     )
-    refreshed, msg = maybe_auto_refresh(probes, enabled=True, root=tmp_path)
+    refreshed, msg = maybe_auto_refresh(probes, enabled=True, root=tmp_path, now=ALLOWED_NOW)
     assert refreshed is True and "成功" in msg
 
 
@@ -156,14 +165,14 @@ def test_auto_refresh_failure_and_timeout_never_raise(monkeypatch, tmp_path: Pat
         "hexbroker.diagnostics.signal_refresh.subprocess.run",
         lambda *a, **k: subprocess.CompletedProcess(a, 1, stdout="", stderr="boom"),
     )
-    refreshed, msg = maybe_auto_refresh(probes, enabled=True, root=tmp_path)
+    refreshed, msg = maybe_auto_refresh(probes, enabled=True, root=tmp_path, now=ALLOWED_NOW)
     assert refreshed is False and "失败" in msg
 
     def _timeout(*a, **k):
         raise subprocess.TimeoutExpired(cmd="x", timeout=1)
 
     monkeypatch.setattr("hexbroker.diagnostics.signal_refresh.subprocess.run", _timeout)
-    refreshed2, msg2 = maybe_auto_refresh(probes, enabled=True, root=tmp_path)
+    refreshed2, msg2 = maybe_auto_refresh(probes, enabled=True, root=tmp_path, now=ALLOWED_NOW)
     assert refreshed2 is False and "超时" in msg2
 
 

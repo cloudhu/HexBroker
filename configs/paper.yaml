@@ -84,16 +84,32 @@ paper:
   # ---- P0-2 信号无变化冷却（消除 60s 开-平-开-平循环） ----
   # 信号指纹 (p_up, exp_ret, source) 与上一轮实际开仓相同 → 即使风控返回开仓意图也跳过；
   # 已有持仓的风控动作（止损/止盈/S1-S5）不受影响；source 不同即视为信号变化。
+  #
+  # ---- P0-1（2026-09-01）指纹生命周期：TTL + 当日重开预算 + 跨窗口持久化 ----
+  # 取证：rb0 在 08-31 夜盘停摆 1.94h（117 次拦截）、09-01 日盘停摆 2.36h（127 次拦截）。
+  # 根因：信号缓存日内恒定 → 指纹永不变化 → 一旦平仓，冷却退化为「当日永不再开」。
+  #   ① ttl_minutes：同指纹「上次开仓 → 再次开仓」的最小间隔，到期即放行。
+  #      ⛔ 不可设 0 —— 那等于退回 P0-2 之前的 60s 开-平-开-平循环。
+  #   ② max_reentries_per_day：TTL 到期后的第二道闸，同一交易日同一指纹最多重开 N 次
+  #      （0 = 不限制）。只加 TTL 会让 60s 循环以 TTL 为周期复活，预算是硬顶。
+  #      注意计数按**交易日标签**（夜盘 21:00 后归属下一交易日），不使用自然日。
+  #   ③ persist：跨三窗口重启（08:55/13:25/20:55）持久化指纹与重开计数。
+  #      ⛔ 不可关 —— 一天三次重启 = 三次「免费重开」，TTL 形同虚设。
   signal_cooldown:
     enabled: true
     p_up_tol: 0.01
     exp_ret_tol: 0.001
+    ttl_minutes: 30
+    max_reentries_per_day: 3
+    persist: true
 
   # ---- 落盘路径 ----
   data_dir: data/paper
   plans_dir: trade_plans
   reports_dir: deliverables
   account_file: data/paper/account.json
+  # P0-1 信号冷却状态（指纹 / 开仓时刻 / 交易日 / 当日重开计数），跨三窗口重启续跑
+  cooldown_file: data/paper/cooldown.json
   trades_log: data/paper/trades.log
   c0_daily_csv: data/paper/c0_daily.csv
   intel_static_file: data/paper/news_static.json   # 静态情报源（MCP 文件桥接：agent 用 mx-ds-mcp 拉取落盘 JSON）

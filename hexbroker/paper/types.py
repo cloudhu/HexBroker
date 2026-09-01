@@ -37,6 +37,8 @@ SINA_BAR_CODE: dict[str, str] = {
 #: 日志事件类型（log_structured 审计 event 名）
 EVT_TRADE = "trade"
 EVT_PLAN_CHANGE = "plan_change"
+#: P1-1 决策 trace：每次风控决策「状态跃迁」落一条结构化快照（归因地基）
+EVT_DECISION_TRACE = "decision_trace"
 
 
 def dt_now() -> datetime:
@@ -80,6 +82,24 @@ class SignalFrame:
         if not self.is_effective:
             return 0
         return 1 if self.p_up >= 0.5 else -1
+
+
+@dataclass
+class CooldownRecord:
+    """P0-1 信号冷却记录（替代原裸三元组，支持 TTL / 重开计数 / 跨窗口持久化）。
+
+    语义：``fp`` 是本品种**上一次实际开仓**所用的信号指纹；``opened_at`` 是那次开仓的
+    时刻（TTL 起算点）；``reentries`` 是**同一交易日内**该指纹已被重新开仓的次数。
+
+    ⚠️ ``day`` 必须是**交易日标签**（``TradingSession.day_label``），不是自然日——
+    夜盘 21:00 之后归属下一交易日，用自然日会把「夜盘→日盘」误判成两个交易日，
+    导致当日重开预算被错误重置（这正是 08-31 21:01 → 09-01 09:05 重复开仓的成因之一）。
+    """
+
+    fp: tuple[float, float, str]
+    opened_at: datetime
+    day: str = ""
+    reentries: int = 0
 
 
 @dataclass

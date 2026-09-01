@@ -14,12 +14,16 @@ from __future__ import annotations
 import subprocess
 import sys
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable, List, Optional
 
+from ..market.session import is_cache_rewrite_blocked
 from .health_check import signal_freshness_days
 
 REFRESH_CMD = "python scripts/p22_tail_ext.py --skip-eval"
+# P1-2：事故恢复时的强制放行命令（交易时段内重写生产信号缓存，写后须重启模拟盘进程）
+REFRESH_CMD_FORCED = "python scripts/p22_tail_ext.py --skip-eval --force-in-session"
 
 # 与 scripts/paper_trading_main._validate / build_components_safe 保持一致：
 # 生产信号缓存为「显式文件列表」，不是目录。DEFAULT_CACHE 仅在配置缺失时兜底。
@@ -207,15 +211,28 @@ def maybe_auto_refresh(
     enabled: bool = False,
     timeout_sec: int = 900,
     root: str | Path = ".",
+    now: Any = None,
 ) -> tuple[bool, str]:
     """stale 且 enabled 时自动跑刷新脚本；失败/超时降级为告警，绝不抛异常。
 
     返回 ``(refreshed, message)``：refreshed=True 表示刷新命令执行成功（exit 0）。
+
+    ⚠️ P1-2：``enabled=True`` 且缓存陈旧时，若当前处于**交易时段禁写窗口**，此处
+    **直接跳过** subprocess——不空耗 ``timeout_sec`` 秒后再拿到一个 exit 2。
+    自动刷新**永远不自行加 ``--force-in-session``**：那会把「盘中静默重写生产信号」
+    变成默认行为，正是 P1-2 要消灭的事故。需要盘中重建时由人工执行
+    ``REFRESH_CMD_FORCED`` 并同步重启模拟盘进程。
     """
     if not enabled:
         return False, "自动刷新未启用（signal_refresh.auto_enabled=false）"
     if not stale_of(probes):
         return False, "缓存新鲜，无需刷新"
+    if is_cache_rewrite_blocked(now if now is not None else datetime.now()):
+        return False, (
+            "⛔ P1-2 交易时段禁写：自动刷新已跳过（缓存仍陈旧，交易日主源信号不会更新）。"
+            f"请在允许窗口（11:30–13:20 / 15:00–20:50 / 02:30–08:50）重跑，"
+            f"或人工执行 {REFRESH_CMD_FORCED} 并同步重启模拟盘进程"
+        )
     try:
         r = subprocess.run(
             [sys.executable, "scripts/p22_tail_ext.py", "--skip-eval"],
