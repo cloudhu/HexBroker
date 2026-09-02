@@ -111,6 +111,80 @@ def _max_position_pct(paper_cfg: Any) -> float:
         return 0.30
 
 
+# ⛔ P1-10（2026-09-01）：冒烟模式必须隔离的**输出目录**根名。
+# 只认输出，绝不把 ``configs/`` 算进来 —— 那是只读输入，重定向会让启动找不到风控配置。
+# ⛔ 按**首段路径名**匹配，不能用 ``"deliverables/"`` 这类带斜杠的前缀：
+# 实际配置里既有 ``deliverables``（无斜杠）也有 ``data/paper/x.json``（有斜杠），
+# 带斜杠的前缀会漏掉前者（2026-09-01 我第一版就踩了这个坑，反而污染了 deliverables/）。
+_SMOKE_OUTPUT_ROOTS = ("data", "deliverables", "trade_plans", "logs", "reports")
+
+
+def _is_smoke_output_path(value: Any) -> bool:
+    """是否属于「运行期会写入的仓库内相对路径」。"""
+    if not isinstance(value, str) or not value:
+        return False
+    v = value.replace("\\", "/")
+    if v.startswith(("/", "./", "../")) or (len(v) > 1 and v[1] == ":"):
+        return False  # 绝对路径 / 盘符路径不归我们管
+    return v.split("/", 1)[0] in _SMOKE_OUTPUT_ROOTS
+
+
+def _apply_smoke_redirection(paper_cfg: Any, tmp_dir: Path) -> list[str]:
+    """把配置里**所有**输出型路径重定向到 ``tmp_dir``（保持相对结构），返回被改动的键名。
+
+    ⛔ P1-10（2026-09-01 实测）：原实现是**手写清单**，漏了 ``cooldown_file``，
+    导致 `--smoke` 把生产 ``data/paper/cooldown.json`` 覆盖成
+    ``sig_source="smoke"`` 的记录（md5 比对确认）。
+    **手写清单必然漏** —— 每新增一个落盘路径就多一处污染点。故改为扫描：
+    凡值落在输出目录前缀下的键，一律重定向。新增配置项自动被覆盖，无需改这里。
+
+    ⛔ 为什么要保持相对结构（``tmp / value`` 而非 ``tmp / name``）：
+    ``data_dir`` 与 ``account_file`` 存在嵌套关系，拍平会让两者脱节。
+    """
+    changed: list[str] = []
+    for key in list(paper_cfg.keys()):
+        value = paper_cfg.get(key)
+        if not _is_smoke_output_path(value):
+            continue
+        paper_cfg[key] = str(tmp_dir / value)
+        changed.append(key)
+    return changed
+
+
+def _log_effective_config(paper_cfg: Any, config_path: str) -> None:
+    """P1-9（2026-09-01）：启动即打印**真正生效**的关键风控配置。
+
+    为什么要单独打一条：长跑进程只在启动时读一次配置，之后改 YAML **不会**热加载。
+    2026-09-01 实测事故——进程 20:55:39 启动，当晚 21:05 把 ``size_by_risk`` 改成
+    ``true``，日志却一直按旧行为跑，差点被误判成「改动有 bug」。
+    有了这一条，「当前到底跑的哪套参数」在日志里一眼可见，不必去猜。
+
+    ⛔ 只打印，**不改动任何行为**；且必须走 ``_max_position_pct()`` 读**生效值**
+    （``risk_overrides`` 优先），不要另写一份读取逻辑（会漂移）。
+    """
+    p = Path(config_path)
+    mtime = (
+        datetime.fromtimestamp(p.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+        if p.exists()
+        else "文件不存在"
+    )
+    by_symbol = {k: f"{float(v):.2%}" for k, v in dict(
+        paper_cfg.get("risk_per_trade_by_symbol", {}) or {}
+    ).items()}
+    size_by_risk = bool(paper_cfg.get("size_by_risk", False))
+    print(
+        "[模拟盘] 生效风控配置（配置只在启动时读取，运行中改动需重启）\n"
+        f"         配置来源          : {config_path} (mtime {mtime})\n"
+        f"         size_by_risk      : {size_by_risk}"
+        f"（P0-4 风险预算法：{'已启用' if size_by_risk else '未启用，沿用历史行为不拦截'}）\n"
+        f"         risk_per_trade    : {float(paper_cfg.get('risk_per_trade', 0.01)):.2%}\n"
+        f"         按品种覆盖        : {by_symbol or '（无，全部沿用全局）'}\n"
+        f"         risk_stop_atr_mult: {float(paper_cfg.get('risk_stop_atr_mult', 2.5)):g}\n"
+        f"         max_position_pct  : {_max_position_pct(paper_cfg):.2%}"
+        f"（名义敞口硬顶，risk_overrides 优先）"
+    )
+
+
 def _load_paper_config(config_path: str) -> Any:
     """加载 paper.yaml（经 hexbroker.config.load_config 合并默认配置）。"""
     from omegaconf import OmegaConf
@@ -332,6 +406,9 @@ def main() -> int:
         _print_error(f"配置加载失败：{exc}")
         return 1
 
+    # P1-9：打印真正生效的关键风控配置（配置改动不会热加载，必须可见）
+    _log_effective_config(paper_cfg, args.config)
+
     # 系统健康检查（独立只读探测，不依赖启动校验）
     if args.health_check:
         from hexbroker.diagnostics.health_check import run_health_check
@@ -350,14 +427,9 @@ def main() -> int:
         import tempfile
 
         tmp = Path(tempfile.mkdtemp(prefix="paper_smoke_"))
-        paper_cfg.data_dir = str(tmp / "data")
-        paper_cfg.account_file = str(tmp / "data" / "account.json")
-        paper_cfg.trades_log = str(tmp / "trades.log")
-        paper_cfg.c0_daily_csv = str(tmp / "c0_daily.csv")
-        paper_cfg.plans_dir = str(tmp / "plans")
-        paper_cfg.reports_dir = str(tmp / "reports")
-        paper_cfg.intel_static_file = str(tmp / "news_static.json")
+        redirected = _apply_smoke_redirection(paper_cfg, tmp)
         print(f"[模拟盘] 冒烟模式：运行产物写入 {tmp}")
+        print(f"[模拟盘]   已隔离 {len(redirected)} 个输出路径: {', '.join(sorted(redirected))}")
 
     try:
         comp = build_components(paper_cfg, offline=args.offline)
@@ -440,6 +512,7 @@ def main() -> int:
         run_days=args.days,
         degrader=degrader,
         degrade_signals=degrade_signals,
+        config_path=args.config,   # P1-9：供「配置被改但未重启」的过期告警
     )
 
     if args.smoke:

@@ -1,11 +1,17 @@
 """结构化审计 JSON 序列化契约单测（P2：bool 统一为 JSON 原生类型）。"""
 
 import io
+import uuid
 from datetime import date, datetime
+from pathlib import Path
 
 from loguru import logger
 
+from hexbroker.paper.logger import TradeLogger
 from hexbroker.utils.logging import _json_default, log_structured
+
+# 生产审计日志（相对仓库根定位，不依赖 CWD）
+_PROD_LOG = Path(__file__).resolve().parents[1] / "data" / "paper" / "trades.log"
 
 
 def test_json_default_bool_and_datetime() -> None:
@@ -55,3 +61,47 @@ def test_log_structured_keeps_datetime_iso() -> None:
     finally:
         logger.remove(sink_id)
     assert "2026-08-24T09:05:30" in buf.getvalue()
+
+
+def test_test_events_never_land_in_production_audit_log(
+    _isolate_production_audit_log: Path,
+) -> None:
+    """⛔ P1-8 契约：测试产生的审计事件必须落沙箱，**绝不能**进生产 ``trades.log``。
+
+    这是上面两个用例的**隐形前提**：它们只 add 了自己的 StringIO sink 捕获输出，
+    但 ``log_structured`` 会**广播到所有已注册 sink**。一旦同批次里有别的用例
+    构建过生产组件（注册了生产文件 sink），这两个用例的 ``T000259`` 就会被写进
+    生产日志——污染 ``analyze_trades_log`` 的 ``raw_count``/``unique_count``。
+
+    实测（2026-09-01）：``test_size_qty_risk_cap.py`` + 本文件同跑，稳定写入 2 行。
+    守卫见 ``tests/conftest.py::_isolate_production_audit_log``。
+
+    ⛔ 本用例故意用 ``TradeLogger()`` 的**默认路径**（= 生产路径）来触发守卫，
+    这样才能验证重定向确实生效，而不是验证一个本来就没问题的 tmp_path。
+    """
+    sentinel = "T_P1_8_" + uuid.uuid4().hex
+
+    TradeLogger()  # 默认 log_file 即生产路径 —— 必须被守卫重定向到沙箱
+    log_structured(
+        "trade",
+        {
+            "trade_id": sentinel,
+            "symbol": "zz0",
+            "is_open": False,
+            "is_today_close": True,
+            "ts": datetime(2026, 9, 1, 21, 0, 0),
+        },
+    )
+
+    # ① 正向：哨兵必须出现在沙箱日志里（证明守卫把它接住了）
+    sandbox = Path(_isolate_production_audit_log)
+    assert sandbox.exists(), "守卫未生效：沙箱日志文件未创建"
+    assert sentinel in sandbox.read_text(encoding="utf-8"), (
+        f"守卫未生效：哨兵 {sentinel} 未落到沙箱 {sandbox}"
+    )
+
+    # ② 反向：哨兵绝不能出现在生产日志里
+    if _PROD_LOG.exists():
+        assert sentinel not in _PROD_LOG.read_text(encoding="utf-8"), (
+            f"⛔ P1-8 回归：测试事件 {sentinel} 泄漏进生产审计日志 {_PROD_LOG}"
+        )

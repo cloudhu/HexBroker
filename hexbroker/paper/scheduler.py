@@ -73,8 +73,15 @@ class TradingScheduler:
         run_days: Optional[int] = None,
         degrader: Optional[Any] = None,          # P2-D 运行时降级器（默认 None=零行为变更）
         degrade_signals: Optional[tuple] = None,  # (signals_file, max_age_sec)
+        config_path: Optional[str] = None,       # P1-9：配置文件路径（用于「配置过期」监视）
     ) -> None:
         self._cfg = cfg
+        # P1-9（2026-09-01）：进程只在启动时读一次配置/代码。记录启动时刻，
+        # 供「配置被改但没重启」的告警比对。实测事故：进程 20:55:39 启动，
+        # 当晚 4 个改动全在它之后 → P0-4 / D2-C 全部静默不生效。
+        self._config_path = config_path
+        self._proc_started_at = datetime.now()
+        self._config_stale_warned = False
         self._session = session
         self._quotes = quotes
         self._signals = signals
@@ -192,6 +199,11 @@ class TradingScheduler:
         """进入主循环，直到 stop_event / --days 达到。"""
         self._print_banner()
         while not self._stop_event.is_set():
+            # P1-9：配置文件在进程启动后被改动 → 告警（只报一次，且绝不阻断主循环）
+            try:
+                self._warn_if_config_stale()
+            except Exception:  # noqa: BLE001 —— 看门狗不得影响交易主循环
+                pass
             try:
                 self._tick()
             except Exception:
@@ -206,9 +218,47 @@ class TradingScheduler:
         """外部请求停止（信号处理）。"""
         self._stop_event.set()
 
+    def _warn_if_config_stale(self) -> None:
+        """P1-9：配置文件在**本进程启动之后**被改动 → 告警一次。
+
+        背景（2026-09-01 实测）：长跑进程只在启动时读一次配置。当晚
+        ``configs/paper.yaml`` 在进程启动（20:55:39）之后被改了 4 次，
+        日志里却一直打着旧值，差点被误判成「改动有 bug」。
+        有了这条告警，「改了没生效」就从**隐性事实**变成**可见事件**。
+
+        ⛔ 只报一次：避免每个 tick 刷屏。
+        ⛔ 只监视**配置文件**：源码改动（.py）同样不会热加载，但扫描源码树
+        代价高且噪音大；判「代码是否过期」请看 banner 里的进程启动时间。
+        """
+        if self._config_stale_warned or not self._config_path:
+            return
+        p = Path(self._config_path)
+        if not p.exists():
+            return
+        mtime = datetime.fromtimestamp(p.stat().st_mtime)
+        if mtime <= self._proc_started_at:
+            return
+        self._config_stale_warned = True
+        log.warning(
+            "P1-9 配置已过期：{} 于 {} 被修改，晚于本进程启动时间 {} —— "
+            "配置**只在启动时读取**，改动不会生效，需重启进程",
+            self._config_path,
+            mtime.strftime("%Y-%m-%d %H:%M:%S"),
+            self._proc_started_at.strftime("%Y-%m-%d %H:%M:%S"),
+        )
+
     def _print_banner(self) -> None:
         log.info("=" * 64)
         log.info("模拟盘交易系统已启动")
+        # P1-9：显式打出进程启动时刻 —— 判「某改动是否在本进程生效」的唯一依据
+        # （比对文件 mtime 与它即可）。不要靠日志里有没有「已恢复/已启动」字样判断。
+        log.info("  进程启动: {}（配置与代码均在此刻读取，之后改动需重启）",
+                 self._proc_started_at.strftime("%Y-%m-%d %H:%M:%S"))
+        if self._config_path:
+            _cp = Path(self._config_path)
+            log.info("  配置: {} (mtime {})", self._config_path,
+                     datetime.fromtimestamp(_cp.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+                     if _cp.exists() else "文件不存在")
         log.info("  品种: {}", ", ".join(self._symbols))
         log.info("  轮询: {}s | 情报: {}s | 快照: {}s | 开盘延迟: {}min", 
                  self._poll_interval, self._intel_interval, self._snapshot_interval, self._open_delay_min)
