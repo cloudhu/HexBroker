@@ -33,6 +33,26 @@
    **未对齐日绝不发射**（p6_4 merge keep="last" 会覆盖湖内历史值）；
 5. 换月疑点守卫：扩展区价格跳变 > 限幅×1.02 或 OI 跳变 > 45% → 拒绝。
 
+接缝判定 v3（Part A+B，2026-09-02 主理人裁决实施）
+--------------------------------------------------
+旧版把「接缝日 ∉ 对齐稳定段」一律硬拒（SEAM_BASIS_CONFLICT 钝器），
+换月日 tqsdk 领先窗口（官方保守切约、湖已先切新主力）被系统性误杀，
+18/18 回退 pandadata —— 架空本脚本「去 pandadata 单点依赖」的立项目标
+（实证：2026-08-31 rb0、2026-09-01 全品种、2026-09-02 rb0 连续三晨）。
+现按接缝三分判定（``_seam_decision``）：
+
+- 接缝日 ∈ 稳定段 → ``OK``（正常路径，不变）；
+- 接缝日 ∉ 稳定段 且 **无扩展区**（ext 空 = 湖不滞后于 tqsdk）→ 换月
+  领先窗口 → **软放行** ``ROLLOVER_LEAD_WINDOW``。前提 fail-closed：
+  湖必须确实含有接缝日行，缺失即硬拒（绝不静默跳过数据）；
+- 接缝日 ∉ 稳定段 且 **存在扩展区** → 湖滞后、扩展基准不可信 →
+  **仍硬拒**（安全护栏不削弱）。
+
+每个品种的接缝状态额外落盘 ``_SEAM_STATUS.json``（机器可读），编排层
+（Part B）据此对领先窗口品种做 pandadata **定向**补数——把「换月日全量
+18 品种回退」降为「仅领先窗口品种接缝日校正」，且退出码=0 时不再触发
+全量兜底。
+
 幂等性：对齐日重发值与湖偏差 ~1e-10，远低于 p6_4 重叠容差 1%；
 扩展日为湖中不存在的新日期，merge 即纯追加。
 
@@ -157,6 +177,36 @@ def _underlying_upper(tq_symbol: str) -> str:
     return tq_symbol.split("@")[1].split(".")[-1].upper()
 
 
+def _seam_decision(
+    seam_date: pd.Timestamp,
+    *,
+    tail_dates: set,
+    ext_empty: bool,
+    lake_has_seam: bool,
+) -> tuple[str, str | None]:
+    """接缝三分判定（Part A，2026-09-02）：返回 ``(seam_status, 硬拒原因)``。
+
+    - 接缝日 ∈ 对齐稳定段 → ``OK``（正常路径）；
+    - 接缝日 ∉ 稳定段 且 **无扩展区**（ext 空 = 湖不滞后于 tqsdk）→
+      换月领先窗口（tqsdk 官方保守切约、湖已先切新主力）→ 软放行
+      ``ROLLOVER_LEAD_WINDOW``。前提 fail-closed：湖必须**确实含有**
+      接缝日行，缺失即硬拒（绝不静默跳过数据）；
+    - 接缝日 ∉ 稳定段 且 **存在扩展区** → 湖滞后且扩展基准不可信，
+      用 k 锚定扩展会写出错口径 bar → 硬拒，回退 pandadata。
+    """
+    if seam_date in tail_dates:
+        return "OK", None
+    if ext_empty:
+        if not lake_has_seam:
+            return "", (
+                f"SEAM_BASIS_CONFLICT: 接缝日 {seam_date.date()} 湖内缺失行"
+                f"（领先窗口软放行前提不成立）→ fail-closed 拒绝，回退 pandadata")
+        return "ROLLOVER_LEAD_WINDOW", None
+    return "", (
+        f"SEAM_BASIS_CONFLICT: 接缝日 {seam_date.date()} 与 tqsdk 名义价"
+        f"不对齐且存在扩展区（主连换月时点分歧窗口）→ 拒绝扩展，回退 pandadata")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="P步-A 本地拉取管线（tqsdk + 主湖 k 锚定）")
     ap.add_argument("--asof", default=None, help="基准交易日 YYYY-MM-DD，默认今天")
@@ -214,6 +264,7 @@ def main() -> int:
     report: list[str] = []
     ok: list[str] = []
     failed: list[tuple[str, str]] = []
+    seam_status_map: dict[str, str] = {}
 
     for sym0 in symbols:
         try:
@@ -262,19 +313,23 @@ def main() -> int:
             k = sum(ratios[d] for d in tail_dates) / len(tail_dates)
             k_dev = max(abs(ratios[d] / k - 1.0) for d in tail_dates)
 
-            # 接缝校验：两源共同最后日必须对齐（否则扩展基准不可信）。
+            # 接缝校验 + 换月领先窗口识别（Part A，2026-09-02 裁决实施）。
             # 湖比 tqsdk 新（asof 当日 bar 被 --exclude-today 排除等场景）属正常，
             # 接缝取 min(lake_last, tqs_last)；扩展只发生在 tqsdk 有湖后数据时。
             lake_last = lk.index.max()
             tqs_last = tqs.index.max()
             seam_date = min(lake_last, tqs_last)
-            if seam_date not in set(tail_dates):
-                raise ValueError(
-                    f"SEAM_BASIS_CONFLICT: 接缝日 {seam_date.date()} 与 tqsdk 名义价"
-                    f"不对齐（主连换月时点分歧窗口）→ 拒绝扩展，回退 pandadata")
+            ext = tqs[tqs.index > lake_last]          # 扩展区（仅湖滞后时非空）
+            seam_status, seam_err = _seam_decision(
+                seam_date,
+                tail_dates=set(tail_dates),
+                ext_empty=ext.empty,
+                lake_has_seam=seam_date in set(lk.index),
+            )
+            if seam_err:
+                raise ValueError(seam_err)
 
             # 扩展区换月疑点守卫
-            ext = tqs[tqs.index > lake_last]
             ext_source, ext_rows = _augment_ext_with_collector(sym0, start, end, ext, lake_last)
             prev_close = tqs["close"].shift(1)
             ret = (ext_rows["close"] / prev_close.loc[ext_rows.index] - 1.0).abs()
@@ -305,17 +360,18 @@ def main() -> int:
             (out_dir / f"{sym0}.json").write_text(
                 json.dumps(payload, ensure_ascii=False), encoding="utf-8")
             ok.append(sym0)
+            seam_status_map[sym0] = seam_status
             n_conflict = len(overlap_dates) - len([d for d in overlap_dates if d in set(tail_dates)])
             report.append(
                 f"| {sym0} | ✅ | {k:.6f} | {len(tail_dates)} | {k_dev:.1e} | "
                 f"{len(ext_rows)} | {ext_source} | {n_conflict} | "
-                f"{rows[0][0]}~{rows[-1][0]} |")
+                f"{rows[0][0]}~{rows[-1][0]} | {seam_status} |")
         except ValueError as exc:
             failed.append((sym0, str(exc)))
-            report.append(f"| {sym0} | ⛔ | - | - | - | - | - | - | {exc} |")
+            report.append(f"| {sym0} | ⛔ | - | - | - | - | - | - | {exc} | - |")
         except Exception as exc:  # noqa: BLE001
             failed.append((sym0, f"UNEXPECTED: {exc}"))
-            report.append(f"| {sym0} | ⛔ | - | - | - | - | - | - | UNEXPECTED: {exc} |")
+            report.append(f"| {sym0} | ⛔ | - | - | - | - | - | - | UNEXPECTED: {exc} | - |")
 
     # ---- 3) 报告 --------------------------------------------------------
     lines = [
@@ -327,8 +383,8 @@ def main() -> int:
         f"- 结果：成功 {len(ok)} / 失败 {len(failed)}（共 {len(symbols)}）",
         f"- 落盘目录：{out_dir}",
         "",
-        "| 品种 | 状态 | k | 对齐稳定日 | k波动 | 扩展行 | 扩展源 | 基准冲突日 | 发射区间 |",
-        "|---|---|---|---|---|---|---|---|---|",
+        "| 品种 | 状态 | k | 对齐稳定日 | k波动 | 扩展行 | 扩展源 | 基准冲突日 | 发射区间 | 接缝 |",
+        "|---|---|---|---|---|---|---|---|---|---|",
         *report,
     ]
     if failed:
@@ -339,6 +395,16 @@ def main() -> int:
             *[f"- **{s}**: {reason}" for s, reason in failed],
         ]
     (out_dir / "_LOCAL_REPORT.md").write_text("\n".join(lines), encoding="utf-8")
+    # Part B 机器可读接缝状态（编排层据此对领先窗口品种定向补数；
+    # 文件名带 "_" 前缀，p6_4_apply_persisted_dir 的 glob 会排除 _*.json）
+    lead_window = sorted(s for s, v in seam_status_map.items()
+                         if v == "ROLLOVER_LEAD_WINDOW")
+    (out_dir / "_SEAM_STATUS.json").write_text(
+        json.dumps({"asof": asof.strftime("%Y-%m-%d"),
+                    "statuses": seam_status_map,
+                    "lead_window": lead_window},
+                   ensure_ascii=False, indent=2),
+        encoding="utf-8")
     print("\n".join(lines))
 
     return 0 if not failed else 3

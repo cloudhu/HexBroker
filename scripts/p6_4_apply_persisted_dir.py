@@ -305,6 +305,21 @@ def _p22_rewrite_blocked(now=None) -> tuple[bool, str]:
     )
 
 
+def _list_persisted_json(d: Path) -> list[Path]:
+    """列出目录内全部 persisted 品种文件（``<sym0>.json``）。
+
+    排除两类非品种文件：
+    - ``*.clean.json``：本脚本自产的中转文件（历史约定）；
+    - ``_*.json``：下划线前缀的机器可读元数据（如 refresh_pull_local 的
+      ``_SEAM_STATUS.json``，2026-09-02 Part A 新增）。误当品种文件会导致
+      sym0="_SEAM_STATUS" 走 p6_4 parse → 品种映射失败 → 整批报错。
+    """
+    return sorted(
+        p for p in d.glob("*.json")
+        if not p.name.endswith(".clean.json") and not p.name.startswith("_")
+    )
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="P步-A/B 固化应用器")
     ap.add_argument("--dir", required=True, help="含 <sym0>.json 的 persisted 目录")
@@ -333,7 +348,7 @@ def main() -> int:
         print(f"[FAIL] 目录不存在: {d}")
         return 2
 
-    json_files = sorted(p for p in d.glob("*.json") if not p.name.endswith(".clean.json"))
+    json_files = _list_persisted_json(d)
 
     if args.trading_day:
         asof = args.asof or date.today().isoformat()

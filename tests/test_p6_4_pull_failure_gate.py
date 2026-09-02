@@ -68,6 +68,24 @@ def test_expect_only_affects_message(mod, tmp_path: Path, monkeypatch, capsys):
     assert "期望 6 个" in capsys.readouterr().out
 
 
+# ---- Part A 接线：_*.json 元数据必须被排除（2026-09-02） ----
+def test_persisted_json_listing_excludes_metadata(tmp_path: Path):
+    """_list_persisted_json 排除 _*.json（_SEAM_STATUS.json）与 *.clean.json，
+    只留品种文件——否则 sym0="_SEAM_STATUS" 走 parse 整批报错。"""
+    d = tmp_path
+    names = ["ag0.json", "rb0.json", "_SEAM_STATUS.json",
+             "_LOCAL_REPORT.json", "ag0.clean.json"]
+    for n in names:
+        (d / n).write_text("{}", encoding="utf-8")
+    got = [p.name for p in mod_module_list(d)]
+    assert got == ["ag0.json", "rb0.json"]
+
+
+def mod_module_list(d: Path):
+    """独立加载脚本模块取 _list_persisted_json（与 module fixture 解耦）。"""
+    return _load()._list_persisted_json(d)
+
+
 # ---- 口径锁：真实失败目录复现 ----
 def test_real_0827_failure_dir_reproduces(mod, monkeypatch, capsys):
     """用 2026-08-27 真实失败目录复现（若存在）：0 json → 交易日判定下必为 exit 3。"""
