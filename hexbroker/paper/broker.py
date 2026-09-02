@@ -2,7 +2,7 @@
 
 薄封装 ``SimBroker``（同口径成本/保证金/平今费），叠加资金约束（A4）：
 - 可用资金 = equity - margin_used >= 0；
-- 单品种保证金占用 <= 预算上限（budget_ratio * equity）；
+- 全组合总保证金占用（`_margin_after` 遍历 positions 全量求和，含新开仓目标品种）<= 预算上限（budget_ratio * equity）；
 - 超预算/资金不足 → 拒绝下单（不超预算下单）。
 
 账户快照可原子落盘 ``data/paper/account.json``，重启续跑（交易日计数从快照恢复）。

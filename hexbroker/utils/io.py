@@ -47,7 +47,14 @@ def write_parquet(df: pd.DataFrame, path: str | Path) -> None:
 
 
 def _atomic_write(writer: Any, path: Path) -> None:
-    """临时文件写入 + 原子 rename。"""
+    """临时文件写入 + 原子 rename（``tmp + os.replace``，G5）。
+
+    ⛔ 异常路径**不删除** tmp（P2-8，2026-09-02）：项目铁律禁止任何删除类调用
+    —— 沙箱 safe-delete 钩子会拦截 ``unlink`` / ``os.remove`` 并路由至回收站，
+    项目已因此丢过生产文件。写盘失败时：异常向上传播（不变）、原档未被触碰
+    （``os.replace`` 未执行）、**tmp 保留**供排查；孤儿 ``.tmp`` 为 mkstemp
+    随机名，不会被按扩展名的数据扫描命中，下一次成功写盘会正常覆盖目标。
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
     os.close(fd)
@@ -55,8 +62,7 @@ def _atomic_write(writer: Any, path: Path) -> None:
         writer(tmp)
         os.replace(tmp, path)
     except Exception:
-        if os.path.exists(tmp):
-            os.remove(tmp)
+        _log.error("原子写失败（原档未动，tmp 已保留）：{} -> {}", tmp, path)
         raise
 
 
