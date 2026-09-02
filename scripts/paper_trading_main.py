@@ -316,6 +316,12 @@ def build_components_safe(paper_cfg: Any, offline: bool = False) -> dict[str, tu
             },
             risk_stop_atr_mult=float(paper_cfg.get("risk_stop_atr_mult", 2.5)),
             max_position_pct=_max_position_pct(paper_cfg),
+            # ---- P1 / P1-C（2026-09-02）可交易性门槛与保证金硬顶 ----
+            # 保证金率必须与 broker 的 CostModel 同源（cost.margin_rate），否则两道
+            # 防线口径会漂移 —— broker 用 build_cost_model 读的也是这一段。
+            margin_rate=float(dict(paper_cfg.get("cost", {}) or {}).get("margin_rate", 0.12)),
+            max_margin_pct=float(paper_cfg.get("max_margin_pct", 0.20)),
+            struct_untradeable_ratio=float(paper_cfg.get("struct_untradeable_ratio", 3.0)),
         ),
         "intel": lambda: IntelligenceService.from_config(paper_cfg),
         "logger": lambda: TradeLogger(log_file=paper_cfg.get("trades_log", "data/paper/trades.log")),

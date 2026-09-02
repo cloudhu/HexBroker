@@ -120,9 +120,23 @@ def test_risk_distance_prefers_real_stop_over_atr():
     tight_stop = v["price"] * 0.999  # 0.1% 距离，远小于 ATR 兜底
     d = pm.risk_distance(v["price"], stop=tight_stop, atr=v["atr"])
     assert d == pytest.approx(v["price"] * 0.001)
-    # 窄止损 → 1 手风险骤降 → ag0 也可开 1 手（证明用的是真实 stop 而非 ATR）
-    got = pm._size_qty("ag0", 0.30, v["price"], EQUITY, stop=tight_stop, atr=v["atr"])
-    assert got == pytest.approx(1.0)
+
+    # ⛔ P1-C（2026-09-02）行为变化：本用例原断言「窄止损 → ag0 也可开 1 手」。
+    # 现在 ag0 会被**保证金硬顶**拦下（1 手保证金 30.9% 权益 > max_margin_pct 20%）。
+    # 这是**正确的风控行为**：窄止损只降低了「单笔风险」这一个维度，却掩盖不了
+    # 「账户近 1/3 资金被这一手占用」的事实。行业实践单品种保证金 ≤10%–20%。
+    # 生产配置（ag0 预算 1%）下本用例路径不触及，实盘**零影响**。
+    m = pm.size_metrics("ag0", 0.30, v["price"], EQUITY, stop=tight_stop, atr=v["atr"])
+    # 用 capped_by 反证「确实吃的是真实 stop 而非 ATR 兜底」——这个判据比原断言更强：
+    #   用真实 stop（0.1%）→ 1 手风险仅 0.26% 权益，**通过**风险预算 → 落到保证金判定
+    #   用 ATR 兜底（2.5×ATR）→ 1 手风险 24.89% → 会先被 risk_budget 拦下
+    # 故 capped_by == "margin_cap" 本身就证明了止损距离取自真实 stop。
+    assert m["capped_by"] == "margin_cap", m["capped_by"]
+    assert m["risk_pct_1lot"] < 0.01 < m["margin_pct"]   # 风险达标、保证金超标
+    assert m["final_lots"] == 0
+    # 把保证金上限放宽到 40%（= broker budget_ratio 口径）后即可开 1 手
+    loose = _planner(size_by_risk=True, max_margin_pct=0.40)
+    assert loose._size_qty("ag0", 0.30, v["price"], EQUITY, stop=tight_stop, atr=v["atr"]) == 1.0
 
 
 def test_risk_distance_falls_back_to_atr_when_stop_missing():
@@ -346,7 +360,14 @@ def test_risk_budget_for_prefers_symbol_override():
 
 
 def test_per_symbol_override_can_rescue_a_blocked_symbol():
-    """同一品种、同一行情，只改预算就能从「拦下」变「放行」——证明覆盖真的参与计算。"""
+    """同一品种、同一行情，只改预算就能从「拦下」变「放行」——证明覆盖真的参与计算。
+
+    ⛔ P1-C（2026-09-02）：ag0 现在还需**额外**放宽保证金上限才能放行 —— 它的
+    1 手保证金占权益 30.9%，超过 max_margin_pct 默认 20%。
+    「放宽风险预算」只能解决风险维度，解决不了保证金维度；ag0 属**双重结构性
+    不可交易**。此处用 ``max_margin_pct=0.40``（= broker budget_ratio 口径）隔离出
+    「预算覆盖是否参与计算」这一被验证对象，另用一段断言记录默认口径下的拦截。
+    """
     v = SYMBOLS["ag0"]
     stop = _stop("ag0")
     blocked = _planner(size_by_risk=True, risk_per_trade=0.01)
@@ -354,7 +375,16 @@ def test_per_symbol_override_can_rescue_a_blocked_symbol():
         size_by_risk=True, risk_per_trade=0.01, risk_per_trade_by_symbol={"ag0": 0.30}
     )
     assert blocked._size_qty("ag0", 0.30, v["price"], EQUITY, stop=stop, atr=v["atr"]) == 0.0
-    assert rescued._size_qty("ag0", 0.30, v["price"], EQUITY, stop=stop, atr=v["atr"]) == 1.0
+    # 只放宽预算：风险过了，但保证金 30.9% > 20% 仍拦（P1-C 生效）
+    m = rescued.size_metrics("ag0", 0.30, v["price"], EQUITY, stop=stop, atr=v["atr"])
+    assert m["capped_by"] == "margin_cap", m["capped_by"]
+    assert rescued._size_qty("ag0", 0.30, v["price"], EQUITY, stop=stop, atr=v["atr"]) == 0.0
+    # 预算 + 保证金上限同时放宽 → 放行 1 手（证明预算覆盖确实参与计算）
+    both = _planner(
+        size_by_risk=True, risk_per_trade=0.01,
+        risk_per_trade_by_symbol={"ag0": 0.30}, max_margin_pct=0.40,
+    )
+    assert both._size_qty("ag0", 0.30, v["price"], EQUITY, stop=stop, atr=v["atr"]) == 1.0
 
 
 def test_size_metrics_reports_effective_budget():
@@ -365,8 +395,13 @@ def test_size_metrics_reports_effective_budget():
     v = SYMBOLS["ag0"]
     m = pm.size_metrics("ag0", 0.30, v["price"], EQUITY, stop=_stop("ag0"), atr=v["atr"])
     assert m["risk_budget"] == pytest.approx(0.30)
-    assert m["capped_by"] == "notional"      # 预算放行后，由名义口径封顶
-    assert m["final_lots"] == 1
+    # ⛔ P1-C（2026-09-02）：原断言「预算放行后由名义口径封顶 → capped_by=notional、
+    # final_lots=1」已不成立 —— 预算放行后先撞上**保证金硬顶**（ag0 保证金 30.9%
+    # > 20%）。名义硬顶本就**仅告警不拦截**（设计如此），从来不是封顶者；真正封顶
+    # 的现在是保证金口径。核心断言（risk_budget 归因 = 0.30）不受影响。
+    assert m["capped_by"] == "margin_cap", m["capped_by"]
+    assert m["over_margin_cap"] is True
+    assert m["final_lots"] == 0
 
 
 def test_per_symbol_override_never_breaks_only_reduce_invariant():
