@@ -639,6 +639,9 @@ class TradingScheduler:
             sig, decision, quote=quote, equity=acct.equity, atr=atr
         )
 
+        # ---- D-5 补强（2026-09-02）：sizing 层归零也计入拦截原因 ----
+        self._record_sizing_block(symbol, day, decision, plan, pos_ctx, quote, acct, atr)
+
         # ---- P1-1 决策 trace（在撮合前落盘，冻结"决策当下"的全部上下文）----
         # 位置刻意选在 update_from_signal 之后、execute_plan 之前：既含风控原始决策
         # （decision）也含换算后的手数（plan.target_qty），且不受撮合结果影响。
@@ -674,6 +677,57 @@ class TradingScheduler:
                     reentries=(prev.reentries + 1) if carry else 0,
                 )
                 self._save_cooldown_state()
+
+    # ------------------------------------------------------------------
+    # D-5：sizing 层拦截归因（补 C2 的统计盲区）
+    # ------------------------------------------------------------------
+    def _record_sizing_block(
+        self,
+        symbol: str,
+        day: Any,
+        decision: Any,
+        plan: Any,
+        pos_ctx: Any,
+        quote: Any,
+        acct: Any,
+        atr: Optional[float],
+    ) -> None:
+        """sizing 层归零也计入 ``_block_reasons``（2026-09-02，QA 验证的实测缺口）。
+
+        补 C2 的统计盲区：``_process_symbol`` 里第一路统计只认「风控意图 = 0」
+        （``abs(decision.target_position) < 1e-9``）；而 sizing 归零（risk_budget /
+        margin_cap / min_lot_threshold）发生在 planner 层 —— 此时
+        ``decision.target_position`` **非零**（风控想开仓），那路统计不成立，
+        C2 的「0 开仓原因分布」永远看不到 risk_budget / margin_cap。
+        09-01 实证：ag0 被 risk_budget 拦 14 次，C2 全库仅见 rl_intent /
+        signal_cooldown。最坏场景 —— 所有品种都「风控想开、但手数算出 0」——
+        ``_block_reasons`` 为空，``_warn_zero_open`` 直接 return，**彻底静默**；
+        叠加 P1 把 ag0 的每轮 WARNING 降为每日 1 条 INFO 后，静默更彻底。
+
+        仅在「无持仓 + 风控想开 + 手数算出 0」三条件同时成立时补记，
+        归因取 ``size_metrics()["capped_by"]``（纯计算、无副作用，只在归零
+        轮次多一次微秒级计算）。异常完全隔离，绝不影响交易主流程。
+        """
+        try:
+            if not (
+                abs(pos_ctx.position) < 1e-12
+                and abs(float(getattr(decision, "target_position", 0.0))) > 1e-9
+                and plan.target_qty < 1e-9
+            ):
+                return
+            _m = self._planner.size_metrics(
+                symbol,
+                abs(float(getattr(decision, "target_position", 0.0))),
+                quote.price,
+                acct.equity,
+                stop=getattr(decision, "stop_price", None),
+                atr=atr,
+            )
+            _reason = str(_m.get("capped_by") or "sized_zero")
+            _bucket = self._block_reasons.setdefault(day, {})
+            _bucket[_reason] = _bucket.get(_reason, 0) + 1
+        except Exception:
+            log.exception("sizing 拦截原因统计失败（已隔离）symbol={}", symbol)
 
     # ------------------------------------------------------------------
     # accumulate 模式（c0 决策，§8.1）
