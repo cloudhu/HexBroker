@@ -63,9 +63,13 @@
 
 | 编号 | 事项 | 优先级 |
 |---|---|---|
-| **P-NEW** | **cu0/ni0 湖内 k 伪台阶疑似污染**（0820~0825，扩展日旧约排放向量）：需用独立名义源（sina 逐位）+ 合约级数据定罪/豁免；若定罪，按 p2 备份→原子写→逐位重建三件套修复 4~9 行。同向量仍存在于「seam∈tail + ext 非空」路径（Part A 未覆盖，ROLLOVER 守卫对 <9.5% 跳变失明）——可评估加「扩展日 vs 湖末行名义价连续性」护栏 | P1（建议下轮裁决） |
+| **P-NEW** | ~~**cu0/ni0 湖内 k 伪台阶疑似污染**~~ → **已定罪并修复**（2026-09-02 13:33，5 行 × 5 列，G0~G5 全绿，台账第 4 条）。详见 `deliverables/cu_ni_k_step_forensics_20260902.md`。**残留防再发项**：同向量仍存在于「seam∈tail + ext 非空」路径（Part A 未覆盖，ROLLOVER 守卫对 <9.5% 跳变失明）——可评估加「扩展日 vs 湖末行名义价连续性」护栏 | P1（建议下轮裁决） |
 | P1-2 | hc0 类 SCALE_UNSTABLE 修法（A/B/C 选项）仍待裁决；今晚大概率自愈 | P1 |
 | P2-1 / P2-2 | night 守卫时段错配 / include-today 占位 bar 入口护栏 | P2 |
+| **P2-3** | **cu0/ni0 open 列 10 项残差**（非本次修复的 5 行，幅度 0.009%~0.171%）：已排除「夜盘 vs 日盘会话口径」假设（`day_session_open` 亦不吻合）；open 不参与 `k = adj_close / raw_close`，不破坏 k 段内不变量。**本轮未修、未扩大修复面**（主理人裁定 ②）。证据见 `cu_ni_k_step_forensics_20260902.md` §1.3 更正说明 | P2 |
+| **P2-4** | **`open_interest` 整体错位一行**：cu0/ni0 湖值与 pandadata 系统性差一行（如 cu0 0826 湖 204454 = pandadata 0825 值），全窗口 26 项，疑为落盘对齐偏移；**非本次修复列**（主理人裁定 ③）。证据 `artifacts/_tmp/pnew_open_residual_out.txt` | P2 |
+| **P2-5** | **`volume` 换月窗口 3 项差异**：cu0 0824（74677 vs 77057，−3.09%）、ni0 0821（120313 vs 95926，+25.4%）、ni0 0824（152615 vs 156721，−2.62%），集中换月日，疑新旧约合并口径差；**非本次修复列**（主理人裁定 ④）。证据同上 | P2 |
+| **P2-6** | **`p22_tail_ext` 的「末折复现与 v8 逐字节一致」自校验全线失败**：2026-09-02 重训 3 组 8 品种，全部 `all_verified=False` —— rb0 max_diff=1.33e+00、hc0 1.26e+00、cu0 1.05e+00、zn0 6.81e-01、al0 3.99e-01，au0/ag0/ni0 为 `nan`（v8 匹配行数 ≠ 复现行数）。而 `p22_tail_ext.py` L19 文档声称「与 v8 末折模型逐字节一致（脚本内校验）」。**不影响生产输出**：fold 记录仅用于诊断，`_tail_ext_for_symbol` L238-257 建 `fold_recs` 做对比、**L277 只 `return tail_recs`**，fold 记录不进 checkpoint 更不进缓存。**属既有状态**（au0/ag0/al0/zn0/rb0/hc0 湖数据本轮零改动，同样 NOT-VERIFIED），非 cu0/ni0 修复引入。待查成因（疑 v8 建缓存时的 cfg 与现 `_setup_cfg` 不一致，或 fold 网格随数据增长漂移）。证据 `artifacts/_tmp/p22_determinism_probe_out.txt`、`p22_determinism_ferrous_out.txt` | P2 |
 | 纯天勤补点代码化 | rb2701 补点法（直连合约 + 湖 k 锚）代码化需扩展 `TqsdkSource`（新增直连合约拉取能力），本轮未做——Part B 已用 pandadata 定向补数达成同等保障，纯天勤版留作后续优化 | P2 |
 
 ## 七、改动文件清单
