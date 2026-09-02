@@ -491,4 +491,55 @@ QA 提及此为**既有**局限，与本次改动无因果关系，不在本次�
 
 ---
 
+## 12. D-5 缺口修复：sizing 层归零计入拦截原因（2026-09-02）
+
+### 12.1 勘误：§10.6 的「D-5 未做」不准确
+
+R20 报告建议 D-5 时存在**取证盲区**：C2 机制**早已存在** —— `scheduler.py`
+L1144-1161 的 `_warn_zero_open`（当日 0 开仓 → 输出拦截原因分布、去重防刷屏；
+测试 `test_signal_refresh_gate.py::test_warn_zero_open_emits_reason_distribution`），
+生产已输出 138 次。**§10.6 待办表该行已更正**，特此留痕。
+
+### 12.2 真实缺口（实测证实，非推测）
+
+C2 的统计条件（`scheduler.py` L630）只认「**风控意图 = 0**」：
+
+```python
+abs(pos_ctx.position) < 1e-12 and abs(decision.target_position) < 1e-9
+```
+
+**sizing 层归零**（风控想开、手数算出 0：risk_budget / margin_cap）发生在 planner 层，
+`decision.target_position` 非零 → 条件 False → **不计入 `_block_reasons`**。
+三条硬证据（`artifacts/_tmp/verify_d5_gap.py`，全绿）：
+
+1. ag0 意图 30% → `capped_by=risk_budget`、`final_lots=0`，L630 条件 **False**，不计入；
+2. 生产全库 C2 原因分布仅 rl_intent(71) / signal_cooldown(67)；
+3. 09-01 ag0 被 risk_budget 拦 14 次（20:38–21:50 夜盘）与 C2 的 43 次输出（日盘 09:08–10:59）**时间零重叠**。
+
+最坏场景：所有品种「风控想开但手数算出 0」→ `_block_reasons` 空 → `_warn_zero_open`
+直接 return → **彻底静默**（叠加 P1 降级后连每轮告警都没了）。
+
+### 12.3 修法（不触碰任何风控逻辑）
+
+`scheduler.py` 新增 `_record_sizing_block`（在 `_process_symbol` 生成 plan 后调用），
+三条件**全中**才记录：
+
+- 无持仓：`abs(pos_ctx.position) < 1e-12`
+- 风控想开：`abs(decision.target_position) > 1e-9`
+- 手数算出 0：`plan.target_qty < 1e-9`
+
+归因取 `size_metrics()["capped_by"]`（risk_budget / margin_cap / min_lot_threshold / notional），
+计入与 C2 同一个 `_block_reasons` 桶 → 复用 `_warn_zero_open` 的当日分布与去重防刷屏。
+**try/except 完全隔离**：统计失败只打一条异常日志，绝不影响交易主链路。
+
+### 12.4 测试与回归
+
+`tests/test_d5_sizing_block_reason.py` 5 用例：
+risk_budget 记录 + 多轮累计（=2）、margin_cap 记录、
+意图=0 / 手数≠0 / 有持仓 三条反向（均不记录）。
+
+全量回归（不带路径参数）：**1160 passed**（1155 基线 + 5 新增），0 failed。
+
+---
+
 *风险提示：本报告为配置与风控口径分析，不构成投资建议。所有结论基于 2026-09-01 收盘快照与当前 18 品种乘数表，随行情与合约规则变化需重算。*
