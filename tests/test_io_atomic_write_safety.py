@@ -11,13 +11,16 @@ G5 铁律：绝不删除，写盘走 ``tmp + os.replace`` 原子替换）。P2-7
 ----
 1. :func:`test_utils_infra_files_no_delete_calls` —— 参数化扫描
    ``hexbroker/utils/*.py`` 全部文件：零删除类调用。
-2. :func:`test_io_py_still_atomic` —— io.py 必须保留 ``os.replace(tmp, path)``
+2. :func:`test_hexbroker_package_no_unexpected_delete_calls` —— **P2-8c 方案①**
+   （主理人裁决 2026-09-03）：``hexbroker/`` 全包扩扫，豁免清单只登记
+   ``rebuild.py`` / ``health_check.py`` 两处设计内 marker/PID 生命周期清理。
+3. :func:`test_io_py_still_atomic` —— io.py 必须保留 ``os.replace(tmp, path)``
    原子替换主路径（证明扫描范围非空、护栏不空转）。
-3. :func:`test_audit_no_delete_calls_negative_control` —— 审计器负向自测
+4. :func:`test_audit_no_delete_calls_negative_control` —— 审计器负向自测
    （项目铁律：护栏必须能抓到违规，否则是空转的）。
-4. :func:`test_atomic_write_failure_keeps_tmp_and_original` —— **P2-8 核心行为**：
+5. :func:`test_atomic_write_failure_keeps_tmp_and_original` —— **P2-8 核心行为**：
    写盘失败 → 异常向上传播、原档逐字节不变、tmp **保留**（而非被删）。
-5. :func:`test_atomic_write_success_replaces_target` —— 正常路径回归：
+6. :func:`test_atomic_write_success_replaces_target` —— 正常路径回归：
    写盘成功 → 目标被原子替换、无 tmp 残留。
 """
 
@@ -34,6 +37,19 @@ from hexbroker.utils import io as io_mod
 from hexbroker.utils.safety_audit import audit_no_delete_calls
 
 UTILS_DIR = Path(io_mod.__file__).resolve().parent
+PACKAGE_DIR = UTILS_DIR.parent
+
+#: P2-8c 方案①豁免清单（主理人裁决 2026-09-03，取证见 deliverables
+#: p2_8_io_safety_fix_20260902.md §8.1）—— 两处设计内 marker/PID 生命周期清理：
+#: - data/rebuild.py:141        clear_provisional：sidecar 全部年份清空后删空文件
+#: - data/rebuild.py:359        分区按真值重建后消费 _MISSING_{year}.json 标记
+#: - diagnostics/health_check.py:154  僵尸 PID 锁文件清理（删不删功能等价）
+#: 按**文件**粒度豁免：文件内新增删除调用不再红，属已知取舍（避免逐行豁免的
+#: 脆弱性）；新增豁免必须先过主理人裁决并在本清单登记语义。
+AUDIT_PACKAGE_EXEMPT = frozenset({
+    "data/rebuild.py",
+    "diagnostics/health_check.py",
+})
 
 
 # ===========================================================================
@@ -57,6 +73,32 @@ def test_utils_infra_files_no_delete_calls(py: Path):
         f"基建文件 {py.name} 出现删除类调用（沙箱 safe-delete 钩子会拦截删除"
         f"并路由至回收站，项目已因此丢过生产文件；写盘必须走 "
         f"tmp + os.replace 原子替换）：\n  - " + "\n  - ".join(violations)
+    )
+
+
+# ===========================================================================
+# 1b. 包级红线扩扫（P2-8c 方案①：hexbroker/ 全包，豁免清单制）
+# ===========================================================================
+def test_hexbroker_package_no_unexpected_delete_calls():
+    """``hexbroker/`` 全包扫描：删除类调用只允许出现在豁免清单内的文件。
+
+    - utils/ 已由参数化用例零容忍覆盖，本用例负责其余全部包内文件；
+    - ``third_party/``（vendored）不在扫描范围（repo 根目录，天然排除）；
+    - 豁免清单按文件粒度，语义登记见 AUDIT_PACKAGE_EXEMPT 注释；
+    - 新增文件/新增删除调用未登记 → 直接红（fail-closed）。
+    """
+    offenders: list[str] = []
+    scanned = 0
+    for py in sorted(PACKAGE_DIR.rglob("*.py")):
+        rel = py.relative_to(PACKAGE_DIR).as_posix()
+        scanned += 1
+        violations = audit_no_delete_calls(py.read_text(encoding="utf-8"))
+        if violations and rel not in AUDIT_PACKAGE_EXEMPT:
+            offenders.append(f"{rel}:\n    " + "\n    ".join(violations))
+    assert scanned > 100, f"包级扫描范围异常（仅扫到 {scanned} 文件），护栏可能空转"
+    assert not offenders, (
+        "hexbroker/ 包内出现未豁免的删除类调用（登记豁免需主理人裁决，"
+        "写盘走 tmp + os.replace 原子替换）：\n  - " + "\n  - ".join(offenders)
     )
 
 

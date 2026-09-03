@@ -194,7 +194,3 @@ class SignalStore:
         rec = df.iloc[0].to_dict()
         rec["ts"] = df.index.get_level_values("datetime")[0]
         return ForecastSignal.from_record(rec)
-
-    def clear(self) -> None:
-        for f in self.root.glob("*/*.parquet"):
-            f.unlink()
