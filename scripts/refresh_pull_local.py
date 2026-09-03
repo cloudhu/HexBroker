@@ -385,6 +385,23 @@ def _backup_pull_symbol(
 
     new_dates = [pd.Timestamp(d) for d in res.new_dates]
     t0 = pd.Timestamp(res.anchor_date)
+    # 锚点必须落在**湖的最末一根 bar** 上（QA R27 fresh-eyes 加护栏，2026-09-03）。
+    #
+    # graft 的 ``t0 = common.max()`` 只是「两源重叠的最新日」。若备源在湖末日
+    # 有缺口（sina/akshare 单日缺数很常见），t0 会**退到湖末日之前**——而换月
+    # 恰好发生在湖末日时，k0 取到的就是**旧段**复权比，外推出的新 bar 相对正确
+    # 值整段偏移（rb0 量级实测 +1.72%，即 p43 cu0/ni0 定罪的幽灵台阶复活）。
+    #
+    # ⚠️ 现有护栏全部接不住：n_align 只看重叠样本数（重叠区全在旧段 → 比值恒定、
+    # graft 零告警）；anchor_gap_days 只限间隔（跨一次换月只需 2 天，远小于阈值
+    # BACKUP_MAX_ANCHOR_GAP_DAYS=7）；接缝名义价校验只查名义价连续性，查不出
+    # 复权比跳段。故必须显式要求「锚点 = 湖末日」。
+    lake_last = pd.Timestamp(anchor.index.max())
+    if t0 != lake_last:
+        raise ValueError(
+            f"BACKUP_ANCHOR_NOT_LATEST: 备源在湖末日 {lake_last.date()} 无数据，"
+            f"锚点退到 {t0.date()} —— 该日复权比不保证属于当前复权段（换月窗口内"
+            f"会取到旧段 k，写出幽灵台阶）；备源必须覆盖湖末日，否则拒绝续接")
     gap_days = int((new_dates[0] - t0).days)
     if gap_days > BACKUP_MAX_ANCHOR_GAP_DAYS:
         raise ValueError(
@@ -408,19 +425,50 @@ def _backup_pull_symbol(
     # k_d = grafted_close / raw_close 精确还原 graft 的分段因子（换月时会自动
     # 跳段，这正是「严禁自乘 k」的价值所在）。OHLC 按同一 k_d 缩放，保证
     # open<=close<=high 的包络关系不被破坏。
+    # 取值校验（QA R27 fresh-eyes 加护栏，2026-09-03）：现有 ``BACKUP_NO_OHLC``
+    # 只查**列是否存在**，查不出**值是否可用**。而 sina/akshare 缺字段有两种
+    # 常见编码：``NaN`` 与 ``0.0``。二者都会被融合端
+    # ``p6_4_fill_gaps.coerce_schema`` 的 ``fillna(0.0)`` 落成 0.0 ——
+    # 即工程师在 ``RawPull.frame`` 注释里亲手定为红线的「open/high/low=0 零价
+    # bar」，只是换了条路进来（缺列被挡了，NaN/0 值没挡）。
+    # 另：``json.dumps`` 默认 ``allow_nan=True``，NaN 会写成非标准字面量 ``NaN``
+    # （严格 JSON 解析器直接拒绝，Python 解析器接受后再被 coerce_schema 填 0）。
     rows: list[list] = []
     for d in new_dates:
         if d not in set(frame.index):
             raise ValueError(f"BACKUP_NO_OHLC: 备源帧缺少 {d.date()} 的 OHLC 行")
+        o_v = float(frame.loc[d, "open"])
+        h_v = float(frame.loc[d, "high"])
+        l_v = float(frame.loc[d, "low"])
         raw_v = float(raw.loc[d])
+        for _name, _v in (("open", o_v), ("high", h_v), ("low", l_v)):
+            if _v != _v or _v <= 0.0:  # NaN 或 非正
+                raise ValueError(
+                    f"BACKUP_BAD_OHLC: 备源 {d.date()} 的 {_name}={_v!r} 非有限正值"
+                    f" —— 融合端 coerce_schema 会 fillna(0.0) 成零价 bar，"
+                    f"宁可不补（红线：不可写错口径）")
         k_d = float(res.series.loc[d]) / raw_v
         vol = float(frame.loc[d, "volume"]) if "volume" in frame.columns else 0.0
         oi = float(frame.loc[d, "open_interest"]) if "open_interest" in frame.columns else 0.0
+        for _name, _v in (("volume", vol), ("open_interest", oi)):
+            if _v != _v or _v < 0.0:  # NaN 或 负
+                raise ValueError(
+                    f"BACKUP_BAD_OHLC: 备源 {d.date()} 的 {_name}={_v!r} 非法"
+                    f"（NaN/负数，会污染主湖）")
+
+        # 包络自洽（名义价口径）：low ≤ min(open, close) 且 high ≥ max(open, close)。
+        # 同 k_d 缩放（k_d > 0）本身保序，但保不住**备源自带的脏数据**——
+        # 脏 bar 一旦落湖，下游指标（ATR/布林/最高最低）会静默消化。
+        if not (l_v <= min(o_v, raw_v) and h_v >= max(o_v, raw_v)):
+            raise ValueError(
+                f"BACKUP_OHLC_INCOHERENT: 备源 {d.date()} 包络破坏 "
+                f"low={l_v} open={o_v} high={h_v} close={raw_v}（名义价口径）"
+                f" —— 拒绝落盘")
         rows.append([
             d.strftime("%Y%m%d"), base,
-            round(float(frame.loc[d, "open"]) * k_d, 6),
-            round(float(frame.loc[d, "high"]) * k_d, 6),
-            round(float(frame.loc[d, "low"]) * k_d, 6),
+            round(o_v * k_d, 6),
+            round(h_v * k_d, 6),
+            round(l_v * k_d, 6),
             round(raw_v * k_d, 6),
             vol, oi,
         ])
@@ -706,6 +754,11 @@ def main() -> int:
         # MIN_OVERLAP 天），故改走 sina/akshare 名义价 + graft 续接。
         # ⛔ 备源是**新增的第二数据源**，不是放宽主路判定 —— RAW_ALIGN_TOL /
         # K_TOL / MIN_OVERLAP 一个字都不动。
+        # ⚠️ 落盘**必须**包在 try 内（QA R27 fresh-eyes 修正）：原实现把
+        # ``json.dumps`` / ``_atomic_write_text`` 留在 try 之外，与主路分支不对称
+        # —— 主路的落盘在 try 内（异常只让该品种失败），备源分支却会让序列化/
+        # 写盘异常**穿透 main()**，导致整脚本崩溃、18 品种全停（违反 R22：
+        # 不引入新的全停失效模式）。
         try:
             bk_rows, bk_info = _backup_pull_symbol(
                 sym0,
@@ -714,6 +767,15 @@ def main() -> int:
                 emit_end,
                 PRICE_JUMP_PCT.get(sym0, PRICE_JUMP_DEFAULT),
             )
+            payload = {"result": {"type": "dataframe",
+                                  "columns": SAFE_COLS, "rows": bk_rows}}
+            # allow_nan=False：纵深防御。即便上游校验漏掉某个 NaN，也让落盘
+            # **响亮失败**（计该品种失败 → 退出码 3），而不是写出含非标准
+            # ``NaN`` 字面量的 json —— 后者会被下游严格解析器整批拒收，或被
+            # Python 解析器接受后由 coerce_schema fillna(0.0) 填成零价 bar。
+            _atomic_write_text(
+                out_dir / f"{sym0}.json",
+                json.dumps(payload, ensure_ascii=False, allow_nan=False))
         except ValueError as exc:
             failed.append((sym0, f"{primary_err} → 备源亦失败：{exc}"))
             report.append(
@@ -726,9 +788,6 @@ def main() -> int:
                 f"| {sym0} | ⛔ | - | - | - | - | - | - | {primary_err} | - | "
                 f"主路 tqsdk / 备源异常：UNEXPECTED: {exc} |")
             continue
-        payload = {"result": {"type": "dataframe", "columns": SAFE_COLS, "rows": bk_rows}}
-        _atomic_write_text(out_dir / f"{sym0}.json",
-                           json.dumps(payload, ensure_ascii=False))
         ok.append(sym0)
         seam_status_map[sym0] = bk_info["seam_status"]
         backup_detail[sym0] = bk_info
