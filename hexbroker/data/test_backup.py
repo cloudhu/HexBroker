@@ -155,6 +155,24 @@ class TestFallbackRouting:
 # 新鲜度门禁
 # ---------------------------------------------------------------------------
 class TestFreshness:
+    @pytest.fixture(autouse=True)
+    def _freeze_reference_clock(self, monkeypatch):
+        """冻结 assert_fresh 的参考时钟（today=2026-08-28）。
+
+        教训（2026-09-03 实测翻车）：本类用例硬编码 end=2026-08-28 +
+        max_stale_days=5，而 assert_fresh 的历史回填豁免用 ``date.today()``
+        真实时钟 —— 日期滚过豁免边界（today-5d > end）后，「陈旧必须失败」
+        的用例静默反转成「豁免通过」。测试不得依赖墙钟：在 backup 模块层
+        包一层注入 today，isinstance 语义与被测实现零改动。
+        """
+        real_assert_fresh = backup_mod.assert_fresh
+
+        def _frozen(df, end, **kw):
+            kw["today"] = date(2026, 8, 28)
+            return real_assert_fresh(df, end, **kw)
+
+        monkeypatch.setattr(backup_mod, "assert_fresh", _frozen)
+
     def test_stale_source_is_treated_as_failure(self, patch_build):
         """陈旧 = 失败，不得静默当作刷新成功（2026-08-28 事故的直接教训）。"""
         registry, _ = patch_build
