@@ -65,7 +65,20 @@
 
 **回归**：全量 **1183 passed**（junitxml 权威：tests=1183 / failures=0 / errors=0；口径 1181 − 7 旧 + 9 新 + 审计清单同步）。
 
-## 七、遗留与后续
+## 七、QA fresh-eyes 复核（R26g，PASS：0🔴/4🟡，🟡 当轮全堵）
+
+QA 独立实证（探针 + 重跑，非复述声明）：目标测试 30/30 passed、junit_r26g.xml 权威 1183/0/0/0、两提交无夹带、锁区/内容区真隔离实测（持锁时文件头读写成功、4096 锁字节 PermissionError errno=13、release 后恢复）、fd 无泄漏、合并方向严格大于与 docstring 一致。小观察：junit 早于 commit ~2.5min（commit 前验证模式），可接受。
+
+| 🟡 | 内容 | 处置 |
+|---|---|---|
+| 🟡1 | 合并比较在构造 try 之外：磁盘 opened_at 为 tz-aware 时 naive/aware 混比较抛 TypeError → 外层 except 吞掉 → **整次合并放弃 → fail-open 整体写内存 → 陈旧内存回滚新鲜磁盘**（恰好复刻 P1-B）。系统自产 opened_at 恒 naive（datetime.now()），当前不可触发故 🟡；未来引入 aware 序列化即升级 🔴 | ✅ 已修：比较前 naive 归一化（scheduler.py）+ 新增回归用例 `test_p1b_tz_aware_disk_record_still_wins` |
+| 🟡2 | acquire 成功与 try/finally 之间夹 governance 自检与新鲜度检查，二者抛异常则锁无显式 release（靠进程退出兜底，正确性不受损） | ✅ 已修：try 上提覆盖两步（paper_trading_main.py） |
+| 🟡3 | health_check `_win_pid_creation_time`/`_pid_creation_time` docstring 仍写「PID 锁身份校验」——语义已退役，文档腐烂易误导复活旧判活锁 | ✅ 已修：docstring 更新为「仅取证内容生成，不参与互斥」 |
+| 🟡4 | 测试卫生：子进程用例被拒断言若意外取得锁，fd 无 release 通道悬挂 | ✅ 已修：finally 内兜底 release（test_pid_lock.py） |
+
+**修复后回归**：目标 44 passed（P1-B 8 + PID 锁 9 + 审计 14 + 冷却 13）；全量 **1184 passed**（junit_r26g2.xml 权威，口径 1183 + 🟡1新用例）。
+
+## 八、遗留与后续
 
 - 僵尸锁概念已随句柄锁消亡（进程退出即释放），`launch_trading_window.py` 文档语义不变（重复调用仍被安全拒绝）。
 - `purge_test_pollution_from_audit_log.py` 对 `paper.pid` 的 fail-closed 只读探测兼容常驻文件（PID 可能是上一个已退出实例，psutil/os.kill 探测仍正确放行/拒绝）。
