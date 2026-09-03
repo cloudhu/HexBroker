@@ -180,6 +180,17 @@ NameError → 8 failed），按取证 SOP 定位后补齐，复测 13 passed。
 自测：安全测试文件 14 passed；全量回归 **1174 passed**（见 §5）。
 QA fresh-eyes 复核已发出（software-qa-engineer-3），结论回填后如有🟡另记。
 
+**QA fresh-eyes 复核结论（2026-09-03，software-qa-engineer-3）：通过 0 🔴 / 2 🟡**：
+
+| 项 | QA 独立取证 | 处置 |
+|---|---|---|
+| ✅ clear() 死代码 | 自行 AST 级 grep `\.clear\(\)` 全包：signal_store 内 0 命中（仅类型无关的 dict/list clear）；消费方（pipeline/run_forecast/test_signal_contract 等）不引用 clear | 无需动作 |
+| ✅ 豁免路径键 fail-closed | 用例按 `relative_to(PACKAGE_DIR)` 键控，包外/未知路径进不了豁免分支；`scanned>100` 防空转断言成立（实测 ~150） | 无需动作 |
+| 🟡1 豁免计数基线未锁定 | 豁免文件内新增第 3 条 unlink 不会红 | **本轮已堵**：豁免清单升级为计数锁定（rebuild=2 / health_check=1），加料红 |
+| 🟡2 stale 豁免无对向断言 | 未来 rebuild.py 整改清零后，豁免条目成死配置（静默盲区） | **随 🟡1 一并堵**：清零 → 计数不符 → 红 → 强制同步清清单（计数锁定天然涵盖对向断言） |
+
+另：QA 对 R26b `78cd798`（模块别名）负向矩阵复测 4/4 必抓，维持通过。
+
 ### 8.4 附：Q4 取证结论（c0 宇宙归属，2026-09-03 实测）
 
 - `CONTRACTS18`（`scripts/build_signals18.py:18`）键集 = au0/ag0/m0/cu0/rb0/i0/al0/zn0/ni0/hc0/y0/p0/j0/jm0/sr0/cf0/ta0/sc0 —— **无 c0** ✅
