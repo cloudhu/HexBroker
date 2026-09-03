@@ -364,6 +364,40 @@ skipped 明细: 1 × pytest.xfail（M5 缺口探针）
 
 ---
 
+## G. 与工程师并行提交的同步核验
+
+复核期间工程师又提了两个 commit，已核实**均为 docs-only**，未动 `scripts/`：
+
+```
+d1e720a docs(p0-adj): 增补 §11 名义价保护契约（raw_close 纳入受保护列，待 GO）
+        deliverables/cu_ni_rollback_20260903.md | 113 +++
+7ca9cb8 docs(p0-adj): §11 补 L561 量纲级直证、Option B 解耦、R8 与全湖预检证据
+        deliverables/cu_ni_rollback_20260903.md | 165 +++--
+```
+
+当前 HEAD 源码复核（与我复核时的基线一致，**结论不过时**）：
+
+```
+scripts/p6_4_fill_gaps.py:109-111
+MERGE_PROTECTED_COLUMNS: tuple[str, ...] = (
+    "open", "high", "low", "close", "adj_close",
+)                       # ← 仍不含 raw_close
+```
+
+即：**E 项在源码层面尚未落地**（工程师文档标注"待 GO"），我的 🟡 判定与契约锁
+对当前 HEAD 成立。若 GO 通过、把 `raw_close` 加进 `MERGE_PROTECTED_COLUMNS`，
+请注意两点：
+
+1. `MERGE_GUARD_REQUIRED_COLUMNS`（L113-115）由 ` MERGE_PROTECTED_COLUMNS` 拼接而成，
+   加列会**同时收紧回退判据** —— 任一侧缺 `raw_close` 即触发回退（= 回到事故行为）。
+   必须同步确认主湖与所有数据源都必有该列，否则把"保护"变成了"更容易回退"。
+2. `test_guard_column_contract` 断言 `set(MERGE_PROTECTED_COLUMNS) == {5 列}`，
+   加列后该用例会变红 —— 这是**预期**的，需连同本文档 §E 一并更新。
+
+同步核验回归（当前 HEAD，护栏三件套）：`42 passed, 1 xfailed`（xfail 即 M5 探针）。
+
+---
+
 ## 附：本次新增文件
 
 - `tests/test_p6_4_merge_guard_gaps.py`（13 例）—— M5 探针 + M7/M8 补锁 + C/E 项加固 + 主湖零写入红线
