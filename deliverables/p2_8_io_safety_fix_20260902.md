@@ -5,10 +5,10 @@
 | 项 | 内容 | 状态 |
 |---|---|---|
 | P2-8 | `hexbroker/utils/io.py::_atomic_write` 异常路径 `os.remove(tmp)` → **保留 tmp** | ✅ 已修 |
-| P2-7 推广 | 红线审计器抽为基建共享模块 `hexbroker/utils/safety_audit.py`，参数化扫描 `hexbroker/utils/*.py` 全部 **8** 文件；**模块别名绕过已堵**（QA 复核后补，见 §7） | ✅ 已落地 |
+| P2-7 推广 | 红线审计器抽为基建共享模块 `hexbroker/utils/safety_audit.py`，参数化扫描 `hexbroker/utils/*.py` 全部 **8** 文件；**模块别名绕过已堵**（QA 复核后补，见 §7）；**P2-8c 包级扩扫 + `SignalStore.clear()` 死代码删除**（主理人裁决 2026-09-03，见 §8） | ✅ 已落地 |
 | Q1 | `broker.py` L5 docstring「单品种保证金」→「全组合口径」 | ✅ 已修（随本轮 feat） |
 | QA 复核 | fresh-eyes 独立复核（software-qa-engineer-3）：**0 🔴 / 4 🟡**，逐项处置见 §7 | ✅ 通过 |
-| 回归 | **1173 passed**（1160 基线 + 13 新增），0 failed | ✅ 实测 |
+| 回归 | **1174 passed**（1160 基线 + 14 新增），0 failed | ✅ 实测 |
 | 提交 | feat + docs 双提交（hash 见 §6），含 QA 处置 follow-up | ✅ |
 
 ## 1. P2-8：证据与修法
@@ -100,11 +100,11 @@ QA fresh-eyes 复核确认并补充定性：
 ## 5. 回归
 
 ```
-全量（不带路径参数）：1173 passed（1160 基线 + 13 新增），0 failed
+全量（不带路径参数）：1174 passed（1160 基线 + 14 新增），0 failed
 ```
 
-新增用例分布：`tests/test_io_atomic_write_safety.py` 13 个
-（8 参数化 + 5 专项）。
+新增用例分布：`tests/test_io_atomic_write_safety.py` 14 个
+（8 参数化 + 6 专项，含 P2-8c 包级扩扫）。
 
 **插曲（R26b 全量回归实测）**：首轮全量 2 failed ——
 `hexbroker/data/test_backup.py::TestFreshness` 两用例，与 R26b 改动无关，
@@ -164,12 +164,21 @@ NameError → 8 failed），按取证 SOP 定位后补齐，复测 13 passed。
 | ① 扩扫 + 显式豁免清单 | 参数化审计从 `utils/` 扩到 `hexbroker/` 全包（**排除 third_party/**，其内 vendored 库 unlink 遍布）；豁免清单只登记 `rebuild.py` / `health_check.py` 两文件（注释锚定） | 审计测试 +~20 行；豁免按文件粒度（文件内新增 unlink 不再红） | 新增隐藏删除调用必红；红线可见性覆盖全包 |
 | ② 逐处整改单（G5 化） | 4 处全部改造 | **marker/PID 类无 G5 等价物**（空文件仍命中 `.exists()`/glob；os.rename 同在红线内）——改法只能改为「payload 置空 + 消费方感知」，侵入 3 个消费点，回归风险大于收益 | 基本无净收益 |
 
-### 8.3 推荐（待裁决）
+### 8.3 处置（**已实施**，主理人裁决 2026-09-03「P2-8c 方案」采纳推荐）
 
-**方案 ① + 一个零风险整改**：
-1. 审计扩扫到 `hexbroker/` 全包（排除 third_party），豁免清单登记 `rebuild.py`、`health_check.py`；
-2. **删除 `SignalStore.clear()` 死代码**（全仓零调用，API 移除零风险，根除唯一整库 unlink 暴露面）——若主理人倾向保留 API，则降级为 docstring 红线警告；
-3. `health_check.py:154` 僵尸 PID 清理保持不动（设计内，豁免登记）。
+**方案 ① + 零风险整改，已落地**：
+1. ✅ 审计扩扫：`tests/test_io_atomic_write_safety.py` 新增
+   `test_hexbroker_package_no_unexpected_delete_calls` —— 扫描 `hexbroker/`
+   全包（~150 文件，`third_party/` 在 repo 根目录天然排除），豁免清单
+   `AUDIT_PACKAGE_EXEMPT = {data/rebuild.py, diagnostics/health_check.py}`
+   （文件粒度 + 语义注释锚定，新增豁免须主理人裁决）；带 `scanned > 100`
+   防空转断言；
+2. ✅ **删除 `SignalStore.clear()` 死代码**（`signal_store.py` 原 L198-200，
+   全仓零调用，根除唯一整库 unlink 暴露面）；
+3. ✅ `health_check.py:154` 僵尸 PID 清理保持不动（设计内，豁免登记）。
+
+自测：安全测试文件 14 passed；全量回归 **1174 passed**（见 §5）。
+QA fresh-eyes 复核已发出（software-qa-engineer-3），结论回填后如有🟡另记。
 
 ### 8.4 附：Q4 取证结论（c0 宇宙归属，2026-09-03 实测）
 
