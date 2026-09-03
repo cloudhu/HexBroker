@@ -86,6 +86,17 @@ $ git diff --stat -- scripts/
 ```
 变异台自带 PRISTINE 比对，输出 `还原校验: OK`。
 
+> ⚠️ **但这条证明当时其实不够强，已自查纠正 —— 详见 §H。**
+> `git diff` 为空是因为 `core.autocrlf=true` 下 clean filter 把 CRLF/LF 归一到同一个
+> blob；变异台用 Python 文本模式回写，把源码行尾从 **LF(50825 B) 静默改成了
+> CRLF(51941 B)**，`git diff` 看不出来，只有 `git status` 报 ` M`。
+> 现已按 PRISTINE 做**字节级**还原，三条证据全绿：
+> `git status --porcelain -- scripts/`（空）、`git diff --exit-code` rc=0、
+> `sha256 == 530f7fb0…6c38ed8f`（= 变异前字节）。
+> 变异台已改为 `read_bytes/write_bytes`，self-check 也改成字节比对。
+> **对 A 项结论无影响**：Python 源码语义与行尾无关，9 次变异注入/回退都作用在
+> 同一份内容上，kill/survive 判定有效。
+
 ---
 
 ## B. R22 兜底路径
@@ -395,6 +406,85 @@ MERGE_PROTECTED_COLUMNS: tuple[str, ...] = (
    加列后该用例会变红 —— 这是**预期**的，需连同本文档 §E 一并更新。
 
 同步核验回归（当前 HEAD，护栏三件套）：`42 passed, 1 xfailed`（xfail 即 M5 探针）。
+
+---
+
+## H. 自查：我的变异台改写了源码行尾（已修复，附取证）
+
+交付前最后一次完整性校验时，`git status --porcelain -- scripts/` 报出了：
+
+```
+ M scripts/p6_4_fill_gaps.py
+```
+
+而 `git diff -- scripts/` 却是空的。这不是 git 抽风，是**我的变异台留下的痕迹**，
+逐层取证如下（`artifacts/_tmp/qa_yan/_dirty2.txt`、`_dirty3.txt`、`_eol.txt`、`_fix_eol.txt`）：
+
+```
+worktree blob  64dea8e8afb2ad08b16a3abf92526418095d53e7
+HEAD     blob  64dea8e8afb2ad08b16a3abf92526418095d53e7   ← 内容确实与 HEAD 一致
+index    size  50825   mtime 1788429961 (= 2026-09-03 18:06:01，变异台首次快照时刻)
+worktree size  51941   （+1116）
+
+PRISTINE : bytes 50825  CRLF 0     LF 1116      ← 原始字节（shutil.copy2 二进制快照）
+变异后   : bytes 51941  CRLF 1116  LF 1116      ← 行尾被整体转成 CRLF
+```
+
+根因（`artifacts/_tmp/qa_yan/mutate_guard.py` 原 L154/L158）：
+
+```python
+SRC.write_text(s.replace(...), encoding="utf-8")   # 写入
+SRC.write_text(pristine,      encoding="utf-8")   # 还原
+```
+
+Python 文本模式默认 `newline=None`，写盘时把 `\n` 翻译成 `os.linesep`（Windows = `\r\n`）。
+配合 `core.autocrlf=true`：clean filter 把 CRLF 归一回 LF → blob 与 HEAD 相同 → `git diff`
+判不出差异；但 stat 缓存里 size 仍是 50825，size 不匹配 → `status` 报 ` M`。
+
+**更值得记的一点：变异台当时的 self-check 永远抓不到它。**
+
+```python
+restored = SRC.read_text(encoding="utf-8")     # 读回时又做了 universal-newline 归一化
+print("还原校验:", "OK" if restored == pristine else "MISMATCH!!!")   # 必然 OK
+```
+
+读和写各做一次相反方向的换行翻译，自校验 100% 假绿。
+
+### 修复与验证
+
+```python
+pristine = PRISTINE.read_bytes()                 # 字节级读写
+SRC.write_bytes(s.replace(...).encode("utf-8"))
+SRC.write_bytes(pristine)                        # 还原
+restored = SRC.read_bytes()
+ok = restored == pristine                        # 字节比对 + 长度提示，失败 return 3
+```
+
+源码按 PRISTINE 做二进制拷贝还原后三条证据全绿：
+
+```
+sha256  530f7fb0d280c875521afb8a313c0207ed472adca4501b9d6752a7ff8960ed8f  （= 变异前字节）
+git status --porcelain -- scripts/   （空）
+git diff --exit-code -- scripts/     rc=0
+git hash-object                      64dea8e8…（= HEAD blob）
+```
+
+### 影响判定
+
+- **对 A–F 结论：无影响。** Python 源码语义与行尾无关；9 次变异的注入锚点都在内存里的
+  LF 文本上命中并回写，测试跑的是同一份内容。kill/survive 判定依然有效。
+- **对代码库：已归零。** `scripts/` 现在与 HEAD 字节一致，`scripts/` 源码只读约束最终满足。
+- **对流程：记一条硬规矩。** 任何"改源码再还原"的工具（变异台、格式化、批量替换）
+  都必须用**二进制**读写 + **字节级**还原校验；`git diff` 在 `autocrlf=true` 的仓库里
+  **不能**作为"我没动过源码"的证据，`git status --porcelain` 才是。
+
+### ⚠️ 给后续执行人的一条操作警告
+
+变异台每次跑完都会用 PRISTINE 覆盖 `scripts/p6_4_fill_gaps.py`。
+**若工程师正在改这个文件（如 Task #13 把 `raw_close` 加进 `MERGE_PROTECTED_COLUMNS`），
+严禁同时运行变异台** —— 会直接把未提交的改动冲掉。
+我已因此在本次复核结束后**停止复跑**变异台；如需重跑，请先确认
+`git status --porcelain -- scripts/` 为空、且工程师该时段不动源码。
 
 ---
 
