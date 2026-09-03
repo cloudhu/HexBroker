@@ -84,7 +84,11 @@ def _win_pid_alive(pid: int) -> bool:
     STILL_ACTIVE = 259
     process = kernel32.OpenProcess(PROCESS_QUERY_INFORMATION, False, pid)
     if not process:
-        return False
+        # P1-C 取证修复（2026-09-03）：打不开 ≠ 已死。ACCESS_DENIED（无权限，
+        # 典型：不同 token/session 调起的进程）→ 保守按「无法排除存活」处理
+        # （返回 True）。09-01 多进程并存事故的假阴性出口正是这里把无权限判死。
+        # 其余错误码（如进程不存在的 ERROR_INVALID_PARAMETER）维持判死。
+        return kernel32.GetLastError() == 5  # ERROR_ACCESS_DENIED
     try:
         exit_code = wintypes.DWORD()
         kernel32.GetExitCodeProcess(process, ctypes.byref(exit_code))
@@ -143,17 +147,14 @@ def _read_pid_file(pid_path: Path) -> Optional[int]:
         if not pid_path.exists():
             return None
         text = pid_path.read_text(encoding="utf-8").strip()
-        # 兼容新格式 ``PID:CREATION_TIME``（见 paper_trading_main._try_acquire_pid_lock）
+        # 兼容新格式 ``PID:CREATION_TIME``（见 paper_trading_main._acquire_instance_lock）
         pid = int(text.split(":")[0])
     except Exception:
         return None
     if _is_pid_alive(pid):
         return pid
-    # 僵尸 pid 文件：清理
-    try:
-        pid_path.unlink()
-    except OSError:
-        pass
+    # P1-C（2026-09-03）：锁文件改为**常驻**（句柄锁语义，内容=最后持有者诊断
+    # 记录），死亡 PID 不再清理删除——「删除→重建」空窗是句柄锁 TOCTOU 回归点。
     return None
 
 

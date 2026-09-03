@@ -31,58 +31,97 @@ def _print_error(msg: str) -> None:
     print(f"[错误] {msg}", file=sys.stderr)
 
 
-def _try_acquire_pid_lock(pid_path: Path) -> bool:
-    """尝试获取 PID 锁（启动互斥，根除多实例并发导致 trades.log 会话重放 3× 伪增）。
+# P1-C：锁区偏移——避开文件头（内容区），保证实例运行期间诊断内容仍可读。
+# LockFileEx 允许锁 EOF 之外区间；msvcrt.locking 锁住的字节对其他句柄读写全拒。
+_LOCK_OFFSET = 4096
 
-    返回 True：成功取得锁（已写入本进程 PID + 创建时间指纹），或锁文件不可写（降级，不阻塞启动）。
-    返回 False：检测到「同一进程」仍存活的实例，调用方应拒绝启动（exit 1）。
 
-    加固（PID 复用防御）：锁文件格式由纯 PID 升级为 ``PID:CREATION_TIME``（创建时间
-    FILETIME，跨平台可比）。读锁时若 PID 存活但创建时间不符 → 判定为僵尸锁（PID 被
-    无关进程复用）→ 覆盖而非拒启，避免误判存活导致模拟盘无法启动。旧格式（纯整型）
-    维持原「存活即拒绝」语义，向后兼容。
+class _InstanceLock:
+    """P1-C 单实例 OS 句柄锁（方案①）。
+
+    独占字节锁持到 :meth:`release` 或进程退出——进程死亡时 OS 自动释放句柄，
+    **天然无僵尸锁**，互斥完全由 OS 仲裁，不依赖任何存活判定。
     """
-    from hexbroker.diagnostics.health_check import _is_pid_alive, _pid_creation_time
+
+    __slots__ = ("_fd",)
+
+    def __init__(self, fd: int) -> None:
+        self._fd = fd
+
+    def release(self) -> None:
+        if self._fd < 0:
+            return
+        fd, self._fd = self._fd, -1
+        try:
+            if sys.platform.startswith("win"):
+                import msvcrt
+
+                os.lseek(fd, _LOCK_OFFSET, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass  # 释放失败不影响正确性：进程退出时 OS 无论如何会释放
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
+def _acquire_instance_lock(pid_path: Path) -> Optional[_InstanceLock]:
+    """尝试取得单实例 OS 句柄锁（P1-C 方案①，根除 PID 锁缺口）。
+
+    - Windows ``msvcrt.locking(LK_NBLCK)`` / POSIX ``fcntl.flock(LOCK_EX|LOCK_NB)``
+      独占锁 ``_LOCK_OFFSET`` 处 1 字节，**句柄持到进程退出**——进程死亡 OS 自动
+      释放。锁区避开文件头（LockFileEx 允许锁 EOF 之外区间）：``msvcrt.locking``
+      锁住的字节对其他句柄**读写全拒**，锁 byte 0 会让健康检查在实例运行期间
+      读不了诊断内容（实测 PermissionError）；POSIX flock 整文件语义不受影响。
+    - 锁文件**常驻**不删：旧实现 finally unlink 与句柄锁语义冲突，且「删除→重建」
+      空窗是 TOCTOU 回归点（P1-C 取证 2026-09-03）。内容仍写 ``PID:CREATION_TIME``
+      供事后取证（仅诊断用，写失败不影响互斥）。
+    - 锁被占用或任何异常 → 返回 None，调用方拒启（**fail-closed**）。拒绝第二个
+      实例不是交易全停：旧实例存活则继续交易；旧实例死亡则锁已被 OS 自动释放，
+      新实例畅通。
+
+    P1-C 取证背景（09-01 实证）：旧内容指纹式锁（读→判活→覆盖）存在两处
+    fail-open 出口——``_is_pid_alive`` 把 OpenProcess ACCESS_DENIED 判死（假阴性
+    放行）、锁路径异常降级放行——导致长寿旧进程与新进程并存（双配置日志铁证），
+    旧进程退出时用陈旧内存整体覆写共享 cooldown.json（P1-B）。
+    """
+    from hexbroker.diagnostics.health_check import _pid_creation_time
 
     try:
         pid_path.parent.mkdir(parents=True, exist_ok=True)
-        if pid_path.exists():
-            raw = pid_path.read_text(encoding="utf-8").strip()
-            old_pid: Optional[int] = None
-            old_ct: Optional[int] = None
-            if ":" in raw:
-                try:
-                    _p, _c = raw.split(":", 1)
-                    old_pid = int(_p)
-                    old_ct = int(_c)
-                except Exception:
-                    old_pid, old_ct = None, None
-            else:
-                try:
-                    old_pid = int(raw)
-                except Exception:
-                    old_pid = None
-            if old_pid is not None and _is_pid_alive(old_pid):
-                if old_ct is None:
-                    # 旧格式（无时间指纹）：维持原始「存活即拒绝」行为，不引入新风险
-                    return False
-                cur_ct = _pid_creation_time(old_pid)
-                if cur_ct is None:
-                    # 无法读取创建时间 → 保守拒绝（与原始「存活即拒绝」一致，防双开）
-                    return False
-                if cur_ct == old_ct:
-                    return False  # 同一进程仍存活 → 拒绝重复启动
-                # 否则：PID 复用（僵尸锁）→ 落入覆盖分支
-            # 僵尸 PID / PID 复用 / 无锁文件 → 覆盖
-        my_ct = _pid_creation_time(os.getpid())
-        pid_path.write_text(
-            f"{os.getpid()}:{my_ct}" if my_ct is not None else str(os.getpid()),
-            encoding="utf-8",
-        )
-        return True
+        fd = os.open(str(pid_path), os.O_RDWR | os.O_CREAT, 0o644)
+    except OSError:
+        return None  # fail-closed：连文件都开不了，说明运行环境异常
+    try:
+        if sys.platform.startswith("win"):
+            import msvcrt
+
+            os.lseek(fd, _LOCK_OFFSET, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except Exception:
-        # 锁文件不可写：降级（仅健康检查「已启动实例」检测缺失），不阻塞启动
-        return True
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        return None  # 锁被占用（典型）或 OS 仲裁异常 → 拒启
+    try:
+        my_ct = _pid_creation_time(os.getpid())
+        payload = f"{os.getpid()}:{my_ct}" if my_ct is not None else str(os.getpid())
+        os.ftruncate(fd, 0)
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.write(fd, payload.encode("utf-8"))
+    except OSError:
+        pass  # 内容仅诊断用
+    return _InstanceLock(fd)
 
 
 def _max_position_pct(paper_cfg: Any) -> float:
@@ -549,12 +588,14 @@ def main() -> int:
         print(f"[模拟盘]   成交日志 {len(trade_lines)} 行；复盘报告 {len(reports)} 份（{Path(paper_cfg.reports_dir)}）")
         return 0
 
-    # PID 锁：启动互斥（根除多实例并发导致 trades.log 会话重放 3× 伪增）
-    # 写 PID 前先检测既有存活实例；存活则拒绝第二个实例（exit 1），避免 append 叠加。
+    # P1-C 单实例锁（方案①：OS 句柄锁，根除 PID 锁缺口）——
+    # 锁被占用 → 拒绝启动（fail-closed）。旧实例存活则继续交易（非交易全停）；
+    # 旧实例死亡则锁已被 OS 自动释放，新实例畅通（无僵尸锁）。
     pid_path = Path(paper_cfg.get("data_dir", "data/paper")) / "paper.pid"
-    if not _try_acquire_pid_lock(pid_path):
-        print(f"[模拟盘] 已有存活实例（PID 锁 {pid_path}），拒绝重复启动以避免 trades.log 会话重放叠加。")
-        print("[模拟盘]   如需强制重启，请先结束该实例或删除 PID 锁文件后重试。")
+    instance_lock = _acquire_instance_lock(pid_path)
+    if instance_lock is None:
+        print(f"[模拟盘] 已有存活实例（单实例锁 {pid_path}），拒绝重复启动（09-01 实证：多实例并存致冷却覆写 + 双配置日志）。")
+        print("[模拟盘]   如需强制重启，请先结束该实例后重试（进程退出即自动释放锁，无需手动清理）。")
         return 1
 
     # P2-4 启动期治理自检（防误开联锁落地）：仅 WARNING + 强制 SHADOW，零侵入 tick
@@ -566,11 +607,9 @@ def main() -> int:
     try:
         scheduler.run()
     finally:
-        if pid_path is not None and pid_path.exists():
-            try:
-                pid_path.unlink()
-            except OSError:
-                pass
+        # P1-C：句柄锁显式释放（锁文件常驻不 unlink——unlink 与句柄锁语义冲突
+        # 且「删除→重建」空窗是 TOCTOU 回归点）；进程退出时 OS 也会兜底释放。
+        instance_lock.release()
     return 0
 
 

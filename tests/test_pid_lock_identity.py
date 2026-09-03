@@ -1,38 +1,50 @@
-"""PID 锁进程身份校验（①加固）单测。
+"""P1-C 锁文件诊断内容单测（``PID:CREATION_TIME`` 取证格式）。
 
-验证锁文件升级为 ``PID:CREATION_TIME`` 后：
-- 同一进程（创建时间吻合）→ 拒绝重复启动（False）；
-- PID 存活但创建时间不符（模拟僵尸锁 / PID 复用）→ 覆盖并获取锁（True）；
-- 旧格式（纯整型，无时间指纹）→ 维持原「存活即拒绝」语义（向后兼容）。
+句柄锁（P1-C 方案①）互斥由 OS 仲裁，内容不再参与互斥判定，仅作事后取证：
+- 成功 acquire 后内容 = ``<pid>:<creation_time>``；
+- 释放后内容保留（记录最后持有者身份）；
+- 被拒的 acquire 不得覆写既有内容。
+
+旧「身份校验语义」（存活+创建时间吻合才拒绝）已随内容指纹式锁一并退役。
 """
+
 import os
 from pathlib import Path
 
 from hexbroker.diagnostics.health_check import _pid_creation_time
-from scripts.paper_trading_main import _try_acquire_pid_lock
+from scripts.paper_trading_main import _acquire_instance_lock
 
 
-def test_same_process_rejected(tmp_path: Path) -> None:
+def test_content_is_pid_ct_format(tmp_path: Path) -> None:
     p = tmp_path / "paper.pid"
-    ct = _pid_creation_time(os.getpid())
-    p.write_text(f"{os.getpid()}:{ct}", encoding="utf-8")
-    # 本进程存活 + 创建时间吻合 → 拒绝
-    assert _try_acquire_pid_lock(p) is False
-    assert p.read_text(encoding="utf-8").strip() == f"{os.getpid()}:{ct}"
+    lock = _acquire_instance_lock(p)
+    assert lock is not None
+    try:
+        raw = p.read_text(encoding="utf-8").strip()
+        pid_part, ct_part = raw.split(":")
+        assert pid_part == str(os.getpid())
+        assert int(ct_part) == _pid_creation_time(os.getpid())
+    finally:
+        lock.release()
 
 
-def test_pid_reuse_overwrites_stale_lock(tmp_path: Path) -> None:
+def test_content_survives_release(tmp_path: Path) -> None:
+    """release 后文件常驻且内容不变——事后可取证最后持有者。"""
     p = tmp_path / "paper.pid"
-    ct = _pid_creation_time(os.getpid())
-    # 模拟：旧锁记录的是本进程 PID，但创建时间故意错配（视为被无关进程复用）
-    p.write_text(f"{os.getpid()}:{ct + 1}", encoding="utf-8")
-    assert _try_acquire_pid_lock(p) is True
-    written = p.read_text(encoding="utf-8").strip()
-    assert written.startswith(f"{os.getpid()}:")
+    lock = _acquire_instance_lock(p)
+    assert lock is not None
+    expected = f"{os.getpid()}:{_pid_creation_time(os.getpid())}"
+    lock.release()
+    assert p.read_text(encoding="utf-8").strip() == expected
 
 
-def test_legacy_format_alive_rejected(tmp_path: Path) -> None:
-    """旧格式（纯整型、无时间指纹）存活 → 维持原拒绝语义。"""
+def test_rejected_acquire_keeps_holder_content(tmp_path: Path) -> None:
+    """锁被占时的新 acquire 被拒，不得覆写首持有者诊断内容。"""
     p = tmp_path / "paper.pid"
-    p.write_text(str(os.getpid()), encoding="utf-8")
-    assert _try_acquire_pid_lock(p) is False
+    first = _acquire_instance_lock(p)
+    assert first is not None
+    expected = f"{os.getpid()}:{_pid_creation_time(os.getpid())}"
+    second = _acquire_instance_lock(p)
+    assert second is None
+    assert p.read_text(encoding="utf-8").strip() == expected
+    first.release()

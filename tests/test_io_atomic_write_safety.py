@@ -50,7 +50,6 @@ PACKAGE_DIR = UTILS_DIR.parent
 #: 清理清单）。基线漂移必须走主理人裁决登记。
 AUDIT_PACKAGE_EXEMPT = {
     "data/rebuild.py": 2,
-    "diagnostics/health_check.py": 1,
 }
 
 
