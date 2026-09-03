@@ -146,6 +146,37 @@ QA 独立复核结论：**通过，0 🔴 / 4 🟡**。三项 ✅ 均附实测�
 R26b 实施备注：首轮编辑漏落 Pass 1 别名收集代码（`alias_modules` 未定义 →
 NameError → 8 failed），按取证 SOP 定位后补齐，复测 13 passed。
 
+## 8. P2-8c 取证与处置方案（R26c 取证完成，**待主理人裁决**）
+
+### 8.1 四处现场取证（2026-09-03 实读）
+
+| 位置 | 语义（实读代码） | 关键证据 | 风险评级 |
+|---|---|---|---|
+| `forecast/signal_store.py:200` `clear()` | 遍历 `root.glob("*/*.parquet")` 全库逐文件 unlink | **全仓零调用**（hexbroker/ + scripts/ + tests/ 均无调用方）—— 死代码 API | 🟡 低（当前无人触发）但属「 invites misuse」：未来谁调用即整库删除 |
+| `data/rebuild.py:141`（`clear_provisional` 尾部） | sidecar 全部年份清空后删除空 sidecar 文件；函数 docstring 与 L348-351 注释**明说**「全部年份清空后删除 sidecar 文件」 | 设计内 marker 生命周期，写/删语义自洽 | 🟢 设计内 |
+| `data/rebuild.py:359` | 分区按真值重建后删除 `_MISSING_{year}.json` 标记（消费式清理） | 设计内 marker 生命周期 | 🟢 设计内 |
+| `diagnostics/health_check.py:154`（`_read_pid_file`） | 读 PID 文件 → 判进程已死 → 删僵尸锁文件（OSError 吞掉） | 功能上删不删都返回 None（下次读取同样判死） | 🟢 设计内，可选优化 |
+
+### 8.2 方案对比
+
+| 方案 | 内容 | 代价 | 收益 |
+|---|---|---|---|
+| ① 扩扫 + 显式豁免清单 | 参数化审计从 `utils/` 扩到 `hexbroker/` 全包（**排除 third_party/**，其内 vendored 库 unlink 遍布）；豁免清单只登记 `rebuild.py` / `health_check.py` 两文件（注释锚定） | 审计测试 +~20 行；豁免按文件粒度（文件内新增 unlink 不再红） | 新增隐藏删除调用必红；红线可见性覆盖全包 |
+| ② 逐处整改单（G5 化） | 4 处全部改造 | **marker/PID 类无 G5 等价物**（空文件仍命中 `.exists()`/glob；os.rename 同在红线内）——改法只能改为「payload 置空 + 消费方感知」，侵入 3 个消费点，回归风险大于收益 | 基本无净收益 |
+
+### 8.3 推荐（待裁决）
+
+**方案 ① + 一个零风险整改**：
+1. 审计扩扫到 `hexbroker/` 全包（排除 third_party），豁免清单登记 `rebuild.py`、`health_check.py`；
+2. **删除 `SignalStore.clear()` 死代码**（全仓零调用，API 移除零风险，根除唯一整库 unlink 暴露面）——若主理人倾向保留 API，则降级为 docstring 红线警告；
+3. `health_check.py:154` 僵尸 PID 清理保持不动（设计内，豁免登记）。
+
+### 8.4 附：Q4 取证结论（c0 宇宙归属，2026-09-03 实测）
+
+- `CONTRACTS18`（`scripts/build_signals18.py:18`）键集 = au0/ag0/m0/cu0/rb0/i0/al0/zn0/ni0/hc0/y0/p0/j0/jm0/sr0/cf0/ta0/sc0 —— **无 c0** ✅
+- 主湖 `data/raw/processed/` 实测 18 目录，**无 c0**（`ls` 报 No such file or directory）✅
+- 与 MEMORY 记载一致：c0 在生产宇宙（configs/paper.yaml）但不在 CONTRACTS18、不在主湖；复算历史 ATR 会 FileNotFoundError，兜底 sina 名义价。Q4 闭合。
+
 ---
 
 *风险提示：本报告为工程质量治理记录，不构成投资建议。*
