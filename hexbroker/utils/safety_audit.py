@@ -68,13 +68,25 @@ def audit_no_delete_calls(source: str) -> list[str]:
       1. 属性名为 ``unlink`` / ``rmtree`` / ``rmdir`` 的调用（任意接收者）；
       2. 点号全名 ``os.remove`` / ``shutil.move`` / ``os.rename`` / ``shutil.rmtree``；
       3. ``from os import unlink`` 式危险导入；
-      4. ``os.remove(...)`` 的别名形态（属性名 ``remove`` 且根名为 os/shutil）。
+      4. ``os.remove(...)`` 的别名形态（属性名 ``remove`` 且根名为 os/shutil）；
+      5. 模块别名形态（QA R26 fresh-eyes 补）：``import os as o; o.remove(p)``
+         经 Pass 1 别名表解析后命中 ``os.remove``。
 
     注意：裸 ``remove()`` 调用（如 ``list.remove``）**不判** —— 太常见，会误伤。
     """
     tree = ast.parse(source)
     violations: list[str] = []
 
+    # ---- Pass 1：收集模块别名（``import os as o`` → {"o": "os"}） ----
+    alias_modules: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                root_mod = (alias.name or "").split(".")[0]
+                if root_mod in UNSAFE_IMPORT_MODULES and alias.asname:
+                    alias_modules[alias.asname] = root_mod
+
+    # ---- Pass 2：调用扫描（根名先过别名解析） ----
     for node in ast.walk(tree):
         # ---- docstring 显式跳过（AST 已天然规避注释，此为双重保险） ----
         if _is_docstring(node):
@@ -103,13 +115,18 @@ def audit_no_delete_calls(source: str) -> list[str]:
                     f"L{node.lineno}: 删除类调用 `{dotted}()` —— G5 铁律："
                     f"绝不 unlink/rmtree/rmdir（safe-delete 钩子会搬走文件），"
                     f"写盘走 tmp + os.replace 原子替换")
-            elif dotted in UNSAFE_DOTTED:
-                violations.append(
-                    f"L{node.lineno}: 非安全调用 `{dotted}()` —— G5 要求 "
-                    f"`tmp + os.replace` 原子替换")
-            elif func.attr == "remove" and _root_name(func.value) in ("os", "shutil"):
-                violations.append(
-                    f"L{node.lineno}: 删除类调用 `{dotted}()` —— 严禁删除文件")
+            else:
+                # 根名先过模块别名解析（import os as o → o.remove 命中 os.remove）
+                root = _root_name(func.value)
+                resolved = alias_modules.get(root, root)
+                resolved_dotted = f"{resolved}.{func.attr}" if resolved else dotted
+                if dotted in UNSAFE_DOTTED or resolved_dotted in UNSAFE_DOTTED:
+                    violations.append(
+                        f"L{node.lineno}: 非安全调用 `{dotted}()` —— G5 要求 "
+                        f"`tmp + os.replace` 原子替换")
+                elif func.attr == "remove" and resolved in ("os", "shutil"):
+                    violations.append(
+                        f"L{node.lineno}: 删除类调用 `{dotted}()` —— 严禁删除文件")
         elif isinstance(func, ast.Name) and func.id in UNSAFE_IMPORT_NAMES:
             if func.id != "remove":  # `remove()` 裸调用太常见（list.remove），不判
                 violations.append(

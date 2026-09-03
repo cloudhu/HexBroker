@@ -144,3 +144,26 @@ def test_atomic_write_success_replaces_target(tmp_path):
 
     assert target.read_text(encoding="utf-8") == "NEW"
     assert list(tmp_path.glob("*.tmp")) == []  # tmp 已被 os.replace 消费
+
+
+# ===========================================================================
+# 4. QA R26 🟡 回归：模块别名不得绕过审计
+# ===========================================================================
+def test_audit_catches_module_alias_bypass():
+    """``import os as o; o.remove(p)`` 必须被抓（QA R26 实测 bypass 形态之一）。
+
+    QA 16 形态攻击矩阵中「模块别名」是唯一**无辜像样**的绕过形态
+    （变量别名/getattr/importlib/eval 等动态形态已写明不在威胁模型内）。
+    修法：Pass 1 收集 ``import <模块> as <别名>`` 别名表，Pass 2 根名解析后判定。
+    """
+    assert audit_no_delete_calls("import os as o\ndef f(p):\n    o.remove(p)\n"), (
+        "模块别名 os→o 的 o.remove() 未被抓 —— QA R26 🟡 回归失败")
+    assert audit_no_delete_calls(
+        "import shutil as s\ndef f(a, b):\n    s.move(a, b)\n"), (
+        "模块别名 shutil→s 的 s.move() 未被抓")
+    assert audit_no_delete_calls(
+        "import os as o\ndef f(a, b):\n    o.rename(a, b)\n"), (
+        "模块别名 os→o 的 o.rename() 未被抓")
+    # 无别名的正常 os 用法不受影响（别名表为空 → 行为与修复前一致）
+    assert audit_no_delete_calls(
+        "import os\ndef f(tmp, dst):\n    os.replace(tmp, dst)\n") == []
