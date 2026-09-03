@@ -480,17 +480,52 @@ p6_4_fill_gaps.py  merge_year_frames(old, new_year)
 > （反例：ag0 k=0.6839，用错即低估敞口 1.46×）。名义价被静默改写的爆炸半径
 > **大于**复权价。
 
+#### 11.2.1 代码级直证：新帧的 `raw_close` 是后复权占位值，不是名义价
+
+`p6_4_fill_gaps.py:561`（`normalize_new_df`）把两个字段写成**同一个表达式**：
+
+```python
+out = pd.DataFrame({
+    ...
+    "raw_close": close * scale,   # ← 名义价（应为未复权）
+    "adj_close": close * scale,   # ← 后复权价
+})
+```
+
+即**新帧的 `raw_close` 字面等于后复权 `close`**，是占位值而非名义价。脚本
+L867 的自述亦印证：``raw_close 仍为 adj 复制品``。
+
+实测口径（cu0 2026-08-21）：
+
+| 项 | 值 |
+|---|---|
+| 湖内真值 `raw_close`（名义价） | `107520.0` |
+| 新帧占位值（= 后复权 close） | `159021.988958` |
+| 偏离 | **+47.9% —— 数值上就是 k 因子本身** |
+
+→ 一旦占位值漏进主湖，不是「名义价飘一点」，而是**名义价整列被替换成后复权
+价**的量纲级污染；且新值看着「很合理」（就是 close），**不触发任何 NaN /
+异常告警**——静默失效。`k = adj_close / raw_close` 诊断（本次事故的核心判据）
+会瞬间全部失真。
+
 ### 11.3 隐式保护 vs 显式契约：三条暴露面
 
 `raw_close` 既不在 `MERGE_OI_ONLY_COLUMNS` 也不在 `MERGE_PROTECTED_COLUMNS`。
 它当前安全，靠的是护栏的实现方式「**整行保留 `old`，只放行 `open_interest`**」
 —— 是**副作用**，不是契约。
 
-| # | 暴露面 | 后果 |
-|---|--------|------|
-| 1 | R22 的 7 条回退判据任一触发（空帧 / 缺列 / datetime 归一化异常或含 NaT 或重复 / 新帧 OI 全 NaN / 旧帧保护列全 NaN） | 护栏**整体弃守** → `raw_close` 连同 OHLC 一起被 sina 值覆盖 |
-| 2 | `--allow-price-overwrite` | 同上 |
-| 3 | 将来有人扩 `MERGE_OI_ONLY_COLUMNS`、或把实现改成「新值非空即用新值」 | `raw_close` 静默失守，而常量断言 `test_guard_column_contract` **不会报警**（它只断言 OI_ONLY / PROTECTED 两个常量，`raw_close` 不在其中） |
+| # | 暴露面 | 后果 | 纳入 PROTECTED 能否解决 |
+|---|--------|------|:---:|
+| 1 | R22 的 7 条回退判据任一触发（空帧 / 缺列 / datetime 归一化异常或含 NaT 或重复 / 新帧 OI 全 NaN / 旧帧保护列全 NaN） | `_fallback()` 直接 `return legacy`（裸 `keep="last"`），护栏**整体弃守** → `raw_close` 连同 OHLC 一起被新帧值覆盖 | ❌ **不能**：回退路径根本不读 PROTECTED 名单 → 登记为 §11.8 **R8** |
+| 2 | `--allow-price-overwrite` | L765-766 提前 `return legacy`，同上 | ❌ **不能**：同样绕开名单 |
+| 3 | 将来有人扩 `MERGE_OI_ONLY_COLUMNS`、或把实现改成「新值非空即用新值」 | `raw_close` 静默失守，而常量断言 `test_guard_column_contract` **不会报警**（它只断言 OI_ONLY / PROTECTED 两个常量，`raw_close` 不在其中） | ✅ **能**：这才是本节改动**真正**锁住的 |
+
+> **主理人更正（2026-09-03）**：初版裁决把 ① 与 ③ 混为一谈，据此推出的
+> 「今晚必须做」**不成立** —— 护栏正常生效时走 `merged_old = old_idx.copy()`
+> 整行保留，`raw_close` **此刻就已被保护**，加不加名单今晚的运行时行为完全
+> 一致。本改动的真实价值是 **③：把「`raw_close` 受保护」这条不变量用常量 +
+> 测试固化成契约**，属**耐久性改进（P2）**，不是今晚止血。
+> **19:45 硬底线据此撤销**，改为等 QA 变异测试报完再 GO。
 
 **第 3 条最危险：没有任何测试锁住 `raw_close` 的受保护状态。**
 （此项已同步 QA 作为变异点 M1：把 `MERGE_OI_ONLY_COLUMNS` 改成
@@ -515,24 +550,120 @@ elif col in ("raw_close", "adj_close"):
 → `raw_close` 列**恒在**，纳入 REQUIRED **不会**新增「缺列 → 护栏弃守」这条
 R22 回退触发路径。历史补洞路径同样安全。
 
-### 11.5 变更清单（待 GO 后执行，最小变更）
+### 11.5 变更清单（待 GO 后执行）
 
-| # | 位置 | 改动 |
-|---|------|------|
-| 1 | `MERGE_PROTECTED_COLUMNS` | 增加 `"raw_close"`（`MERGE_GUARD_REQUIRED_COLUMNS` 自动跟上） |
-| 2 | 旧帧保护列全 NaN → 回退判据 | 统计口径须覆盖 `raw_close` |
-| 3 | `note` 里的 `overwritten` 统计 | 同上，覆盖 `raw_close` 的 NaN 行 |
-| 4 | `test_guard_column_contract` | 补 `raw_close` 常量断言 |
-| 5 | `tests/test_p6_4_merge_guard.py` | **增 1 例**：构造新帧 `raw_close` 与旧帧不同 → 断言合并后旧帧 `raw_close` 逐位保留 |
+主理人裁决采用 **Option B（解耦）**：把「是否弃守」的判据与「是否保护」的名单
+拆成两个常量，使弃守路径**逐字等价于今日行为**，同时 `raw_close` 获得显式保护。
 
-其中 **第 5 条是本单的核心价值**——补的正是「没有任何测试锁住 `raw_close`」
-这个洞，不可省略。
+```python
+# 仅用于「旧帧口径是否不可用 → 是否放弃护栏」判定（行为关键路径）
+MERGE_GUARD_FALLBACK_COLUMNS: tuple[str, ...] = (
+    "open", "high", "low", "close", "adj_close",
+)
+# 用于「已存在日期哪些列禁止被新帧覆盖」（含名义价）
+MERGE_PROTECTED_COLUMNS: tuple[str, ...] = (
+    MERGE_GUARD_FALLBACK_COLUMNS + ("raw_close",)
+)
+```
+
+| # | 位置 | 改动 | 性质 |
+|---|------|------|------|
+| 0 | 新增常量 `MERGE_GUARD_FALLBACK_COLUMNS` | `("open","high","low","close","adj_close")` | 结构 |
+| 1 | `MERGE_PROTECTED_COLUMNS` | = `MERGE_GUARD_FALLBACK_COLUMNS + ("raw_close",)`；`MERGE_GUARD_REQUIRED_COLUMNS` 仍由 `PROTECTED` 派生，保持 §11.4 已验证结论 | 契约 |
+| 2 | L803-805 旧帧保护列全 NaN → 回退 | **改用 `MERGE_GUARD_FALLBACK_COLUMNS`** | 行为关键路径 |
+| 3 | L825 / L831-832 `note` 的 `overwritten` 统计 | **继续用 `MERGE_PROTECTED_COLUMNS`**（信息性，含 `raw_close` 更完整） | 信息性 |
+| 4 | `test_guard_column_contract` | 补 `raw_close` 常量断言，并锁 `FALLBACK` ⊂ `PROTECTED` 的从属关系 | 测试 |
+| 5 | `tests/test_p6_4_merge_guard.py` | **增 1 例**：构造新帧 `raw_close` 与旧帧不同 → 断言合并后旧帧 `raw_close` 逐位保留 | 测试 |
+| 6 | 同上 | **增 1 例（E2E）**：断言 `float(out.loc["2026-08-21","raw_close"]) == 107520.0` | 测试 |
+
+**第 2 条为什么必须解耦**（R22 铁律：不得引入新的失效模式）：
+
+- 现状：OHLC+adj_close **全** NaN → 弃守，让新值修复 —— 这是一条**救命路径**；
+- 若按原样把 `raw_close` 并进同一判据：还需 `raw_close` **也**全 NaN 才弃守，
+  于是出现「OHLC 全坏但 `raw_close` 完好」时护栏**拒绝弃守、死守 NaN**；
+- `raw_close` 走 sina 名义价通道，`adj_close` 走复权通道，**两者来源不同，
+  本就该允许它们独立全 NaN** —— 这正是让「全停」发生的结构。
+
+实测 **0/162 年份帧**今日无影响，但 0/162 是「今天没撞上」，不是「不可能」。
+解耦后**弃守路径逐字等价于今日行为**，`raw_close` 同时获得显式保护，两面都要。
+
+其中 **第 5、6 条是本单的核心价值** —— 补的正是「没有任何测试锁住 `raw_close`」
+这个洞，不可省略。第 6 条走完整 `SAFE_COLS → coerce_schema → merge → 落盘`
+链路，比任何单元测试都硬。
+
+> ⚠️ **回归基线口径待对齐**：主理人给出「+2 用例 → 1266」，但第 6 条若按最初
+> 提议**加进现有** `test_stage_parse_e2e_guard_protects_existing_ohlc`，则只
+> +1 → 1265。已按**独立新用例**实现以对齐 1266（且符合单一职责）。最终以
+> junitxml `<testsuite>` 属性实测为准。
 
 ### 11.6 并发控制
 
 QA 正在对 `scripts/p6_4_fill_gaps.py` 做变异测试，其 M1 / M2 变异点
 （`MERGE_OI_ONLY_COLUMNS` / `MERGE_PROTECTED_COLUMNS`）**正是本节要改的行**。
 为避免两种事故（QA 的「改坏→跑测试→还原」把改动一并还原；或改动后 QA 的
-M1/M2 基线漂移致变异结果失去可比性），**本节变更须等主理人 GO 后落盘**，
-硬底线 19:45。文档写作先行，因为 QA 复核产出落在
+M1/M2 基线漂移致变异结果失去可比性），**本节变更须等主理人 GO 后落盘**。
+
+> ~~硬底线 19:45~~ —— **已由主理人撤销**（2026-09-03）。理由见 §11.3 更正：
+> 本改动对今晚运行时行为**无影响**（`raw_close` 已被「整行保留」兜住），
+> 不存在时间窗口压力，等 QA 报完 A 项再 GO 即可，**拖到明早也不影响**。
+
+文档写作先行，因为 QA 复核产出落在
 `deliverables/cu_ni_rollback_qa_review_20260903.md`，与本文件不重叠。
+
+### 11.7 `--skip-nominal` 是否会让 48% 占位值自动落盘（主理人补排查）
+
+§11.2.1 的 48% 占位值只在 `enrich_raw_close` 被跳过时才可能原地留下。主理人
+补查了 `--skip-nominal` 的传入路径：
+
+| 入口 | 是否传入 `--skip-nominal` |
+|---|:---:|
+| `scripts/p6_4_fill_gaps.py` CLI | 仅**手工**入口（测试与人工取证用） |
+| 生产链路（`refresh_pull_local.py` → `p6_4_apply_persisted_dir.py`） | ❌ **无** |
+| `p11_truth_rebuild.py` 的同名参数 | 另一脚本的**同名参数**，与本链路无关 |
+
+→ **全仓无生产调用方传入** `--skip-nominal`。所以这条 48% 路径今晚**不会自动
+触发**；但它坐实了 `raw_close` 字段的**量纲级风险**：一旦有人误传该参数，或
+sina 回填整体失败（fail-soft 降级），名义价列会静默变成后复权价。
+
+### 11.8 R8（本改动不解决）：R22 回退路径下 `raw_close` 无保护
+
+**现象**：`_fallback()` 直接 `return legacy`，返回的是裸 `keep="last"` 合并
+结果。此时 `MERGE_PROTECTED_COLUMNS` 名单**根本不参与**，故 `raw_close` 会被
+新帧值（48% 占位值或 sina 回填值）覆盖 —— **本节改动对此无能为力**。
+
+**现有缓解**（关键是：这不是静默回退）：
+
+| # | 缓解 | 说明 |
+|---|---|---|
+| 1 | `_fallback` 的 note 写明归因 | 如 `护栏未生效（旧帧 datetime 含 NaT…）` |
+| 2 | `stage_parse` 打印 `[GUARD]` 行 | 运行时可见 |
+| 3 | 归因落盘 `p6_4_applied.json` | 写入 `merge_guard` 字段，事后可审计 |
+| 4 | 今日实测 | 全湖 **162/162 年份帧未触发任何回退** |
+
+**可选方案（暂不实施，待主理人裁决）**：在回退路径里也保留 `old` 的
+`raw_close`。代价是 `_fallback` 从「彻底退回既有行为」变成「半护栏」，复杂度
+与失效模式都上升，与 R22「宁可少一道护栏」的原则有张力。
+**当前处置：登记观察，等真出现回退再议。**
+
+### 11.9 GO 前置预检证据（全湖只读扫描）
+
+在动 `scripts/` 之前，用 `artifacts/_tmp/precheck_rawclose_protected.py`
+（**只读、零写入**）对主湖做了一次全量扫描，验证本节改动不会改变护栏行为。
+
+**范围**：18 品种 × 全部年份 = **162 个年份帧**。
+
+| 检查项 | 结果 |
+|---|:---:|
+| 缺 `raw_close` 列的帧（会触发「缺列 → 弃守」） | **0 / 162** |
+| 判定 A（旧帧保护列全 NaN → 弃守）语义翻转的帧 | **0 / 162** |
+| `note` 中 `overwritten` 计数变化的帧 | **0 / 162**（0 → 0 行） |
+| 扫描期间护栏源码被改动 | **否**（md5 `2ec215ac7f785e9de290ee0255ff9991` 前后一致） |
+
+→ **本改动在今日全湖上是行为恒等的**：四路可观测面（缺列回退 / 全 NaN 回退 /
+note 文本 / 合并结果）全部零变化，回归风险实测为 0。
+
+**同时排除的隐患**：测试夹具 `_row()` 已带 `"raw_close": raw`（默认 50.0），
+故 `MERGE_GUARD_REQUIRED_COLUMNS` 变长**不会**导致 23 个正/负例集体弃守。
+
+**另确认改动非装饰性**：`coerce_schema` L577-578 仅在**列缺失时**才用
+`close` 填充，已存在的 `raw_close` 原样保留 —— 旧值不会被下游 clobber。
