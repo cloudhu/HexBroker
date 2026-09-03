@@ -159,3 +159,31 @@ def test_p1b_persist_disabled_no_write(tmp_path):
     sched._signal_cooldown_persist = False
     sched._save_cooldown_state()
     assert not (tmp_path / "cooldown.json").exists()
+
+
+def test_p1b_tz_aware_disk_record_still_wins(tmp_path):
+    """R26g QA 🟡1 回归：磁盘 opened_at 带 tz（aware）不得让整次合并崩塌。
+
+    修复前：naive（内存）与 aware（磁盘）比较抛 TypeError → 外层 except 吞掉
+    → fail-open 退回整体写内存 → 陈旧内存回滚新鲜磁盘（恰好复刻 P1-B 主场景）。
+    修复后：比较前统一归一化 naive，磁盘新者仍胜。
+    """
+    payload = {
+        "schema_version": "1.0",
+        "saved_at": "2026-09-01T21:58:59",
+        "records": {
+            "rb0": {
+                "fp": [0.999999, 1.639979, "engine_a"],
+                "opened_at": "2026-09-01T14:30:18+00:00",
+                "day": "2026-09-01",
+                "reentries": 2,
+            }
+        },
+    }
+    (tmp_path / "cooldown.json").write_text(json.dumps(payload), encoding="utf-8")
+    sched = _mk_sched(tmp_path, {"rb0": _STALE})  # 陈旧内存 + aware 新鲜磁盘
+    sched._save_cooldown_state()  # 不得抛
+    disk = _read_disk(tmp_path)
+    assert disk["rb0"]["fp"][2] == "engine_a", (
+        "aware 磁盘记录应胜过陈旧内存——合并不因 tz 混比较崩塌（QA 🟡1）"
+    )

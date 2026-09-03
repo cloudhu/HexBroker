@@ -599,12 +599,14 @@ def main() -> int:
         return 1
 
     # P2-4 启动期治理自检（防误开联锁落地）：仅 WARNING + 强制 SHADOW，零侵入 tick
-    _run_governance_selfcheck()
-
     # B+C 防再发：信号新鲜度硬告警（陈旧→醒目横幅；自动刷新默认关）
-    _check_signal_freshness(paper_cfg)
-
+    # R26g QA 🟡2：以上两步与 scheduler.run() 一并纳入 try/finally——
+    # 任一环节抛异常都走 instance_lock.release()，不依赖进程退出兜底。
     try:
+        _run_governance_selfcheck()
+
+        _check_signal_freshness(paper_cfg)
+
         scheduler.run()
     finally:
         # P1-C：句柄锁显式释放（锁文件常驻不 unlink——unlink 与句柄锁语义冲突

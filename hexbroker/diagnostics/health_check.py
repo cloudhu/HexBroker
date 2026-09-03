@@ -100,8 +100,9 @@ def _win_pid_alive(pid: int) -> bool:
 def _win_pid_creation_time(pid: int) -> Optional[int]:
     """返回进程创建时间（Windows FILETIME 64-bit）；进程不存在/不可访问返回 None。
 
-    用于 PID 锁身份校验：配合 ``_is_pid_alive`` 区分「同一进程仍存活」与
-    「PID 被无关进程复用（僵尸锁）」——二者 ``_is_pid_alive`` 同为 True 但创建时间不同。
+    R26g（P1-C 方案①）后语义：内容指纹式互斥已退役，本函数现仅用于
+    ``_acquire_instance_lock`` 落盘 ``PID:CREATION_TIME`` **取证内容**的生成
+    （与诊断层消费），不再参与任何互斥判定——互斥由 OS 句柄锁仲裁。
     """
     import ctypes
     from ctypes import wintypes
@@ -127,7 +128,7 @@ def _win_pid_creation_time(pid: int) -> Optional[int]:
 
 
 def _pid_creation_time(pid: int) -> Optional[int]:
-    """跨平台进程创建时间指纹（用于 PID 锁身份校验）。
+    """跨平台进程创建时间指纹（R26g 后仅作取证内容生成，不参与互斥判定）。
 
     - Windows：``GetProcessTimes`` 的 creation FILETIME。
     - POSIX：``/proc/<pid>/stat`` 第 22 字段（starttime，单位时钟滴答，单调可比）。

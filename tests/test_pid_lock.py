@@ -110,8 +110,14 @@ def test_subprocess_holds_lock_then_os_auto_releases(tmp_path: Path) -> None:
     try:
         line = proc.stdout.readline().strip() if proc.stdout else ""
         assert line == "LOCKED", f"子进程未取得锁：{line!r}"
-        # 子进程持锁期间 → 父进程被拒
-        assert _acquire_instance_lock(p) is None
+        # 子进程持锁期间 → 父进程被拒。
+        # R26g QA 🟡4：若意外取得锁对象，也必须在 finally 释放，防 fd 悬挂。
+        unexpected = _acquire_instance_lock(p)
+        try:
+            assert unexpected is None, "子进程持锁期间父进程不应取得锁"
+        finally:
+            if unexpected is not None:
+                unexpected.release()
     finally:
         proc.kill()
         proc.wait(timeout=10)

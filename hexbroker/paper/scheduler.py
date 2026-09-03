@@ -1088,7 +1088,17 @@ class TradingScheduler:
                         except Exception:
                             continue  # 单条损坏跳过，不拖垮整次落盘
                         cur = merged.get(str(sym))
-                        if cur is None or disk_rec.opened_at > cur.opened_at:
+                        # R26g QA 🟡1：naive/aware 混比较会抛 TypeError → 被外层
+                        # except 吞掉 → 整次合并放弃 → fail-open 退回整体写内存，
+                        # 恰好复刻 P1-B 要防的陈旧回滚。比较前统一归一化为 naive
+                        # （系统自产 opened_at 恒 naive，aware 仅防御外来文件）。
+                        cur_opened = cur.opened_at if cur is not None else None
+                        if cur_opened is not None and cur_opened.tzinfo is not None:
+                            cur_opened = cur_opened.replace(tzinfo=None)
+                        disk_opened = disk_rec.opened_at
+                        if disk_opened.tzinfo is not None:
+                            disk_opened = disk_opened.replace(tzinfo=None)
+                        if cur is None or disk_opened > cur_opened:
                             merged[str(sym)] = disk_rec
             except Exception:
                 log.warning("冷却合并读取失败，退回整体写内存 path={}", path)
