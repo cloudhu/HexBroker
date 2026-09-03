@@ -396,6 +396,9 @@ ni0 2026 | 护栏生效：保护 160 个既有日期的 OHLC/adj_close，仅覆�
 - `git fsck --no-dangling` → **输出为空（EXIT=0）**；
 - **未 push**。
 
+> 本表记录 P0-A/B 主体的四次提交。其后 §11 的文档更新与「`raw_close` 纳入
+> 受保护列」的代码 / 测试变更属于后续裁决项，各自独立提交，见 `git log`。
+
 ### 未纳入版本控制的生产数据改动
 
 主湖 `data/raw/processed/{cu0,ni0}/1d/2026.parquet` 的 20 格回滚不在 git 管理
@@ -423,3 +426,113 @@ ni0 2026 | 护栏生效：保护 160 个既有日期的 OHLC/adj_close，仅覆�
 | 全量回归 1264 passed / 0 failed / 0 errors（junit 解析值） | PASS |
 
 **IS_PASS: YES**
+
+---
+
+## 11. 名义价保护契约（`raw_close` 纳入受保护列）
+
+> 本节记录 **P2 裁决项**：把 `raw_close` 从「隐式受保护」升级为「显式契约 + 测试锁定」。
+> 裁决人：主理人；定性：**P2、当晚执行**；状态：**待 GO**（QA 正在对同一文件做变异测试）。
+
+### 11.1 威胁等级 0：Tier-2 备源通道不是写入者
+
+`SAFE_COLS` 在两处定义且一致（`refresh_pull_local.py:117`、
+`p6_4_apply_persisted_dir.py:76`）：
+
+```python
+SAFE_COLS = ["date", "underlying_symbol", "open", "high", "low", "close",
+             "volume", "open_interest"]          # ← 没有 raw_close
+```
+
+而备源通道（Tier-2，`a31299f`）的发射循环（`refresh_pull_local.py:437`）只遍历
+graft 产出的 `new_dates`：
+
+```python
+for d in new_dates:        # 仅新增日，既有日期一个都不发射
+```
+
+→ **备源通道既不产出 `raw_close` 字段，也不发射既有日期**，对存量日名义价的
+**威胁等级 = 0**。这一条决定了本项可以判 P2 而非 P0/P1。
+
+### 11.2 真凶链路：主路 tqsdk 才是把名义价带到存量日的那只手
+
+```
+refresh_pull_local.py:724
+    emit_dates = sorted(set(tail_dates) | set(ext_rows.index))
+                            ▲ tail_dates = 对齐稳定段的【重叠日】= 湖里已存在的日期
+        ↓ json（含存量日，但 SAFE_COLS 无 raw_close）
+p6_4_apply_persisted_dir.py:398
+    → p6_4_fill_gaps.py --stage parse --force --scale 1.0
+        ↓
+p6_4_fill_gaps.py:869   enrich_raw_close(new_df, sym0)
+        ↓ 对 new_df 的【每一行】用 sina/akshare 回填名义价（含存量日）
+p6_4_fill_gaps.py  merge_year_frames(old, new_year)
+        ↓ P0-B 之前：drop_duplicates(keep="last") → sina 的 raw_close 整格覆盖存量日
+        ↓ P0-B 之后：整行保留 old → raw_close 隐式保住
+```
+
+**本次 cu0/ni0 事故的 08-21 ~ 09-01 正是沿这条链路进来的**——只不过 `raw_close`
+恰好与湖内值零偏差（§2 证据 1：sina vs 主湖 15 天 × 2 品种，偏差
+`0.000000e+00`），所以只污染了复权侧，名义侧侥幸没出事。
+
+> ⚠️ **那是运气，不是保证。** sina 停更或口径变更时，同一条链路会静默改写
+> 名义价；而项目铁律是「风控 / 保证金 / 敞口一律用名义价 `raw_close`」
+> （反例：ag0 k=0.6839，用错即低估敞口 1.46×）。名义价被静默改写的爆炸半径
+> **大于**复权价。
+
+### 11.3 隐式保护 vs 显式契约：三条暴露面
+
+`raw_close` 既不在 `MERGE_OI_ONLY_COLUMNS` 也不在 `MERGE_PROTECTED_COLUMNS`。
+它当前安全，靠的是护栏的实现方式「**整行保留 `old`，只放行 `open_interest`**」
+—— 是**副作用**，不是契约。
+
+| # | 暴露面 | 后果 |
+|---|--------|------|
+| 1 | R22 的 7 条回退判据任一触发（空帧 / 缺列 / datetime 归一化异常或含 NaT 或重复 / 新帧 OI 全 NaN / 旧帧保护列全 NaN） | 护栏**整体弃守** → `raw_close` 连同 OHLC 一起被 sina 值覆盖 |
+| 2 | `--allow-price-overwrite` | 同上 |
+| 3 | 将来有人扩 `MERGE_OI_ONLY_COLUMNS`、或把实现改成「新值非空即用新值」 | `raw_close` 静默失守，而常量断言 `test_guard_column_contract` **不会报警**（它只断言 OI_ONLY / PROTECTED 两个常量，`raw_close` 不在其中） |
+
+**第 3 条最危险：没有任何测试锁住 `raw_close` 的受保护状态。**
+（此项已同步 QA 作为变异点 M1：把 `MERGE_OI_ONLY_COLUMNS` 改成
+`("open_interest", "raw_close")`，验证 23 例是否会漏检 —— 预期漏检。）
+
+### 11.4 为什么纳入 `MERGE_GUARD_REQUIRED_COLUMNS` 不新增回退触发路径
+
+把 `raw_close` 加进 `MERGE_PROTECTED_COLUMNS` 会**连带**把它加进
+`MERGE_GUARD_REQUIRED_COLUMNS`（`REQUIRED = ("datetime",) + PROTECTED + OI_ONLY`）。
+隐患：若某年分片缺 `raw_close` 列，会触发「必需字段缺失 → 护栏整体回退」，
+对历史补洞路径（补 2018–2024 缺口）反而是**降级**。
+
+**已验证此隐患不成立**——`stage_parse` 在调用护栏前对 `old` 与 `new_year`
+都执行了 `coerce_schema`，而 `coerce_schema` 对缺失的 `raw_close` 有兜底
+（`p6_4_fill_gaps.py:548-549`）：
+
+```python
+elif col in ("raw_close", "adj_close"):
+    df[col] = df["close"] if "close" in df.columns else 0.0
+```
+
+→ `raw_close` 列**恒在**，纳入 REQUIRED **不会**新增「缺列 → 护栏弃守」这条
+R22 回退触发路径。历史补洞路径同样安全。
+
+### 11.5 变更清单（待 GO 后执行，最小变更）
+
+| # | 位置 | 改动 |
+|---|------|------|
+| 1 | `MERGE_PROTECTED_COLUMNS` | 增加 `"raw_close"`（`MERGE_GUARD_REQUIRED_COLUMNS` 自动跟上） |
+| 2 | 旧帧保护列全 NaN → 回退判据 | 统计口径须覆盖 `raw_close` |
+| 3 | `note` 里的 `overwritten` 统计 | 同上，覆盖 `raw_close` 的 NaN 行 |
+| 4 | `test_guard_column_contract` | 补 `raw_close` 常量断言 |
+| 5 | `tests/test_p6_4_merge_guard.py` | **增 1 例**：构造新帧 `raw_close` 与旧帧不同 → 断言合并后旧帧 `raw_close` 逐位保留 |
+
+其中 **第 5 条是本单的核心价值**——补的正是「没有任何测试锁住 `raw_close`」
+这个洞，不可省略。
+
+### 11.6 并发控制
+
+QA 正在对 `scripts/p6_4_fill_gaps.py` 做变异测试，其 M1 / M2 变异点
+（`MERGE_OI_ONLY_COLUMNS` / `MERGE_PROTECTED_COLUMNS`）**正是本节要改的行**。
+为避免两种事故（QA 的「改坏→跑测试→还原」把改动一并还原；或改动后 QA 的
+M1/M2 基线漂移致变异结果失去可比性），**本节变更须等主理人 GO 后落盘**，
+硬底线 19:45。文档写作先行，因为 QA 复核产出落在
+`deliverables/cu_ni_rollback_qa_review_20260903.md`，与本文件不重叠。
