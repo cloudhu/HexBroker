@@ -1052,12 +1052,47 @@ class TradingScheduler:
     def _save_cooldown_state(self) -> None:
         """P0-1：原子落盘冷却状态（跨三窗口重启不丢失指纹 / 重开计数）。
 
-        故障隔离：落盘失败只告警，绝不中断交易 tick——冷却是节奏控制，不是账本，
-        其丢失的最坏后果是可容忍的一次重复开仓，而中断 tick 的后果是当轮全品种停摆。
+        P1-B 合并写（2026-09-03）：逐品种按 ``opened_at`` **新者保留**。
+        背景——三窗口切换存在 PID 锁缺口，长寿旧进程优雅退出时
+        ``_shutdown → _save_cooldown_state`` 会用陈旧内存**整体覆写**磁盘
+        （09-01 21:58:59 实测：08-24 ``--smoke`` 污染记录覆盖 14:30 真实开仓，
+        次日 08:55 窗口恢复出 9 天前的陈旧冷却）。合并写双向往返防护：
+
+        - 内存新、磁盘旧 → 正常落盘不被回退（P0-1 主路径不变）；
+        - 内存旧、磁盘新 → 不把磁盘拖回过去（P1-B 主场景）。
+
+        故障隔离：合并读取失败 → 退回整体写内存（fail-open）；落盘失败只告警，
+        绝不中断交易 tick——冷却是节奏控制，不是账本，其丢失的最坏后果是
+        可容忍的一次重复开仓，而中断 tick 的后果是当轮全品种停摆。
         """
         if not self._signal_cooldown_persist:
             return
         try:
+            path = self._cooldown_file
+            path.parent.mkdir(parents=True, exist_ok=True)
+
+            # ---- P1-B 合并：磁盘上更新的记录优先保留（读失败退回内存态） ----
+            merged: dict = dict(self._last_sig_fp)
+            try:
+                if path.exists():
+                    disk = json.loads(path.read_text(encoding="utf-8"))
+                    for sym, raw in (disk.get("records") or {}).items():
+                        try:
+                            fp_raw = raw["fp"]
+                            disk_rec = CooldownRecord(
+                                fp=(float(fp_raw[0]), float(fp_raw[1]), str(fp_raw[2])),
+                                opened_at=datetime.fromisoformat(str(raw.get("opened_at"))),
+                                day=str(raw.get("day", "") or ""),
+                                reentries=int(raw.get("reentries", 0) or 0),
+                            )
+                        except Exception:
+                            continue  # 单条损坏跳过，不拖垮整次落盘
+                        cur = merged.get(str(sym))
+                        if cur is None or disk_rec.opened_at > cur.opened_at:
+                            merged[str(sym)] = disk_rec
+            except Exception:
+                log.warning("冷却合并读取失败，退回整体写内存 path={}", path)
+
             payload = {
                 "schema_version": "1.0",
                 "saved_at": datetime.now().isoformat(timespec="seconds"),
@@ -1068,11 +1103,9 @@ class TradingScheduler:
                         "day": rec.day,
                         "reentries": rec.reentries,
                     }
-                    for sym, rec in self._last_sig_fp.items()
+                    for sym, rec in merged.items()
                 },
             }
-            path = self._cooldown_file
-            path.parent.mkdir(parents=True, exist_ok=True)
             # G5 原子写：沙箱 safe-delete 钩子会拦截 unlink，直接覆盖会丢文件
             tmp = path.with_suffix(".tmp")
             tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
