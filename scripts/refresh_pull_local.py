@@ -207,6 +207,48 @@ def _seam_decision(
         f"不对齐且存在扩展区（主连换月时点分歧窗口）→ 拒绝扩展，回退 pandadata")
 
 
+def _seam_nominal_break(
+    seam_raw_close: float,
+    ext_first_close: float,
+    ext_first_date,
+    jump_lim: float,
+) -> str | None:
+    """P-NEW 防再发护栏（2026-09-03）：接缝**跨源**名义价连续性检查。
+
+    「``seam∈tail`` + ``ext`` 非空」是 p43 定罪的幽灵排放路径（cu0/ni0 旧约
+    bar × 当时 k 锚 → ``k = adj_close / raw_close`` 幽灵台阶）：现有
+    ``ROLLOVER_SUSPECT`` 守卫只查 tqs 系列内部连续性（``shift(1)`` 同源对比），
+    接不住**跨源**断裂——湖内接缝日 ``raw_close`` 是 sina 权威名义价，tqs
+    扩展区若仍报旧约，二者在接缝处必然偏离超限。超限即拒绝（该品种失败 →
+    调用方回退 pandadata，禁止部分落盘当成功）。
+
+    fail-open 语义（新增护栏设计原则 R22：宁可少一道护栏，不可全停）：
+    口径不可用（seam_raw ≤ 0 / NaN / 非数值）→ 返回 None 放行，退回既有
+    ROLLOVER_SUSPECT（价格/OI 跳变）守卫把关。
+
+    返回 ``None`` = 通过；返回错误串 = 调用方 ``raise ValueError(err)``。
+    """
+    try:
+        seam_raw = float(seam_raw_close)
+        first_close = float(ext_first_close)
+    except (TypeError, ValueError):
+        return None
+    if (
+        seam_raw != seam_raw or first_close != first_close  # NaN
+        or seam_raw <= 0 or first_close <= 0
+    ):
+        return None
+    dev = abs(first_close / seam_raw - 1.0)
+    if dev > jump_lim * 1.02:
+        return (
+            f"SEAM_NOMINAL_BREAK: 扩展区首日 {ext_first_date} 名义价 "
+            f"{first_close:.2f} 与湖接缝日 raw_close {seam_raw:.2f} 偏差 "
+            f"{dev:.2%} > 限幅 {jump_lim:.1%}×1.02（接缝跨源断裂，疑旧约×k锚"
+            f"幽灵排放，P-NEW 防再发护栏）→ 拒绝扩展，回退 pandadata"
+        )
+    return None
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="P步-A 本地拉取管线（tqsdk + 主湖 k 锚定）")
     ap.add_argument("--asof", default=None, help="基准交易日 YYYY-MM-DD，默认今天")
@@ -343,6 +385,22 @@ def main() -> int:
             if bool((oi_ret > OI_JUMP_PCT).any()):
                 raise ValueError(f"ROLLOVER_SUSPECT: 扩展区 OI 单日跳变超 {OI_JUMP_PCT:.0%}"
                                  f"（疑换月，k 不可外推）")
+
+            # P-NEW 防再发护栏（2026-09-03）：接缝跨源名义价连续性——
+            # 「seam∈tail + ext 非空」排放路径（cu0/ni0 幽灵台阶事故）的专用守卫。
+            seam_raw_guard = (
+                float(lk.loc[seam_date, "raw_close"])
+                if seam_date in lk.index else float("nan")
+            )
+            if not ext_rows.empty:
+                break_err = _seam_nominal_break(
+                    seam_raw_guard,
+                    ext_rows["close"].iloc[0],
+                    ext_rows.index[0],
+                    jump_lim,
+                )
+                if break_err:
+                    raise ValueError(break_err)
 
             # 发射：扩展日 + 对齐稳定段重叠日（未对齐日绝不发射）
             base = _underlying_upper(TQ_SYMBOLS[sym0])

@@ -207,7 +207,7 @@ ag0 名义价值 = 收盘价 15850 × 乘数 15 = 237,750 元/手
 | P1-2 | hc0 `SCALE_UNSTABLE` 修法 A/B/C 裁决 | 🟡 P1 |
 | P2-8 | `hexbroker/utils/io.py::_atomic_write` 异常清理路径 `os.remove(tmp)` | 🟡 P2 |
 | P2-3~6 | open 列 10 项残差 / open_interest 错位 / volume 换月窗口 / p22 v8 自校验 | ⚪ P2 |
-| — | 防再发护栏：「seam∈tail + ext 非空」路径的名义价连续性检查 | 🟡 P1 |
+| — | 防再发护栏：「seam∈tail + ext 非空」路径的名义价连续性检查 **已落地（09-03 R26h）**：`refresh_pull_local.py::_seam_nominal_break`（湖接缝日 raw_close sina 权威为锚 × 扩展区首日名义价，超限即拒该品种回退 pandadata；fail-open 口径不可用放行）+ 4 用例，全量 1188 passed | ✅ 已修 |
 | — | 今晚 20:00 自动化须在 20:42 前启动 p22，否则撞 `merge_tail_ext` 落盘护栏 exit 2 | ⏰ 今日 |
 
 ---
