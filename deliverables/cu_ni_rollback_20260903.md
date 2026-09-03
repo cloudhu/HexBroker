@@ -354,7 +354,7 @@ ni0 2026 | 护栏生效：保护 160 个既有日期的 OHLC/adj_close，仅覆�
 | 18:02 | 重建后复验 G1–G5 | ALL PASS（20 格幸存） |
 | 18:05 | 缓存健康度 | lag=0，0/18 blocked |
 | 18:10 | 全量回归（最终代码） | 1264 passed / 0 failed / 0 errors |
-| 18:12 | 三分离提交（feat / test / docs）+ `git fsck --no-dangling` | 见 §7 |
+| 18:12 | 三分离提交（feat / test / docs）+ `git fsck --no-dangling` | 见 §9 |
 
 ---
 
@@ -379,3 +379,47 @@ ni0 2026 | 护栏生效：保护 160 个既有日期的 OHLC/adj_close，仅覆�
 | R4 | 09-02 / 09-03 的 `raw_close` 由 sina 回填，若 sina 当晚停更会滞后一天 | 与 Tier-2 备源通道同一风险（见 `tier2_backup_channel_20260903.md` R1） |
 | R5 | 08-25 ~ 09-01 保留的 1.1e-9 级 k 噪声是本次融合引入的浮点误差 | 相对量级 1e-9，远低于任何信号阈值；如需彻底清除，需显式重算整个主力段（走 §4.2-4 的显式通道） |
 | R6 | 回滚脚本目前白名单硬编码在 `DEFAULT_PLAN` | 已支持 `--symbol` / `--date` 覆盖，未来同类事故可直接复用 |
+
+---
+
+## 9. 提交清单（feat / test / docs 三分离，未 push）
+
+| # | Hash | 类型 | 内容 | diffstat |
+|---|------|------|------|----------|
+| 1 | `66bd61a` | feat | `scripts/p6_4_fill_gaps.py`（P0-B 护栏）+ `scripts/rollback_adj_cells.py`（P0-A 显式修复，新增） | 2 files, +506 / −8 |
+| 2 | `5cb1691` | test | `tests/test_p6_4_merge_guard.py`（新增，23 例） | 1 file, +468 |
+| 3 | `1887c2b` | docs | `deliverables/cu_ni_rollback_20260903.md`（新增） | 1 file, +381 |
+| 4 | （本节） | docs | 补提交清单与 §6 引用修正 | 1 file |
+
+- 全部使用显式 `git add <path>`，**未使用** `-A` / `-u`；
+- **未执行** `git gc` / `repack` / `prune`；
+- `git fsck --no-dangling` → **输出为空（EXIT=0）**；
+- **未 push**。
+
+### 未纳入版本控制的生产数据改动
+
+主湖 `data/raw/processed/{cu0,ni0}/1d/2026.parquet` 的 20 格回滚不在 git 管理
+范围内（`data/` 被忽略），落在临时备份与取证 JSON 中：
+
+- `artifacts/_p2_backup_20260903_pre_rollback/{cu0,ni0}/1d/`（回滚前，各 10 文件）
+- `artifacts/_tmp/rollback_adj_cells_20260903_174558.json`（逐格改前/改后/Δ%）
+- `artifacts/_tmp/validate_rollback.txt` / `validate_rollback2.txt`（G1–G5 判据输出）
+- `artifacts/_tmp/forensics_cu_ni.txt` / `forensics_nominal.txt`（三向证据链原始输出）
+
+---
+
+## 10. 全局一致性复核（IS_PASS）
+
+| 检查项 | 结果 |
+|--------|------|
+| 跨文件 import 一致性（无循环依赖、无缺失 import） | PASS |
+| 接口契约：`merge_year_frames(old, new, *, allow_price_overwrite)` 调用方签名一致 | PASS |
+| `stage_parse` 新增关键字参数有默认值，既有调用方不受影响 | PASS |
+| 数据流：`coerce_schema` → `merge_year_frames` → `tmp.replace` 类型与列序守恒 | PASS |
+| 无重复实现（`merge_year_frames` 是 `drop_duplicates` 的唯一封装点） | PASS |
+| 删除类红线审计 `audit_no_delete_calls('hexbroker')` → 0 违规 | PASS |
+| AST 扫描两个改动脚本零 `unlink`/`remove`/`rmtree`/`move` | PASS |
+| 无 `pass` / `TODO` / `...` 占位 | PASS |
+| 全量回归 1264 passed / 0 failed / 0 errors（junit 解析值） | PASS |
+
+**IS_PASS: YES**
