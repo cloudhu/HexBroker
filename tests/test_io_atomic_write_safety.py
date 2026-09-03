@@ -44,12 +44,14 @@ PACKAGE_DIR = UTILS_DIR.parent
 #: - data/rebuild.py:141        clear_provisional：sidecar 全部年份清空后删空文件
 #: - data/rebuild.py:359        分区按真值重建后消费 _MISSING_{year}.json 标记
 #: - diagnostics/health_check.py:154  僵尸 PID 锁文件清理（删不删功能等价）
-#: 按**文件**粒度豁免：文件内新增删除调用不再红，属已知取舍（避免逐行豁免的
-#: 脆弱性）；新增豁免必须先过主理人裁决并在本清单登记语义。
-AUDIT_PACKAGE_EXEMPT = frozenset({
-    "data/rebuild.py",
-    "diagnostics/health_check.py",
-})
+#: **计数锁定**（QA R26c fresh-eyes 🟡1/🟡2 加固，2026-09-03）：值 = 该文件
+#: 当前违规条数基线（rebuild=2 / health_check=1）。文件内新增删除调用 → 红
+#: （堵「盲区加料」口子）；整改清零 → 也红（防 stale 豁免死配置，强制同步
+#: 清理清单）。基线漂移必须走主理人裁决登记。
+AUDIT_PACKAGE_EXEMPT = {
+    "data/rebuild.py": 2,
+    "diagnostics/health_check.py": 1,
+}
 
 
 # ===========================================================================
@@ -80,26 +82,37 @@ def test_utils_infra_files_no_delete_calls(py: Path):
 # 1b. 包级红线扩扫（P2-8c 方案①：hexbroker/ 全包，豁免清单制）
 # ===========================================================================
 def test_hexbroker_package_no_unexpected_delete_calls():
-    """``hexbroker/`` 全包扫描：删除类调用只允许出现在豁免清单内的文件。
+    """``hexbroker/`` 全包扫描：删除类调用只允许出现在豁免清单内，且**计数锁定**。
 
     - utils/ 已由参数化用例零容忍覆盖，本用例负责其余全部包内文件；
     - ``third_party/``（vendored）不在扫描范围（repo 根目录，天然排除）；
-    - 豁免清单按文件粒度，语义登记见 AUDIT_PACKAGE_EXEMPT 注释；
-    - 新增文件/新增删除调用未登记 → 直接红（fail-closed）。
+    - 豁免清单按文件粒度 + 违规**计数基线**锁定：加料红、清零也红；
+    - 未登记文件出现任何删除调用 → 直接红（fail-closed）。
     """
     offenders: list[str] = []
+    exempt_drift: list[str] = []
     scanned = 0
     for py in sorted(PACKAGE_DIR.rglob("*.py")):
         rel = py.relative_to(PACKAGE_DIR).as_posix()
         scanned += 1
         violations = audit_no_delete_calls(py.read_text(encoding="utf-8"))
-        if violations and rel not in AUDIT_PACKAGE_EXEMPT:
+        if rel in AUDIT_PACKAGE_EXEMPT:
+            expected = AUDIT_PACKAGE_EXEMPT[rel]
+            if len(violations) != expected:
+                exempt_drift.append(
+                    f"{rel}: 豁免计数基线漂移 —— 预期 {expected} 条，"
+                    f"实测 {len(violations)} 条：\n    "
+                    + "\n    ".join(violations)
+                    + "\n    （新增调用须主理人裁决登记；已整改清零则须同步清清单）"
+                )
+        elif violations:
             offenders.append(f"{rel}:\n    " + "\n    ".join(violations))
     assert scanned > 100, f"包级扫描范围异常（仅扫到 {scanned} 文件），护栏可能空转"
     assert not offenders, (
         "hexbroker/ 包内出现未豁免的删除类调用（登记豁免需主理人裁决，"
         "写盘走 tmp + os.replace 原子替换）：\n  - " + "\n  - ".join(offenders)
     )
+    assert not exempt_drift, "\n  - ".join(exempt_drift)
 
 
 def test_io_py_still_atomic():
