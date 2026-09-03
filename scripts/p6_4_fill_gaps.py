@@ -34,6 +34,12 @@
   且在网关 5 年限制内留余量）。
 - parse 幂等：artifacts/p6_4_applied.json 记录已应用段，同 (sym,seg) 跳过（--force 覆盖）。
 - 写回前备份原分片到 artifacts/backup_p64/。
+- **P0-B 融合护栏（2026-09-03 新增）**：合并年度分片时，主湖**已存在的日期**
+  只允许被覆盖 ``open_interest``，禁止覆盖 ``open/high/low/close/adj_close``；
+  新日期整行写入。起因是 cu0/ni0 复权污染事故（详见 ``merge_year_frames`` 与
+  ``MERGE_PROTECTED_COLUMNS`` 处留档）。护栏口径不可用时按 R22 **回退既有
+  ``keep="last"`` 行为**并打印归因，绝不新增停摆失效模式；确需修 OHLC 走
+  ``--allow-price-overwrite`` + 取证路径的显式修复，不要靠融合隐式覆盖。
 """
 
 from __future__ import annotations
@@ -84,6 +90,29 @@ SYMBOL_MAP = {
 UNDERLYING_TO_SYM0 = {v: k for k, v in SYMBOL_MAP.items()}
 
 OVERLAP_TOLERANCE = 0.01  # 重叠日 close 相对偏差阈值（1%）
+
+# --------------------------------------------------------------------------- #
+# P0-B 融合护栏常量（2026-09-03 cu0/ni0 复权污染事故，2026-09-03 新增）
+#
+# 事故机理：refresh_pull_local.py 每次拉取都带完整 10 日窗口（08-21~09-03），
+# 融合时 drop_duplicates(subset="datetime", keep="last") 让新帧整行覆盖主湖
+# 既有行。tqsdk 在换月窗口内给出的后复权价本身带有 seam 误差（cu0 08-21
+# +0.214%、08-24 +0.185%；ni0 同构反向），覆盖后在同一主力段内产生 k 值
+# 漂移（段内 k 本应恒定），即**复权污染**。
+#
+# 后复权序列是累积状态量，局部被覆盖后**无法自愈**，故护栏必须是"默认不许
+# 覆盖价格列"，而非"覆盖后告警"。
+# --------------------------------------------------------------------------- #
+# 已存在日期：允许被新帧覆盖的字段（P2-4 方案 A 授权修正持仓量，必须保留）
+MERGE_OI_ONLY_COLUMNS: tuple[str, ...] = ("open_interest",)
+# 已存在日期：禁止被新帧覆盖的价格/复权字段
+MERGE_PROTECTED_COLUMNS: tuple[str, ...] = (
+    "open", "high", "low", "close", "adj_close",
+)
+# 护栏生效所需的最小字段集（任一侧缺失即判定口径不可用 → R22 回退）
+MERGE_GUARD_REQUIRED_COLUMNS: tuple[str, ...] = (
+    "datetime",
+) + MERGE_PROTECTED_COLUMNS + MERGE_OI_ONLY_COLUMNS
 
 # --------------------------------------------------------------------------- #
 # 价格口径校准（P6-4 实测发现，2026-08-19）
@@ -673,9 +702,141 @@ def compute_overlap_ratio(old: pd.DataFrame, new: pd.DataFrame) -> float:
     return max(ratios) if ratios else 0.0
 
 
+def merge_year_frames(
+    old: pd.DataFrame,
+    new_year: pd.DataFrame,
+    *,
+    allow_price_overwrite: bool = False,
+) -> tuple[pd.DataFrame, str]:
+    """按 ``datetime`` 合并年度分片：**已存在的日期只许覆盖持仓量**。
+
+    这是 2026-09-03 cu0/ni0 复权污染事故的根因护栏。事故机理见
+    ``MERGE_PROTECTED_COLUMNS`` 处留档，此处只描述契约。
+
+    契约
+    ----
+    - **旧日期**（``old`` 中已存在的 ``datetime``）：整行保留 ``old`` 的值，
+      仅 ``open_interest`` 允许被 ``new_year`` 覆盖（P2-4 方案 A 授权修正
+      持仓量，该能力**必须**保留）；
+    - **新日期**（``old`` 中不存在的 ``datetime``）：整行采用 ``new_year``，
+      全字段写入；
+    - **显式放行**：``allow_price_overwrite=True`` 时退回旧行为（等价
+      ``drop_duplicates(keep="last")``）。这是给"显式修复脚本 + 取证路径"
+      留的口子，日常融合**禁止**开启。
+
+    R22 兜底（绝不新增"停摆"失效模式）
+    --------------------------------
+    下列任一情形 → **放弃护栏**，退回既有 ``drop_duplicates(keep="last")``
+    行为，并在返回值第二个元素写明归因，**不抛异常、不中断管线**：
+
+    1. ``old`` 或 ``new_year`` 为空（无重叠行可保护）；
+    2. 任一侧缺 ``MERGE_GUARD_REQUIRED_COLUMNS`` 中的字段；
+    3. ``datetime`` 不可归一化（异常）、含 ``NaT`` 或存在重复 —— 均无法
+       唯一定位"旧行"与"来源行"；
+    4. ``new_year`` 的 ``open_interest`` 全不可解析；
+    5. ``old`` 的保护列（OHLC/adj_close）全不可解析。
+
+    注：垃圾字符串型 datetime 在到达本函数前已被上游 ``normalize_new_df``
+    的 ``errors="coerce"`` 归一化成 ``NaT``，故判据 3 以 ``NaT`` 为主。
+
+    返回
+    ----
+    ``(merged, note)``；``merged`` 已 ``coerce_schema`` 并按日期升序。
+    """
+    # None 归一化为带列名的空帧：既让下方 concat 安全，也让缺列判定走到
+    # "必需字段缺失"分支而不是 TypeError（调用方约定传 DataFrame，防御而已）
+    if old is None:
+        old = pd.DataFrame(columns=SCHEMA_COLUMNS)
+    if new_year is None:
+        new_year = pd.DataFrame(columns=SCHEMA_COLUMNS)
+
+    # 既有行为（护栏的兜底路径）：新帧整行覆盖同日期的旧行
+    legacy = coerce_schema(pd.concat([old, new_year], ignore_index=True))
+    legacy = (
+        legacy.drop_duplicates(subset="datetime", keep="last")
+        .sort_values("datetime")
+        .reset_index(drop=True)
+    )
+
+    def _fallback(reason: str) -> tuple[pd.DataFrame, str]:
+        """放弃护栏，退回既有行为并留下归因（R22：静默回退也是事故）。"""
+        return legacy, f"护栏未生效（{reason}），已退回既有 keep=last 行为"
+
+    if allow_price_overwrite:
+        return legacy, "护栏已显式关闭（--allow-price-overwrite），按既有 keep=last 行为覆盖价格列"
+    if old.empty or new_year.empty:
+        return legacy, "护栏无需生效（旧帧或新帧为空，无重叠行可保护）"
+
+    missing = [
+        col for col in MERGE_GUARD_REQUIRED_COLUMNS
+        if col not in old.columns or col not in new_year.columns
+    ]
+    if missing:
+        return _fallback(f"必需字段缺失 {missing}")
+
+    try:
+        old_idx = old.copy()
+        new_idx = new_year.copy()
+        old_idx["datetime"] = pd.to_datetime(old_idx["datetime"]).dt.normalize()
+        new_idx["datetime"] = pd.to_datetime(new_idx["datetime"]).dt.normalize()
+    except (TypeError, ValueError, OverflowError, KeyError) as exc:
+        return _fallback(f"datetime 口径不可用：{type(exc).__name__}: {exc}")
+
+    if old_idx["datetime"].isna().any():
+        return _fallback("旧帧 datetime 含 NaT，无法定位被保护的旧行")
+    if new_idx["datetime"].isna().any():
+        return _fallback("新帧 datetime 含 NaT，无法定位来源行")
+    if old_idx["datetime"].duplicated().any():
+        return _fallback("旧帧 datetime 有重复，无法唯一定位被保护的旧行")
+    if new_idx["datetime"].duplicated().any():
+        return _fallback("新帧 datetime 有重复，无法唯一定位来源行")
+
+    old_idx = old_idx.set_index("datetime")
+    new_idx = new_idx.set_index("datetime")
+    common = old_idx.index.intersection(new_idx.index)
+
+    new_oi = pd.to_numeric(new_idx["open_interest"], errors="coerce")
+    if new_oi.isna().all():
+        return _fallback("新帧 open_interest 全不可解析")
+    old_prot = old_idx[list(MERGE_PROTECTED_COLUMNS)].apply(
+        pd.to_numeric, errors="coerce"
+    )
+    if old_prot.isna().all().all():
+        return _fallback("旧帧保护列（OHLC/adj_close）全不可解析")
+
+    # 1) 旧日期：整行保留旧值
+    merged_old = old_idx.copy()
+    # 2) 唯一例外：open_interest 允许被新值覆盖（P2-4 方案 A）
+    oi_overwrite = pd.to_numeric(
+        new_idx["open_interest"].reindex(common), errors="coerce"
+    )
+    valid = oi_overwrite.notna()
+    if bool(valid.any()):
+        merged_old.loc[oi_overwrite.index[valid], "open_interest"] = (
+            oi_overwrite[valid].to_numpy()
+        )
+    # 3) 新日期：整行采用新帧，全字段写入
+    fresh = new_idx.loc[new_idx.index.difference(old_idx.index)]
+
+    merged = coerce_schema(
+        pd.concat([merged_old, fresh], axis=0).reset_index()
+    ).sort_values("datetime").reset_index(drop=True)
+
+    overwritten = int((old_prot.isna().any(axis=1)).sum())
+    note = (
+        f"护栏生效：保护 {len(old_idx)} 个既有日期的 OHLC/adj_close，"
+        f"仅覆盖 {int(valid.sum())} 行 open_interest；"
+        f"新增 {len(fresh)} 个日期整行写入"
+    )
+    if overwritten:
+        note += f"；⚠️ 旧帧有 {overwritten} 行保护列含 NaN（coerce_schema 已填 0.0）"
+    return merged, note
+
+
 def stage_parse(persisted: str, sym_arg: str, seg: str,
                 force: bool = False, dry_run: bool = False,
-                skip_nominal: bool = False, scale: float | None = None) -> int:
+                skip_nominal: bool = False, scale: float | None = None,
+                allow_price_overwrite: bool = False) -> int:
     """解析单次拉取结果并合并写回（写前备份；幂等；--dry-run 不写盘）。"""
     underlying, sym0 = normalize_sym_arg(sym_arg)
     seg_start, seg_end = parse_seg_label(seg)
@@ -746,13 +907,11 @@ def stage_parse(persisted: str, sym_arg: str, seg: str,
             new_df[new_df["datetime"].dt.year == year].copy()
         )
         overlap_ratio = compute_overlap_ratio(old, new_year)
-        merged = pd.concat([old, new_year], ignore_index=True)
-        merged = coerce_schema(merged)
-        merged = (
-            merged.drop_duplicates(subset="datetime", keep="last")
-            .sort_values("datetime")
-            .reset_index(drop=True)
+        # P0-B 根因护栏：既有日期只许覆盖 open_interest，禁止覆盖 OHLC/adj_close
+        merged, guard_note = merge_year_frames(
+            old, new_year, allow_price_overwrite=allow_price_overwrite
         )
+        print(f"[GUARD] {sym0} {year}: {guard_note}")
         # 防御：写临时文件后原子替换，避免写一半损坏
         year_path.parent.mkdir(parents=True, exist_ok=True)
         tmp = year_path.with_suffix(".parquet.tmp")
@@ -771,6 +930,7 @@ def stage_parse(persisted: str, sym_arg: str, seg: str,
             "rows_after": int(len(merged)),
             "rows_added": int(len(merged) - len(old.drop_duplicates(subset="datetime", keep="last"))),
             "overlap_max_close_ratio": round(overlap_ratio, 6),
+            "merge_guard": guard_note,
             "applied_at": datetime.now().isoformat(timespec="seconds"),
         })
         try:
@@ -925,6 +1085,11 @@ def main() -> int:
                          "价乘错常数倒推成名义价（k=1 污染）。默认 None=查 RAW_SCALE_FIX（历史补洞兼容）。")
     ap.add_argument("--plan", type=str, default=None,
                     help="verify 阶段：指定计划 JSON 路径（默认 artifacts/p6_4_pull_plan.json）")
+    ap.add_argument("--allow-price-overwrite", action="store_true",
+                    help="parse 阶段：⚠️ 显式关闭 P0-B 融合护栏，恢复"
+                         " drop_duplicates(keep='last') 的旧行为（新帧可整行覆盖"
+                         "既有日期的 OHLC/adj_close）。仅用于取证后的显式修复，"
+                         "日常刷新/apply 严禁使用。")
     args = ap.parse_args()
 
     if args.stage == "plan":
@@ -936,7 +1101,8 @@ def main() -> int:
         try:
             return stage_parse(args.persisted, args.sym, args.seg,
                                force=args.force, dry_run=args.dry_run,
-                               skip_nominal=args.skip_nominal, scale=args.scale)
+                               skip_nominal=args.skip_nominal, scale=args.scale,
+                               allow_price_overwrite=args.allow_price_overwrite)
         except (ValueError, KeyError) as exc:
             print(f"[FAIL] {exc}")
             return 2
