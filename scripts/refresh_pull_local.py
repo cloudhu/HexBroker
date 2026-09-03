@@ -56,6 +56,31 @@
 幂等性：对齐日重发值与湖偏差 ~1e-10，远低于 p6_4 重叠容差 1%；
 扩展日为湖中不存在的新日期，merge 即纯追加。
 
+Tier-2 备源通道（2026-09-03 P0 事故修复）
+----------------------------------------
+死锁现场：主连换月窗口内 tqsdk 与湖的名义价分歧（rb0 实测 08-31/09-01 偏差
+-1.69%/-1.61%）→ 对齐稳定段被击穿 → 主路判 ``SCALE_UNSTABLE`` /
+``SEAM_BASIS_CONFLICT`` → 该品种**永不前进**；而湖不前进，稳定段就永远长
+不出 ``MIN_OVERLAP`` 天 → **主路自愈不了**。又因 pandadata MCP 未接线
+（``~/.workbuddy/mcp.json`` = ``{"mcpServers": {}}``），兜底是死路 —— 全线
+18 品种停摆。
+
+本通道的处置：主路判定失败的品种**不再原地打转**，改走
+:mod:`hexbroker.data.failover` 早已定义的 **Tier 2 备源**——
+
+1. :class:`~hexbroker.data.backup.BackupRawFetcher(sources=("sina","akshare"),
+   save=False)` 拉**名义价**（``save=False`` 是硬性要求：备源绝不污染主湖，
+   否则主源恢复后分不清哪些是权威数据）；
+2. :func:`~hexbroker.data.graft.graft_adjusted` 把名义价**续接**到湖内既有
+   后复权序列上。⛔ **严禁自己乘 k** —— 换月时 k 会跳变，手工外推必错；
+3. 成功即按主路**同格式**落盘 ``<sym0>.json``，``_SEAM_STATUS.json`` 记
+   ``BACKUP_SINA``，报告「来源」列标 ``备源``；
+4. 备源失败（拉取失败 / 无锚点 / 无新增日 / 锚点陈旧 / 接缝跨源断裂 /
+   缺 OHLC）→ 该品种**仍计失败**（退出码 3），绝不静默成功。
+
+⚠️ 备源是**新增的第二数据源**，不是放宽主路判定：
+``RAW_ALIGN_TOL`` / ``K_TOL`` / ``MIN_OVERLAP`` 一个字都不动。
+
 用法
 ----
   # 生产（交易日 08:00，当日 bar 未成型 → 排除今日）
@@ -66,14 +91,17 @@
   python scripts/refresh_pull_local.py --asof 2026-08-28 \
       --out-dir artifacts/p6_4_pull_20260828_localtest
 
-退出码：0 全部品种落盘 | 2 tqsdk 整体拉取失败 | 3 部分品种失败
-（明细见 ``_LOCAL_REPORT.md``，调用方须整体回退 pandadata，禁止部分成功）
+退出码：0 全部品种落盘（主路或备源任一成功） | 2 tqsdk 整体拉取失败 |
+3 仍有品种主备皆失败（明细见 ``_LOCAL_REPORT.md``，调用方须整体回退
+pandadata，禁止部分成功）
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+import tempfile
 from datetime import date, datetime
 from pathlib import Path
 
@@ -100,6 +128,16 @@ OI_JUMP_PCT = 0.45          # OI 单日跳变守卫（换月换仓特征）
 K_TOL = 5e-4                # k 段内常数容差（相对）
 RAW_ALIGN_TOL = 0.005       # tqsdk vs 湖 raw_close 对齐容差（相对 0.5%）
 MIN_OVERLAP = 3             # k 实测最少对齐稳定日
+
+# ---- Tier-2 备源通道常量（2026-09-03 P0） --------------------------------
+# 顺序即优先级。新浪与 akshare 是**同一上游**，此处只作解析层冗余（防接口
+# 格式变更），不构成上游冗余 —— 真正的上游冗余只能由交易所官方源提供。
+BACKUP_SOURCES: tuple[str, ...] = ("sina", "akshare")
+BACKUP_LOOKBACK_DAYS = 60       # 备源窗口向前扩展天数（保证与湖有重叠锚点）
+BACKUP_MAX_GRAFT_DAYS = 10      # 单品种单次续接天数上限（备源只应急救短窗口）
+BACKUP_MAX_ANCHOR_GAP_DAYS = 7  # 锚点日与首个续接日最大间隔（防陈旧锚点外推）
+BACKUP_STATUS_PREFIX = "BACKUP_"  # _SEAM_STATUS.json 状态名前缀（→ BACKUP_SINA）
+BACKUP_SOURCE_TAG = "backup"      # 报告「扩展源/来源」列取值
 
 
 def _load_lake_window(sym0: str, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
@@ -175,6 +213,232 @@ def _augment_ext_with_collector(
 def _underlying_upper(tq_symbol: str) -> str:
     """KQ.m@SHFE.ag → AG（对齐 pandadata 样本的大写基础代码）。"""
     return tq_symbol.split("@")[1].split(".")[-1].upper()
+
+
+def _base_symbol(sym0: str, tq_symbols: dict | None = None) -> str:
+    """``sym0`` → 大写基础合约代码（RB/HC/AG…），对齐 pandadata 样本口径。
+
+    ``tq_symbols`` 缺失该品种时按 ``sym0`` 去尾 ``0`` 兜底（``rb0`` → ``RB``），
+    保证备源通道不会因符号表缺项而整批失败（R22：不引入新的全停失效模式）。
+    """
+    tq = (tq_symbols or {}).get(sym0)
+    if tq:
+        return _underlying_upper(tq)
+    return (sym0[:-1] if sym0.endswith("0") and len(sym0) > 1 else sym0).upper()
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """G5 原子写：``tmp + os.replace``（2026-09-03 P0 补齐）。
+
+    ⛔ 绝不删除：沙箱 safe-delete 钩子会拦截 ``unlink``/``remove`` 并路由至
+    回收站（项目已因此丢过生产文件）。写盘失败时原档未被 ``os.replace``
+    触碰、tmp 保留供排查 —— 孤儿 tmp 为 ``mkstemp`` 随机名，不会被按扩展名
+    的数据扫描命中。
+
+    与 :func:`hexbroker.utils.io._atomic_write` 语义一致（mkstemp + os.close
+    + 写 + os.replace）。此处**刻意**保留本地实现而非导入：本脚本一贯保持
+    **零顶层 hexbroker 依赖**（主源模块全部惰性导入），顶层引入会让
+    ``hexbroker`` 导入失败从「单品种降级」升级为「整脚本崩溃」—— 违反
+    R22（不引入新的全停失效模式）。
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+    os.close(fd)
+    Path(tmp).write_text(text, encoding="utf-8")
+    os.replace(tmp, str(path))
+
+
+def _backup_load_anchor(sym0: str, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
+    """备源续接锚点：湖内既有 ``close``（后复权）+ ``raw_close``（名义价）。
+
+    窗口向前扩展 ``BACKUP_LOOKBACK_DAYS`` 天 —— graft 依赖 raw 与湖 adj 的
+    **重叠日期**定锚点，按原窗口请求会无交集而必然失败（与
+    ``FailoverOrchestrator._overlap_start`` 同机理）。
+
+    返回空帧表示**无锚点**（调用方须按红线拒绝，绝不自造后复权）。
+    """
+    bk_start = start - pd.Timedelta(days=BACKUP_LOOKBACK_DAYS)
+    lake = _load_lake_window(sym0, bk_start, end)
+    if lake.empty or "close" not in lake.columns:
+        return pd.DataFrame()
+    keep = [c for c in ("close", "raw_close") if c in lake.columns]
+    df = lake.set_index("datetime")[keep].astype(float).copy()
+    df.index = pd.to_datetime(df.index).normalize()
+    df = df[~df.index.duplicated(keep="last")].sort_index()
+    if "raw_close" not in df.columns:
+        df["raw_close"] = float("nan")
+    return df[(df["close"] > 0) & (df["close"] == df["close"])]
+
+
+def _backup_pull_symbol(
+    sym0: str,
+    base: str,
+    start: pd.Timestamp,
+    end_eff: pd.Timestamp,
+    jump_lim: float,
+    *,
+    fetcher=None,
+) -> tuple[list[list], dict]:
+    """Tier-2 备源通道：免费源名义价 + ``graft_adjusted`` 续接出后复权扩展日。
+
+    用于主路判定失败（``SCALE_UNSTABLE`` / ``SEAM_BASIS_CONFLICT`` /
+    ``NO_OVERLAP`` …）的品种 —— 这些品种靠主路**自愈不了**（湖不前进则对齐
+    稳定段永远长不出 ``MIN_OVERLAP`` 天），必须换数据源。
+
+    参数
+    ----
+    sym0 : 品种代码（``rb0`` / ``hc0`` …）。
+    base : 大写基础合约代码（``RB``），对齐 pandadata 口径。
+    start : 拉取窗口起始（脚本 ``start``，非扩展后的备源起点）。
+    end_eff : 发射上界（已按 ``include_today`` 处理；不含当日 bar）。
+    jump_lim : 该品种价格跳变限幅（复用主路 ``PRICE_JUMP_PCT``）。
+    fetcher : 注入式备源拉取器（鸭子类型：只需 ``fetch_raw``），**仅供测试**。
+        None 时自建 ``BackupRawFetcher(sources=BACKUP_SOURCES, save=False)``。
+
+    返回
+    ----
+    ``(rows, info)`` —— ``rows`` 为 pandadata 同口径的发射行（**仅新增日**，
+    不重发重叠日：备源只负责把湖往前推，重叠日本就在湖里且逐位一致）；
+    ``info`` 为报告/状态落盘用的诊断字典。
+
+    抛出
+    ----
+    ValueError : 任何一环不可信即抛（fail-closed）。错误串统一 ``BACKUP_*``
+        前缀，便于调用方归因与告警分级。
+    """
+    try:  # 惰性导入：备源模块不可用时只让该品种失败，不拖垮整批（R22）
+        from hexbroker.data.backup import BackupRawFetcher
+        from hexbroker.data.graft import DEFAULT_ALIGN_TOL, graft_adjusted
+    except Exception as exc:  # noqa: BLE001 - 导入失败必须归因而非崩溃
+        raise ValueError(
+            f"BACKUP_IMPORT: 备源模块不可用：{type(exc).__name__}: {exc}") from exc
+
+    if fetcher is None:
+        # save=False 是硬性要求：备源数据绝不污染主湖（否则主源恢复后分不清
+        # 哪些是权威数据）。cross_check=False：sina/akshare 同一上游，交叉
+        # 校验只能发现解析层分叉，却要多一次网络往返 —— 不划算。
+        fetcher = BackupRawFetcher(
+            sources=BACKUP_SOURCES, save=False, cross_check=False)
+    bk_start = start - pd.Timedelta(days=BACKUP_LOOKBACK_DAYS)
+
+    # ---- 1) 备源名义价 ---------------------------------------------------
+    try:
+        pulls = fetcher.fetch_raw([sym0], str(bk_start.date()), str(end_eff.date()))
+    except Exception as exc:  # noqa: BLE001 - 第三方源异常类型不可控
+        raise ValueError(
+            f"BACKUP_FETCH: 备源（{'+'.join(BACKUP_SOURCES)}）拉取失败："
+            f"{type(exc).__name__}: {exc}") from exc
+    pull = (pulls or {}).get(sym0)
+    if pull is None or getattr(pull, "close", None) is None:
+        raise ValueError("BACKUP_EMPTY: 备源未返回该品种名义价")
+
+    raw = pd.Series(pull.close).astype(float)
+    raw.index = pd.to_datetime(raw.index).normalize()
+    raw = raw[~raw.index.duplicated(keep="last")].sort_index()
+    raw = raw[(raw.index >= bk_start) & (raw.index <= end_eff)]
+    raw = raw[(raw > 0) & (raw == raw)]
+    if raw.empty:
+        raise ValueError("BACKUP_EMPTY: 备源名义价在窗口内无有效正价格")
+
+    # ---- 2) 完整 OHLC（缺列会写出零价 bar，绝不降级） ---------------------
+    frame = getattr(pull, "frame", None)
+    if frame is None or frame.empty:
+        raise ValueError(
+            "BACKUP_NO_OHLC: 备源未返回 OHLC 原始帧 —— 融合端 coerce_schema 对"
+            "缺失浮点列一律 fillna(0.0)，只给 close 会写出 open/high/low=0 的"
+            "零价 bar（红线：宁可不补，不可写错口径）")
+    frame = frame.copy()
+    frame.index = pd.to_datetime(frame.index).normalize()
+    frame = frame[~frame.index.duplicated(keep="last")].sort_index()
+    missing_cols = [c for c in ("open", "high", "low", "close") if c not in frame.columns]
+    if missing_cols:
+        raise ValueError(f"BACKUP_NO_OHLC: 备源帧缺少列 {missing_cols}")
+
+    # ---- 3) 锚点（湖内既有后复权序列） -----------------------------------
+    anchor = _backup_load_anchor(sym0, start, end_eff)
+    if anchor.empty:
+        raise ValueError(
+            "BACKUP_NO_ANCHOR: 湖内无该品种既有后复权序列，备源名义价无法续接"
+            "（红线：备源绝不自造后复权）")
+    adj_hist = anchor["close"]
+
+    # ---- 4) 续接（⛔ 严禁自己乘 k —— 换月时 k 会跳变） --------------------
+    try:
+        res = graft_adjusted(
+            adj_hist, raw,
+            max_graft_days=BACKUP_MAX_GRAFT_DAYS,
+            lookback=BACKUP_LOOKBACK_DAYS,
+            tol=DEFAULT_ALIGN_TOL,
+        )
+    except Exception as exc:  # noqa: BLE001 - HexDataError 等统一归因
+        raise ValueError(
+            f"BACKUP_GRAFT: 续接失败：{type(exc).__name__}: {exc}") from exc
+
+    align = res.alignment if isinstance(res.alignment, dict) else {}
+    n_align = int(align.get("n", 0) or 0)
+    if n_align < MIN_OVERLAP:
+        raise ValueError(
+            f"BACKUP_ALIGN_INSUFFICIENT: 备源与湖重叠样本 {n_align} < "
+            f"{MIN_OVERLAP}（锚点不可信，拒绝续接）")
+    if not res.new_dates:
+        raise ValueError("BACKUP_NO_NEW_DATES: 备源无湖内缺失的新日期（湖已覆盖）")
+
+    new_dates = [pd.Timestamp(d) for d in res.new_dates]
+    t0 = pd.Timestamp(res.anchor_date)
+    gap_days = int((new_dates[0] - t0).days)
+    if gap_days > BACKUP_MAX_ANCHOR_GAP_DAYS:
+        raise ValueError(
+            f"BACKUP_ANCHOR_STALE: 锚点日 {t0.date()} 与首个续接日 "
+            f"{new_dates[0].date()} 间隔 {gap_days} 天 > "
+            f"{BACKUP_MAX_ANCHOR_GAP_DAYS} 天（陈旧锚点外推不可信）")
+
+    # ---- 5) 接缝跨源名义价连续性（复用主路 P-NEW 护栏，同口径） -----------
+    # 备源若在续接段换了主力而湖未换，k 锚即失效 → 名义价必然在接缝处跳空。
+    # 口径不可用（湖无 raw_close 列）时该护栏 fail-open 放行并留痕（R22）。
+    if t0 in set(anchor.index):
+        seam_raw = float(anchor.loc[t0, "raw_close"])
+    else:
+        seam_raw = float(raw.loc[t0])
+    break_err = _seam_nominal_break(
+        seam_raw, float(raw.loc[new_dates[0]]), new_dates[0], jump_lim)
+    if break_err:
+        raise ValueError(f"BACKUP_{break_err}")
+
+    # ---- 6) 发射（仅新增日；k 由 graft 结果反解，不手工外推） -------------
+    # k_d = grafted_close / raw_close 精确还原 graft 的分段因子（换月时会自动
+    # 跳段，这正是「严禁自乘 k」的价值所在）。OHLC 按同一 k_d 缩放，保证
+    # open<=close<=high 的包络关系不被破坏。
+    rows: list[list] = []
+    for d in new_dates:
+        if d not in set(frame.index):
+            raise ValueError(f"BACKUP_NO_OHLC: 备源帧缺少 {d.date()} 的 OHLC 行")
+        raw_v = float(raw.loc[d])
+        k_d = float(res.series.loc[d]) / raw_v
+        vol = float(frame.loc[d, "volume"]) if "volume" in frame.columns else 0.0
+        oi = float(frame.loc[d, "open_interest"]) if "open_interest" in frame.columns else 0.0
+        rows.append([
+            d.strftime("%Y%m%d"), base,
+            round(float(frame.loc[d, "open"]) * k_d, 6),
+            round(float(frame.loc[d, "high"]) * k_d, 6),
+            round(float(frame.loc[d, "low"]) * k_d, 6),
+            round(raw_v * k_d, 6),
+            vol, oi,
+        ])
+
+    source_name = str(getattr(pull, "source", "") or BACKUP_SOURCE_TAG)
+    info = {
+        "source": source_name,
+        "k": float(res.anchor_ratio),
+        "anchor_date": str(t0.date()),
+        "anchor_gap_days": gap_days,
+        "new_dates": [d.strftime("%Y%m%d") for d in new_dates],
+        "n_align": n_align,
+        # 续接告警（重叠区比值非恒定 = 窗口内有换月）**不阻断**但必须留痕：
+        # rb0/hc0 的换月日天然落在重叠区内，硬卡会让备源永远救不了场。
+        "warnings": [str(w) for w in (res.warnings or [])],
+        "seam_status": f"{BACKUP_STATUS_PREFIX}{source_name.upper()}",
+    }
+    return rows, info
 
 
 def _seam_decision(
@@ -301,14 +565,19 @@ def main() -> int:
         tq = tq[tq["datetime"].dt.normalize() < asof]
     tq = tq.sort_values(["symbol", "datetime"])
 
+    # 备源发射上界：与主路同口径（--exclude-today 时当日 bar 未成型，绝不发射）
+    emit_end = end if include_today else end - pd.Timedelta(days=1)
+
     # ---- 2) 逐品种：对齐过滤 + 接缝校验 + 落盘 ---------------------------
     out_dir.mkdir(parents=True, exist_ok=True)
     report: list[str] = []
     ok: list[str] = []
     failed: list[tuple[str, str]] = []
     seam_status_map: dict[str, str] = {}
+    backup_detail: dict[str, dict] = {}
 
     for sym0 in symbols:
+        primary_err = ""
         try:
             lake = _load_lake_window(sym0, start, end)
             tqs = tq[tq["symbol"] == sym0].set_index("datetime").sort_index()
@@ -403,7 +672,7 @@ def main() -> int:
                     raise ValueError(break_err)
 
             # 发射：扩展日 + 对齐稳定段重叠日（未对齐日绝不发射）
-            base = _underlying_upper(TQ_SYMBOLS[sym0])
+            base = _base_symbol(sym0, TQ_SYMBOLS)
             emit_dates = sorted(set(tail_dates) | set(ext_rows.index))
             rows: list[list] = []
             for dt in emit_dates:
@@ -415,21 +684,59 @@ def main() -> int:
                     float(src_row["volume"]), float(src_row["open_interest"]),
                 ])
             payload = {"result": {"type": "dataframe", "columns": SAFE_COLS, "rows": rows}}
-            (out_dir / f"{sym0}.json").write_text(
-                json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            _atomic_write_text(out_dir / f"{sym0}.json",
+                               json.dumps(payload, ensure_ascii=False))
             ok.append(sym0)
             seam_status_map[sym0] = seam_status
             n_conflict = len(overlap_dates) - len([d for d in overlap_dates if d in set(tail_dates)])
             report.append(
                 f"| {sym0} | ✅ | {k:.6f} | {len(tail_dates)} | {k_dev:.1e} | "
                 f"{len(ext_rows)} | {ext_source} | {n_conflict} | "
-                f"{rows[0][0]}~{rows[-1][0]} | {seam_status} |")
+                f"{rows[0][0]}~{rows[-1][0]} | {seam_status} | 主路 tqsdk |")
         except ValueError as exc:
-            failed.append((sym0, str(exc)))
-            report.append(f"| {sym0} | ⛔ | - | - | - | - | - | - | {exc} | - |")
+            primary_err = str(exc)
         except Exception as exc:  # noqa: BLE001
-            failed.append((sym0, f"UNEXPECTED: {exc}"))
-            report.append(f"| {sym0} | ⛔ | - | - | - | - | - | - | UNEXPECTED: {exc} | - |")
+            primary_err = f"UNEXPECTED: {exc}"
+
+        if not primary_err:
+            continue
+
+        # ---- 2b) Tier-2 备源通道（2026-09-03 P0）：主路失败 → 换数据源 -----
+        # 主路失败品种靠主路自愈不了（湖不前进 → 对齐稳定段永远长不出
+        # MIN_OVERLAP 天），故改走 sina/akshare 名义价 + graft 续接。
+        # ⛔ 备源是**新增的第二数据源**，不是放宽主路判定 —— RAW_ALIGN_TOL /
+        # K_TOL / MIN_OVERLAP 一个字都不动。
+        try:
+            bk_rows, bk_info = _backup_pull_symbol(
+                sym0,
+                _base_symbol(sym0, TQ_SYMBOLS),
+                start,
+                emit_end,
+                PRICE_JUMP_PCT.get(sym0, PRICE_JUMP_DEFAULT),
+            )
+        except ValueError as exc:
+            failed.append((sym0, f"{primary_err} → 备源亦失败：{exc}"))
+            report.append(
+                f"| {sym0} | ⛔ | - | - | - | - | - | - | {primary_err} | - | "
+                f"主路 tqsdk / 备源失败：{exc} |")
+            continue
+        except Exception as exc:  # noqa: BLE001
+            failed.append((sym0, f"{primary_err} → 备源异常：UNEXPECTED: {exc}"))
+            report.append(
+                f"| {sym0} | ⛔ | - | - | - | - | - | - | {primary_err} | - | "
+                f"主路 tqsdk / 备源异常：UNEXPECTED: {exc} |")
+            continue
+        payload = {"result": {"type": "dataframe", "columns": SAFE_COLS, "rows": bk_rows}}
+        _atomic_write_text(out_dir / f"{sym0}.json",
+                           json.dumps(payload, ensure_ascii=False))
+        ok.append(sym0)
+        seam_status_map[sym0] = bk_info["seam_status"]
+        backup_detail[sym0] = bk_info
+        report.append(
+            f"| {sym0} | ✅备源 | {bk_info['k']:.6f} | - | - | {len(bk_rows)} | "
+            f"{BACKUP_SOURCE_TAG}:{bk_info['source']} | - | "
+            f"{bk_rows[0][0]}~{bk_rows[-1][0]} | {bk_info['seam_status']} | "
+            f"备源 {bk_info['source']}（主路失败：{primary_err}） |")
 
     # ---- 3) 报告 --------------------------------------------------------
     lines = [
@@ -438,31 +745,57 @@ def main() -> int:
         "",
         f"- 拉取通道：tqsdk_source（{bf.metadata.get('fetch_seconds', '?')}s）"
         f"+ 主湖 k 锚定 + 采集湖优先扩展",
-        f"- 结果：成功 {len(ok)} / 失败 {len(failed)}（共 {len(symbols)}）",
+        f"- 兜底通道：Tier-2 备源（{'+'.join(BACKUP_SOURCES)} 名义价 + graft 续接，"
+        f"save=False 不落湖）—— 仅主路判定失败的品种触发",
+        f"- 结果：成功 {len(ok)} / 失败 {len(failed)}（共 {len(symbols)}），"
+        f"其中走备源 {len(backup_detail)} 个",
         f"- 落盘目录：{out_dir}",
         "",
-        "| 品种 | 状态 | k | 对齐稳定日 | k波动 | 扩展行 | 扩展源 | 基准冲突日 | 发射区间 | 接缝 |",
-        "|---|---|---|---|---|---|---|---|---|---|",
+        "| 品种 | 状态 | k | 对齐稳定日 | k波动 | 扩展行 | 扩展源 | 基准冲突日 | 发射区间 | 接缝 | 来源 |",
+        "|---|---|---|---|---|---|---|---|---|---|---|",
         *report,
     ]
+    if backup_detail:
+        lines += [
+            "",
+            "## 🟡 备源补数明细（Tier-2，续接段为临时值）",
+            "",
+            "| 品种 | 来源 | 锚点日 | k | 续接日 | 重叠样本 | 告警 |",
+            "|---|---|---|---|---|---|---|",
+            *[
+                f"| {s} | {i['source']} | {i['anchor_date']} | {i['k']:.6f} | "
+                f"{', '.join(i['new_dates'])} | {i['n_align']} | "
+                f"{'；'.join(i['warnings']) or '无'} |"
+                for s, i in sorted(backup_detail.items())
+            ],
+            "",
+            "> ⚠️ 续接段未经主源（pandadata）真值校验。主源恢复后**必须**用主源"
+            "重建该窗口，本段不可视为权威值。",
+        ]
     if failed:
         lines += [
             "",
-            "## ⛔ 失败明细（调用方须回退 pandadata，禁止部分落盘当成功）",
+            "## ⛔ 失败明细（主路 + Tier-2 备源**皆**失败；调用方须回退 pandadata，"
+            "禁止部分落盘当成功）",
             "",
             *[f"- **{s}**: {reason}" for s, reason in failed],
         ]
-    (out_dir / "_LOCAL_REPORT.md").write_text("\n".join(lines), encoding="utf-8")
+    _atomic_write_text(out_dir / "_LOCAL_REPORT.md", "\n".join(lines))
     # Part B 机器可读接缝状态（编排层据此对领先窗口品种定向补数；
     # 文件名带 "_" 前缀，p6_4_apply_persisted_dir 的 glob 会排除 _*.json）
     lead_window = sorted(s for s, v in seam_status_map.items()
                          if v == "ROLLOVER_LEAD_WINDOW")
-    (out_dir / "_SEAM_STATUS.json").write_text(
+    backup_syms = sorted(backup_detail)
+    _atomic_write_text(
+        out_dir / "_SEAM_STATUS.json",
         json.dumps({"asof": asof.strftime("%Y-%m-%d"),
                     "statuses": seam_status_map,
-                    "lead_window": lead_window},
-                   ensure_ascii=False, indent=2),
-        encoding="utf-8")
+                    "lead_window": lead_window,
+                    # 2026-09-03 P0 新增：备源补数品种（续接段为临时值，主源
+                    # 恢复后须重建）。状态名形如 BACKUP_SINA。
+                    "backup": backup_syms,
+                    "backup_detail": backup_detail},
+                   ensure_ascii=False, indent=2))
     print("\n".join(lines))
 
     return 0 if not failed else 3

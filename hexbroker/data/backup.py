@@ -56,6 +56,16 @@ class RawPull:
     volume: pd.Series | None = None
     #: 非致命提示（不阻断使用，但必须上报）
     warnings: list[str] = field(default_factory=list)
+    #: 拉取窗口的**完整原始帧**（``open/high/low/close/volume/open_interest``，
+    #: 索引 datetime，已排序去重）。缺省 None（鸭子类型注入的假 fetcher 可不填）。
+    #:
+    #: **为什么必须带整帧（2026-09-03 P0 补）**：续接器
+    #: :func:`~hexbroker.data.graft.graft_adjusted` 只产出 ``close``，而融合端
+    #: ``p6_4_fill_gaps.coerce_schema`` 对缺失的浮点列一律 ``fillna(0.0)`` ——
+    #: 只给 close 会往主湖写出 ``open/high/low = 0`` 的**零价 bar**（比不补更糟，
+    #: 且会被下游指标静默消化）。故备源必须提供完整 OHLC；缺失时调用方应
+    #: **判该品种失败**（fail-closed），不可降级成「只有 close」。
+    frame: pd.DataFrame | None = None
 
     @property
     def latest(self):
@@ -150,6 +160,8 @@ class BackupRawFetcher:
                 source=name,
                 open_interest=(oi.astype(float) if oi is not None else None),
                 volume=(vol.astype(float) if vol is not None else None),
+                # 整帧透传：备源续接产出完整 bar 需要 open/high/low（见 RawPull.frame）
+                frame=sub,
             )
         if not out:
             raise HexEmptyDataError(
