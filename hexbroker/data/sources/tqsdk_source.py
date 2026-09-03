@@ -72,6 +72,23 @@ def load_tqsdk_auth(username: Optional[str] = None, password: Optional[str] = No
     )
 
 
+def _oi_to_float(raw: object) -> float:
+    """持仓量原始字段 → float，保持 ``float(x or 0)`` 的健壮风格。
+
+    ``None`` / ``NaN`` / 非数值 / ``0`` 一律返回 ``0.0``，使调用方可以用
+    ``a or b`` 直接表达「主口径取值、缺失则回退」的降级链。
+    """
+    if raw is None:
+        return 0.0
+    try:
+        val = float(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0.0
+    if pd.isna(val) or val == 0.0:
+        return 0.0
+    return val
+
+
 class TqsdkSource(DataSource):
     """TQSDK 主力连续数据源（推送式通道的历史快照用法）。"""
 
@@ -175,7 +192,18 @@ class TqsdkSource(DataSource):
                 "open": float(r["open"]), "high": float(r["high"]),
                 "low": float(r["low"]), "close": c,
                 "volume": float(r["volume"]) if pd.notna(r["volume"]) else 0.0,
-                "open_interest": float(r.get("open_oi", 0) or 0),
+                # P2-4（2026-09-03）持仓量口径修正：tqsdk 日 K 的 ``close_oi`` 语义为
+                # 「K 线**结束**时刻的持仓量」= 当日收盘 OI，与 pandadata 权威源同口径；
+                # ``open_oi`` 语义为「K 线**起始**时刻的持仓量」= 上一交易日收盘 OI。
+                # 旧实现误用 ``open_oi``，导致落湖 open_interest 相对权威源系统性
+                # 滞后一个交易日（实测波及 16/18 品种）。故此处主口径取 ``close_oi``。
+                # 回退分支：仅当 ``close_oi`` 缺失/NaN/为 0（旧版 tqsdk 无该字段）时才取
+                # ``open_oi``；此时**回退值语义为上一交易日收盘 OI，属降级口径**，
+                # 仅为保持列非空而存在，排查 OI 错位时须优先怀疑该分支。
+                "open_interest": (
+                    _oi_to_float(r.get("close_oi", 0))
+                    or _oi_to_float(r.get("open_oi", 0))
+                ),
                 "amount": 0.0,  # tqsdk 免费接口无成交额，按契约补 0（同 sina 规则）
                 "adj_close": c, "raw_close": c,  # 禁止前复权：初值等同 close
                 "datetime": dt, "symbol": sym,
