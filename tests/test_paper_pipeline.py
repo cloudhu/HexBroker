@@ -160,9 +160,11 @@ def _risk_gate() -> RiskGate:
 
 def _scheduler(tmp_path, paper_cfg=None, sig: SignalFrame | None = None) -> tuple[TradingScheduler, dict]:
     paper_cfg = paper_cfg or _paper_cfg()
-    # 测试隔离：账户快照/c0 日线/冷却状态落盘到 tmp 目录，避免污染仓库 data/
+    # 测试隔离：账户快照/c0 日线/c0 日内积累中间态/冷却状态落盘到 tmp 目录，
+    # 避免污染仓库 data/paper 运行时数据（P1-4 新增 c0_intraday_file 中间态）。
     paper_cfg.account_file = str(tmp_path / "account.json")
     paper_cfg.c0_daily_csv = str(tmp_path / "c0_daily.csv")
+    paper_cfg.c0_intraday_file = str(tmp_path / "c0_intraday.json")
     # P0-1：冷却状态落盘路径指向 tmp，避免单测写脏生产 data/paper/cooldown.json
     paper_cfg.cooldown_file = str(tmp_path / "cooldown.json")
     quotes = FakeQuotes()

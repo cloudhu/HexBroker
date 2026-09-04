@@ -107,6 +107,11 @@ class TradingScheduler:
         self._account_file = Path(cfg.get("account_file", "data/paper/account.json"))
         self._trades_log = str(cfg.get("trades_log", "data/paper/trades.log"))
         self._c0_daily_csv = Path(cfg.get("c0_daily_csv", "data/paper/c0_daily.csv"))
+        # P1-4（2026-09-04）：c0 日内积累中间态 json —— 采集进程与落盘进程解耦。
+        # _c0_intraday 原为纯内存 dict，进程退出即失 → 跨进程（20:5x 收盘复盘进程
+        # 无当日盘中数据）_on_close 的 _c0_intraday.get(day) 恒 None → c0_daily.csv
+        # 永不生成 → accumulate 永不毕业。每 tick 持久化该 dict（G5 tmp+replace）。
+        self._c0_intraday_file = Path(cfg.get("c0_intraday_file", "data/paper/c0_intraday.json"))
         self._c0_symbol = "c0" if "c0" in self._symbols else None
 
         self._stop_event = stop_event if stop_event is not None else threading.Event()
@@ -127,6 +132,7 @@ class TradingScheduler:
         self._all_trades: list[TradeEvent] = []
         self._seen_trade_ids: set[str] = set()  # 成交去重哨兵（按 trade_id，防御重入/重复 append 致聚合计数翻倍）
         self._c0_intraday: dict[date, dict[str, float]] = {}
+        self._load_c0_intraday()  # P1-4：跨进程恢复日内积累（失败静默，见方法内注释）
         self._bars_cache: dict[str, tuple[date, pd.DataFrame]] = {}
 
         self._last_intel_poll: Optional[datetime] = None
@@ -769,6 +775,61 @@ class TradingScheduler:
         except Exception:
             return 0
 
+    # ------------------------------------------------------------------
+    # c0 日内积累中间态持久化（P1-4，2026-09-04）
+    # ------------------------------------------------------------------
+    # _c0_intraday 原为纯内存 dict：_track_accumulate 逐 tick 更新，进程退出即失。
+    # 但 _on_close（收盘复盘）跑在**新进程**首个 tick（如 20:5x 进程）——该进程没有
+    # 当日盘中累积 → _append_c0_daily 里 _c0_intraday.get(day) 恒 None → c0_daily.csv
+    # 永不生成 → _c0_daily_row_count() 恒 0 → accumulate 永不切 trade（30 日毕业死代码）。
+    # 修复：每 tick 把 _c0_intraday 原子写 json 中间态（G5：tmp + os.replace），进程
+    # 重启后 load 恢复当日已收数据 → 落盘进程解耦。c0_daily.csv 仍是「整日完成行」，
+    # 毕业计数按真实完成交易日推进，不会因逐 tick 部分行假毕业。
+    def _load_c0_intraday(self) -> None:
+        """启动时从 json 中间态恢复日内积累。文件缺失/损坏 → 静默清空（R22：不失败）。"""
+        try:
+            if not self._c0_intraday_file.exists():
+                return
+            payload = json.loads(self._c0_intraday_file.read_text(encoding="utf-8"))
+            restored: dict[date, dict[str, float]] = {}
+            for day_s, stats in (payload or {}).items():
+                if not isinstance(stats, dict):
+                    continue
+                try:
+                    d = date.fromisoformat(str(day_s))
+                except ValueError:
+                    continue
+                cleaned = {k: float(v) for k, v in stats.items() if isinstance(v, (int, float))}
+                if cleaned:
+                    restored[d] = cleaned
+            if restored:
+                self._c0_intraday.update(restored)
+                log.info(
+                    "c0 日内积累已跨进程恢复 {} 个交易日（{}）", len(restored),
+                    ", ".join(d.isoformat() for d in sorted(restored)),
+                )
+        except Exception as exc:
+            log.warning("c0 日内积累中间态读取失败（按空处理）file={} err={}",
+                        self._c0_intraday_file, exc)
+
+    def _save_c0_intraday(self) -> None:
+        """原子写日内积累中间态（G5：tmp + os.replace），供跨进程收盘落盘。
+        任何失败只记日志，绝不打断主 tick（R22）。"""
+        if self._c0_intraday_file is None or self._c0_symbol is None:
+            return
+        try:
+            payload = {
+                d.isoformat(): {k: float(v) for k, v in st.items()}
+                for d, st in self._c0_intraday.items()
+            }
+            self._c0_intraday_file.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._c0_intraday_file.with_name(self._c0_intraday_file.name + ".tmp")
+            tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(self._c0_intraday_file)
+        except Exception as exc:
+            log.warning("c0 日内积累中间态写盘失败（已隔离）file={} err={}",
+                        self._c0_intraday_file, exc)
+
     def _track_accumulate(self, symbol: str, quote: Quote, day: date) -> None:
         """跟踪 c0 盘中 OHLC（收盘时落盘日线快照）。
 
@@ -784,6 +845,8 @@ class TradingScheduler:
         stats["high"] = max(stats["high"], quote.high or quote.price)
         stats["low"] = min(stats["low"], quote.low or quote.price)
         stats["close"] = quote.price
+        # P1-4：每 tick 持久化中间态 → 进程退出不丢当日已收数据，供收盘复盘跨进程落盘。
+        self._save_c0_intraday()
 
     def _append_c0_daily(self, day: date) -> None:
         """收盘将 c0 主力日线快照（open/high/low/close/settle）追加到 CSV。
@@ -1452,6 +1515,7 @@ class TradingScheduler:
         self._day_signals.pop(day, None)
         self._day_news.pop(day, None)
         self._c0_intraday.pop(day, None)
+        self._save_c0_intraday()  # P1-4：已收盘落盘之日在中间态中剔除，防重启重复追加
 
     # ------------------------------------------------------------------
     # 首轮评估（Q5）

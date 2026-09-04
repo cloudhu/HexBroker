@@ -195,6 +195,10 @@ paper:
   cooldown_file: data/paper/cooldown.json
   trades_log: data/paper/trades.log
   c0_daily_csv: data/paper/c0_daily.csv
+  # P1-4（2026-09-04）：c0 日内积累中间态 json——采集进程每 tick 原子写，
+  # 收盘复盘（20:5x 新进程无当日盘中数据）启动时 load 恢复 → c0_daily.csv 可生成、
+  # accumulate 30 日毕业从死代码复活。属运行时中间态（非 git 跟踪），勿提交。
+  c0_intraday_file: data/paper/c0_intraday.json
   intel_static_file: data/paper/news_static.json   # 静态情报源（MCP 文件桥接：agent 用 mx-ds-mcp 拉取落盘 JSON）
 
   # ---- 行情 ----
