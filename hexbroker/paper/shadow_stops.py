@@ -61,6 +61,12 @@ DEFAULT_PATH = Path("data/paper/shadow_stops.jsonl")
 #: 视为「无持仓」的阈值（与 broker.py / scheduler.py 口径一致）
 _FLAT_EPS = 1e-12
 
+#: 去重窗口默认值（秒）。同一 (symbol, kind) 在最近 N 秒内已 emit 过则跳过本轮，
+#: 避免每个 tick 都写一条把 jsonl 刷成噪声。默认 300s 与账户快照心跳对齐。
+#: 窗口**外**再次穿越阈值会重新 emit（真·二次穿越必须能触发，不能漏）。
+#: 只做「时间窗内去重」，不引入「只记极值」之类会改变观察语义的规则。
+DEFAULT_DEDUP_WINDOW_SEC = 300.0
+
 
 def evaluate_trigger(
     position: float,
@@ -125,6 +131,10 @@ class ShadowStopMonitor:
     multiplier_fn:
         ``symbol -> 合约乘数``，用于计算浮动盈亏的**金额**。缺省按 1.0
         （此时 ``unrealized_pnl`` 退化为「每单位名义盈亏」，口径需在报告注明）。
+    dedup_window_sec:
+        去重窗口（秒）。同一 ``(symbol, kind)`` 在最近 ``dedup_window_sec`` 秒内
+        已 emit 过一次，则本轮静默跳过（不写第二条、不打第二条告警）；窗口外
+        再次穿越阈值会**重新** emit。设为 ``0`` / 非正可关闭去重（始终 emit）。
     """
 
     def __init__(
@@ -132,10 +142,14 @@ class ShadowStopMonitor:
         path: Path | str = DEFAULT_PATH,
         enabled: bool = True,
         multiplier_fn: Optional[Callable[[str], float]] = None,
+        dedup_window_sec: float = DEFAULT_DEDUP_WINDOW_SEC,
     ) -> None:
         self._path = Path(path)
         self._enabled = bool(enabled)
         self._multiplier_fn = multiplier_fn
+        self._dedup_window_sec = float(dedup_window_sec)
+        #: 上次成功 emit 的 epoch 秒，键 = (symbol, kind)
+        self._last_emit: dict[tuple[str, str], float] = {}
         self._lock = threading.Lock()
 
     @property
@@ -145,6 +159,15 @@ class ShadowStopMonitor:
     @property
     def enabled(self) -> bool:
         return self._enabled
+
+    @property
+    def dedup_window_sec(self) -> float:
+        return self._dedup_window_sec
+
+    def reset_dedup(self) -> None:
+        """清空去重状态（测试用 / 跨会话重扫时手动复位）。"""
+        with self._lock:
+            self._last_emit.clear()
 
     def multiplier(self, symbol: str) -> float:
         """合约乘数；未注入或异常时退回 1.0（R22：不得因取乘数失败而停摆）。"""
@@ -176,6 +199,7 @@ class ShadowStopMonitor:
             return []
 
         ts = now if now is not None else datetime.now()
+        now_epoch = ts.timestamp()
         entry = float(avg_entry) if _usable_or_zero(avg_entry) else 0.0
         pos = float(position)
         px = float(price)
@@ -184,6 +208,16 @@ class ShadowStopMonitor:
 
         records: list[dict[str, Any]] = []
         for kind in hits:
+            # 去重窗口：同一 (symbol, kind) 最近 dedup_window_sec 内已 emit 过则跳过，
+            # 不再 build / emit / 落盘第二条。窗口外再次穿越阈值则重新 emit。
+            if not self._should_emit(symbol, kind, now_epoch):
+                log.debug(
+                    "影子止损去重（窗口内 {:.0f}s）symbol={} kind={} —— 本轮跳过",
+                    self._dedup_window_sec,
+                    symbol,
+                    kind,
+                )
+                continue
             threshold = float(stop if kind == KIND_STOP else take_profit)
             record: dict[str, Any] = {
                 "ts": ts.isoformat(timespec="seconds"),
@@ -203,8 +237,30 @@ class ShadowStopMonitor:
         self._write(records)
         return records
 
+    def _should_emit(self, symbol: str, kind: str, now_epoch: float) -> bool:
+        """去重判定：是否应 emit 本 (symbol, kind)。
+
+        规则：去重窗口非正 → 恒放行（关闭去重）；否则查 ``_last_emit``，若
+        存在且 ``now_epoch - last < dedup_window_sec`` → 判为窗口内重复 → ``False``；
+        否则记录本次时间戳并放行 ``True``（原子地推进哨兵，杜绝并发重复）。
+        """
+        window = self._dedup_window_sec
+        if window <= 0:
+            return True
+        with self._lock:
+            last = self._last_emit.get((symbol, kind))
+            if last is not None and (now_epoch - last) < window:
+                return False
+            self._last_emit[(symbol, kind)] = now_epoch
+            return True
+
     def _emit(self, symbol: str, kind: str, record: dict[str, Any]) -> None:
-        """打 WARNING 告警。影子模式下这是**唯一**的外部可见行为。"""
+        """打 WARNING 告警。影子模式下这是**唯一**的外部可见行为。
+
+        ⚠️ 调用方契约：**调用前必须先过 ``_should_emit`` 去重**（``scan`` 已做）。
+        ``_emit`` 自身**不**再去重 —— 去重哨兵 ``_last_emit`` 在 ``_should_emit``
+        里推进。若绕过 ``scan`` 直接调 ``_emit``，不会受窗口约束（保持简单语义，
+        调用路径只有 ``scan``）。"""
         log.warning(
             "{} symbol={} 持仓={:g} 阈值={:.4f} 触发价={:.4f} 开仓均价={:.4f} "
             "浮动盈亏={:.2f} 行情时间={}（影子模式：仅记录，未平仓）",

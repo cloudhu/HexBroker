@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import json
+import datetime as _dt
 from datetime import datetime
 
 import pytest
@@ -354,3 +355,84 @@ def test_scan_uses_quotes_layer_parse_output():
     # 持仓 1 手 @3200，止损 3170 → 最新价 3166 已跌破，应触发
     hits = evaluate_trigger(1.0, q.price, 3170.0, 3300.0)
     assert hits == [KIND_STOP], "必须用 field[8] 最新价判定，而非 field[2] 开盘价 3145"
+
+
+# --------------------------------------------------------------------------- #
+# 6. 去重窗口（任务A：转真实前必须补 —— 避免每个 tick 写一条刷爆 jsonl）
+# --------------------------------------------------------------------------- #
+def _count_lines(path) -> int:
+    if not path.exists():
+        return 0
+    return len(path.read_text(encoding="utf-8").splitlines())
+
+
+def test_dedup_within_window_writes_only_one_row(tmp_path):
+    """窗口内同一 (symbol, kind) 二次命中 → 不写第二条，jsonl 行数不变。"""
+    mon = _monitor(tmp_path)  # 默认窗口 300s
+    t0 = NOW
+    # 第一次命中 → 写 1 行
+    r1 = mon.scan(
+        symbol="rb0", position=1.0, price=2890.0, stop=2900.0,
+        take_profit=None, avg_entry=3000.0, quote_ts=t0, now=t0,
+    )
+    assert len(r1) == 1
+    assert _count_lines(tmp_path / "shadow_stops.jsonl") == 1
+    # 窗口内（+60s）价格继续在止损下方 → 不得写第二条
+    r2 = mon.scan(
+        symbol="rb0", position=1.0, price=2880.0, stop=2900.0,
+        take_profit=None, avg_entry=3000.0, quote_ts=t0 + _dt.timedelta(seconds=60),
+        now=t0 + _dt.timedelta(seconds=60),
+    )
+    assert r2 == [], "窗口内去重：不得返回新记录"
+    assert _count_lines(tmp_path / "shadow_stops.jsonl") == 1, "窗口内不得写第二条"
+
+
+def test_dedup_window_expiry_allows_second_emit(tmp_path):
+    """窗口外（>300s）再次穿越阈值 → 重新 emit，写第二条（真·二次穿越要能触发）。"""
+    mon = _monitor(tmp_path)
+    t0 = NOW
+    mon.scan(
+        symbol="rb0", position=1.0, price=2890.0, stop=2900.0,
+        take_profit=None, avg_entry=3000.0, quote_ts=t0, now=t0,
+    )
+    assert _count_lines(tmp_path / "shadow_stops.jsonl") == 1
+    # 越过窗口（+301s），价格仍低于止损 → 应写第二条
+    r2 = mon.scan(
+        symbol="rb0", position=1.0, price=2850.0, stop=2900.0,
+        take_profit=None, avg_entry=3000.0,
+        quote_ts=t0 + _dt.timedelta(seconds=301),
+        now=t0 + _dt.timedelta(seconds=301),
+    )
+    assert len(r2) == 1, "窗口外再次穿越必须重新 emit"
+    assert _count_lines(tmp_path / "shadow_stops.jsonl") == 2
+
+
+def test_dedup_is_per_symbol_and_kind(tmp_path):
+    """去重键是 (symbol, kind)：不同 symbol / 不同 kind 互不影响。"""
+    mon = _monitor(tmp_path)
+    t0 = NOW
+    # rb0 STOP
+    mon.scan(symbol="rb0", position=1.0, price=2890.0, stop=2900.0,
+             take_profit=None, avg_entry=3000.0, quote_ts=t0, now=t0)
+    # 同 tick 不同 symbol 的 STOP → 不得被 rb0 去重挡住
+    mon.scan(symbol="cu0", position=1.0, price=2890.0, stop=2900.0,
+             take_profit=None, avg_entry=3000.0, quote_ts=t0, now=t0)
+    # 同 symbol 但 kind=TP（stop 放到下方使本次只触发 TP）→ 不得被 (rb0,STOP) 挡住
+    mon.scan(symbol="rb0", position=1.0, price=2890.0, stop=2800.0,
+             take_profit=2850.0, avg_entry=3000.0, quote_ts=t0, now=t0)
+    assert _count_lines(tmp_path / "shadow_stops.jsonl") == 3, "不同 symbol/kind 不得互相去重"
+
+
+def test_dedup_disabled_when_window_nonpositive(tmp_path):
+    """去重窗口 ≤ 0 → 关闭去重，始终 emit（每次命中都写）。"""
+    mon = ShadowStopMonitor(
+        path=tmp_path / "s.jsonl", enabled=True,
+        multiplier_fn=lambda s: 1.0, dedup_window_sec=0.0,
+    )
+    t0 = NOW
+    for i in range(3):
+        r = mon.scan(symbol="rb0", position=1.0, price=2890.0, stop=2900.0,
+                     take_profit=None, avg_entry=3000.0, quote_ts=t0,
+                     now=t0 + _dt.timedelta(seconds=i))
+        assert len(r) == 1
+    assert _count_lines(tmp_path / "s.jsonl") == 3, "关闭去重应每次命中都写"
