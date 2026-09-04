@@ -231,6 +231,7 @@ class PaperBroker:
         marks = marks if marks is not None else self._marks()
         equity = self._broker.equity(marks)
         margin = self.margin_used(marks)
+        # ⛔ 分母为零防御：peak<=0（异常快照/未初始化）→ drawdown 记 0，绝不除零。
         drawdown = (self._peak_equity - equity) / self._peak_equity if self._peak_equity > 0 else 0.0
         return AccountSnapshot(
             ts=datetime.now(),
@@ -244,10 +245,31 @@ class PaperBroker:
             peak_equity=self._peak_equity,
         )
 
-    def _update_peak(self, marks: dict[str, float]) -> None:
+    @property
+    def peak_equity(self) -> float:
+        """历史权益峰值（只读）。单调递增，重启后从 ``account.json`` 还原。"""
+        return self._peak_equity
+
+    def update_peak(self, marks: dict[str, float]) -> None:
+        """用**完整且新鲜**的 marks 抬升权益峰值（单调递增，只升不降）。
+
+        ⚠️ 调用方契约：必须传「全品种完整、且报价新鲜」的 marks。
+        用部分 marks / 成本价兜底 marks 调用会把峰值抬到虚高，
+        令 drawdown **高估** → 硬止损误触发（与漏更新的低估方向相反，
+        但同样有害）。故**不要**在 ``snapshot()`` 内部偷偷调用。
+
+        2026-09-04 回撤口径核查：原实现只在 ``execute_plan`` 内被调用
+        （即**只在成交时**更新），盘中权益创新高但无成交 → 峰值不抬升 →
+        drawdown 被**系统性低估** → ``risk_hard_stop`` 触发偏晚。
+        现由调度器在每 tick 与每次快照落盘前显式调用。
+        """
         equity = self._broker.equity(marks)
         if equity > self._peak_equity:
             self._peak_equity = equity
+
+    def _update_peak(self, marks: dict[str, float]) -> None:
+        """向后兼容别名（旧调用点 ``execute_plan`` 仍在用）→ :meth:`update_peak`。"""
+        self.update_peak(marks)
 
     # ------------------------------------------------------------------
     # 持仓/查询

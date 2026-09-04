@@ -299,6 +299,10 @@ class TradingScheduler:
             if self._halt:
                 self._halt_warn(now)
             marks = self._build_marks(quotes)
+            # 回撤口径（2026-09-04）：峰值原本只在成交时抬升 → 盘中创新高却无
+            # 成交时不更新 → drawdown 被**低估** → 组合硬止损触发偏晚。
+            # 此处用本轮完整且新鲜的 marks 显式抬升（只升不降，单调递增）。
+            self._broker.update_peak(marks)
             for symbol in self._symbols:
                 try:
                     self._process_symbol(symbol, now, quotes.get(symbol), marks)
@@ -1323,6 +1327,9 @@ class TradingScheduler:
             try:
                 quotes = self._quotes.fetch_quotes(self._symbols)
                 marks = self._build_marks(quotes)
+                # 落盘前抬升峰值：保证 account.json 里的 peak_equity 与本次
+                # 落盘的 equity 同一时点口径（否则恢复后 drawdown 会偏大）。
+                self._broker.update_peak(marks)
                 acct = self._broker.snapshot(marks)
                 self._broker.save_snapshot(self._account_file)
                 # P1-3：补打逐品种 mark 价与行情时间/陈旧标记，让「盯市冻结」
