@@ -258,6 +258,23 @@ class PaperBroker:
     def avg_entry(self, symbol: str) -> float:
         return float(self._broker.avg_entry.get(symbol, 0.0))
 
+    # ------------------------------------------------------------------
+    # 持仓止损/止盈档位（P0-C 影子模式读取入口）
+    # ------------------------------------------------------------------
+    def stop_of(self, symbol: str) -> Optional[float]:
+        """该品种持仓实际止损档位（未设返回 ``None``）。
+
+        只读入口：``_stops`` 是 P0-1 引入的「每品种实际档位」表，此前只有
+        ``execute_plan`` 内部访问。P0-C 影子模式需要外部读取，故开只读口，
+        **字段名保持 ``_stops`` / ``_take_profits`` 原名不变**（改名会撕裂
+        ``account.json`` 持久化格式与复盘报表）。
+        """
+        return self._stops.get(symbol)
+
+    def take_profit_of(self, symbol: str) -> Optional[float]:
+        """该品种持仓实际止盈档位（未设返回 ``None``）。"""
+        return self._take_profits.get(symbol)
+
     def position_ctx(self, symbol: str, quote: Quote, atr: float = 0.0) -> PositionCtx:
         """构造持仓上下文（RiskGate 输入）。"""
         pos = self._broker.position(symbol)

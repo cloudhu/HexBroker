@@ -303,6 +303,7 @@ def build_components_safe(paper_cfg: Any, offline: bool = False) -> dict[str, tu
     from hexbroker.paper.reporter import ReviewReporter
     from hexbroker.paper.risk_gate import RiskGate
     from hexbroker.paper.sessions import TradingSession
+    from hexbroker.paper.shadow_stops import ShadowStopMonitor
     from hexbroker.paper.signals import SignalEngine
 
     symbols = list(paper_cfg.symbols.keys())
@@ -315,6 +316,25 @@ def build_components_safe(paper_cfg: Any, offline: bool = False) -> dict[str, tu
             budget_ratio=float(paper_cfg.get("budget_ratio", 0.30)),
             data_dir=paper_cfg.get("data_dir", "data/paper"),
         )
+
+    # 构建结果容器提前声明：``_multiplier_of`` 需要在 tick 期（构建完成之后）
+    # 反查已构建的 broker，故必须在 builders 之前就存在。
+    results: dict[str, tuple[bool, Any]] = {}
+
+    def _multiplier_of(symbol: str) -> float:
+        """合约乘数：从已构建 broker 的 CostModel 取（与撮合/保证金**同源**）。
+
+        P0-C 影子记录的 ``unrealized_pnl`` 需要真实金额口径。取不到时退回 1.0
+        并在报告注明（R22：不得因取乘数失败让整个监视器停摆）。
+        """
+        entry = results.get("broker")
+        if entry is None or not entry[0] or entry[1] is None:
+            return 1.0
+        try:
+            val = float(entry[1].cost._multiplier(symbol))
+            return val if val > 0 else 1.0
+        except Exception:
+            return 1.0
 
     builders: dict[str, Callable[[], Any]] = {
         "session": lambda: TradingSession.from_config(paper_cfg),
@@ -362,6 +382,18 @@ def build_components_safe(paper_cfg: Any, offline: bool = False) -> dict[str, tu
             max_margin_pct=float(paper_cfg.get("max_margin_pct", 0.20)),
             struct_untradeable_ratio=float(paper_cfg.get("struct_untradeable_ratio", 3.0)),
         ),
+        # P0-C 止损止盈影子监视器（2026-09-04）：
+        #   risk.shadow_stops=true （默认）→ 只记录不平仓；false → 真实平仓。
+        # 键位兼容：优先读嵌套 risk.shadow_stops，缺失时回退扁平 risk_shadow_stops。
+        "shadow_stops": lambda: ShadowStopMonitor(
+            path=paper_cfg.get("shadow_stops_file", "data/paper/shadow_stops.jsonl"),
+            enabled=bool(
+                dict(paper_cfg.get("risk", {}) or {}).get(
+                    "shadow_stops", paper_cfg.get("risk_shadow_stops", True)
+                )
+            ),
+            multiplier_fn=_multiplier_of,
+        ),
         "intel": lambda: IntelligenceService.from_config(paper_cfg),
         "logger": lambda: TradeLogger(log_file=paper_cfg.get("trades_log", "data/paper/trades.log")),
         "reporter": lambda: ReviewReporter(
@@ -370,7 +402,6 @@ def build_components_safe(paper_cfg: Any, offline: bool = False) -> dict[str, tu
         ),
     }
 
-    results: dict[str, tuple[bool, Any]] = {}
     for name, fn in builders.items():
         try:
             results[name] = (True, fn())
@@ -558,6 +589,8 @@ def main() -> int:
         degrader=degrader,
         degrade_signals=degrade_signals,
         config_path=args.config,   # P1-9：供「配置被改但未重启」的过期告警
+        # P0-C：None 时调度器完全不启用影子扫描（零行为变更）
+        shadow_stops=comp.get("shadow_stops"),
     )
 
     if args.smoke:

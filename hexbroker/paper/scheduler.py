@@ -29,6 +29,7 @@ from .types import (
     AccountSnapshot,
     CooldownRecord,
     NewsItem,
+    Plan,
     PositionCtx,
     Quote,
     SignalFrame,
@@ -74,6 +75,7 @@ class TradingScheduler:
         degrader: Optional[Any] = None,          # P2-D 运行时降级器（默认 None=零行为变更）
         degrade_signals: Optional[tuple] = None,  # (signals_file, max_age_sec)
         config_path: Optional[str] = None,       # P1-9：配置文件路径（用于「配置过期」监视）
+        shadow_stops: Optional[Any] = None,      # P0-C 止损止盈影子监视器（默认 None=不启用）
     ) -> None:
         self._cfg = cfg
         # P1-9（2026-09-01）：进程只在启动时读一次配置/代码。记录启动时刻，
@@ -111,6 +113,7 @@ class TradingScheduler:
         self._run_days = run_days
         self._degrader = degrader
         self._degrade_signals = degrade_signals
+        self._shadow_stops = shadow_stops   # P0-C：None = 完全不启用（零行为变更）
         self._block_reasons: dict[Any, dict[str, int]] = {}   # C2：day → {拦截原因: 次数}
         self._last_zero_open_alert: Optional[tuple] = None    # C2：0 开仓汇总去重指纹
 
@@ -301,6 +304,9 @@ class TradingScheduler:
                     self._process_symbol(symbol, now, quotes.get(symbol), marks)
                 except Exception:
                     log.exception("品种 {} 处理异常（已隔离）", symbol)
+            # P0-C：止损止盈判定放在品种循环**之后**——先用本轮最新成交更新持仓，
+            # 再判阈值，避免对「本轮刚平掉的仓位」重复告警。
+            self._shadow_stop_sweep(quotes, now, day)
 
         self._maybe_poll_intel(now)
         self._maybe_snapshot(now)
@@ -847,6 +853,76 @@ class TradingScheduler:
         )
         event = self._broker.execute_plan(plan, quote, now)
         if event is not None:
+            self._record_trade(event, day)
+
+    # ------------------------------------------------------------------
+    # P0-C：止损止盈影子模式（2026-09-04）
+    # ------------------------------------------------------------------
+    def _shadow_stop_sweep(
+        self, quotes: dict[str, Quote], now: datetime, day: Optional[date]
+    ) -> None:
+        """逐持仓判定止损/止盈：影子模式**只记录**，非影子模式转真实平仓。
+
+        ⛔ 影子模式下账户状态**零变更**：不产生成交、不改持仓、不动现金/权益。
+        这是 P0-C 的核心契约，由 ``tests/test_paper_shadow_stops.py`` 逐字段断言。
+
+        调用位置在品种循环**之后**：先用本轮最新成交刷新持仓，再判阈值，
+        避免对「本轮刚平掉的仓位」产生幻影告警。
+        """
+        monitor = self._shadow_stops
+        if monitor is None:
+            return
+        try:
+            for symbol in self._symbols:
+                pos = self._broker.position(symbol)
+                if abs(pos) <= 1e-12:
+                    continue
+                quote = quotes.get(symbol)
+                # 陈旧/缺失报价不参与判定：用冻结价判止损会产生幻影触发，
+                # 污染影子数据集（影子模式唯一的产出就是这份数据，宁缺勿脏）。
+                if quote is None or not quote.usable():
+                    continue
+                records = monitor.scan(
+                    symbol=symbol,
+                    position=pos,
+                    price=quote.price,
+                    stop=self._broker.stop_of(symbol),
+                    take_profit=self._broker.take_profit_of(symbol),
+                    avg_entry=self._broker.avg_entry(symbol),
+                    quote_ts=quote.ts,
+                    now=now,
+                )
+                if records and not monitor.enabled:
+                    self._force_flat_on_stop(symbol, quote, now, day, records)
+        except Exception:
+            log.exception("P0-C 止损止盈扫描异常（已隔离，不影响主流程）")
+
+    def _force_flat_on_stop(
+        self,
+        symbol: str,
+        quote: Quote,
+        now: datetime,
+        day: Optional[date],
+        records: list[dict[str, Any]],
+    ) -> None:
+        """真实平仓路径（**仅**当 ``risk.shadow_stops: false`` 时走到这里）。
+
+        默认配置 ``true`` 时本方法永不执行 —— 保留它只为实现团队裁决
+        「置 false 转真实平仓（只改配置不改代码）」。
+        """
+        kinds = "+".join(str(r.get("kind")) for r in records)
+        plan = Plan(
+            symbol=symbol,
+            direction=0,
+            target_qty=0.0,
+            target_pos_pct=0.0,
+            stop_price=self._broker.stop_of(symbol),
+            take_profit=self._broker.take_profit_of(symbol),
+            note=f"P0-C 真实平仓：{kinds} 命中（影子模式已关闭）",
+            source="shadow_stop",
+        )
+        event = self._broker.execute_plan(plan, quote, now)
+        if event is not None and day is not None:
             self._record_trade(event, day)
 
     # ------------------------------------------------------------------
