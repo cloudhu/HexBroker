@@ -45,13 +45,29 @@ _HEADERS = {
 # 背景：P0-1 事故中「行情冻结」在日志上完全不可见——报价看着正常、解析成功、无
 # 任何告警，只是价格从不变。``Quote.ts``（交易所行情时间）早就被解析出来，但全仓
 # 从未与本机时间比较过。故补一层时效护栏：过期即判陈旧，调用方 fail-closed。
+#
+# ⛔ 阈值同源（2026-09-04 团队裁决）：本值**必须**与 ``scheduler.py`` 的
+# ``_quote_max_age_sec``（scheduler.py:505-511，配置键 ``quote_max_age_sec``，
+# configs/paper.yaml:188 = 180s）保持一致。二者是两个独立时效门：
+#   - 本值（quotes 层）→ 判 ``stale`` → 影响**盯市估值**（退回成本价）；
+#   - scheduler 的 ``_quote_max_age_sec`` → 影响**是否允许撮合**。
+# 若二者不等，就会在 (min, max] 窗口出现「允许成交但按成本价估值」的不一致态
+# （曾短暂取 120 vs 180，120s < age ≤ 180s 时持仓在动、权益却显示浮盈 0）。
+# → 改任一侧都必须同步改另一侧，并跑 tests/test_paper_quotes.py。
+# 注：本层读不到 paper.yaml（D2：quotes 层零配置依赖），故以常量镜像，靠注释锁定。
 # --------------------------------------------------------------------------- #
 #: 行情时间落后本机超过此秒数 → 判陈旧，本轮不用于撮合与盯市（退回兜底价）。
-#: 取 120s：覆盖新浪推送间隔与网络抖动，又远小于 60s 轮询周期的整数倍，能抓住冻结。
-QUOTE_MAX_STALENESS_SEC = 120.0
+QUOTE_MAX_STALENESS_SEC = 180.0
 #: 同一品种时效告警的最小间隔（秒）。非交易时段与夜盘休市时报价时间天然会旧，
 #: 无节流会每 60s 刷屏一次。
 QUOTE_STALE_ALERT_THROTTLE_SEC = 600.0
+#: 时效告警「静默窗口」= [15:00, 21:00)（距当日 0 点的分钟数）。
+#: 日盘 15:00 收盘 → 夜盘 21:00 开盘，这 6 小时报价时间**必然**持续变旧，
+#: 属预期状态而非异常，故该窗口内的陈旧告警降为 DEBUG（不刷屏）。
+#: ⛔ 只降告警级别，**不触碰** ``stale`` 标记与 fail-closed 语义：
+#: 陈旧照样退回成本价估值，只是不再每 10 分钟嚎一次。
+#: 设为 ``None`` 可关闭静默窗口（始终 WARNING），便于排查时效问题时取证。
+QUOTE_QUIET_WINDOW_MIN = (15 * 60, 21 * 60)
 
 
 def _f(fields: list[str], idx: int, default: float = 0.0) -> float:
@@ -75,6 +91,7 @@ class RealTimeQuoteClient:
         offline_prices: Optional[dict[str, float]] = None,
         max_staleness_sec: float = QUOTE_MAX_STALENESS_SEC,
         alert_throttle_sec: float = QUOTE_STALE_ALERT_THROTTLE_SEC,
+        quiet_window_min: Optional[tuple[int, int]] = QUOTE_QUIET_WINDOW_MIN,
     ) -> None:
         self._symbol_map = symbols or dict(SINA_REALTIME_CODE)
         self._reverse_map = {v: k for k, v in self._symbol_map.items()}
@@ -85,6 +102,7 @@ class RealTimeQuoteClient:
         # P1-1 时效护栏
         self._max_staleness_sec = float(max_staleness_sec)
         self._alert_throttle_sec = float(alert_throttle_sec)
+        self._quiet_window_min = quiet_window_min
         self._stale_alerted_at: dict[str, float] = {}
 
     # ------------------------------------------------------------------
@@ -136,13 +154,38 @@ class RealTimeQuoteClient:
         )
 
     def _warn_stale_throttled(self, symbol: str, detail: str) -> None:
-        """同一品种按 ``_alert_throttle_sec`` 节流告警，避免非交易时段刷屏。"""
+        """同一品种按 ``_alert_throttle_sec`` 节流告警，避免非交易时段刷屏。
+
+        盘后静默窗口（默认 15:00–21:00，见 :data:`QUOTE_QUIET_WINDOW_MIN`）内
+        降级为 DEBUG：日盘收盘到夜盘开盘之间报价时间必然持续变旧，属**预期状态**，
+        按 WARNING 打会每 10 分钟刷一次屏，把真正的异常告警淹掉。
+
+        ⛔ 只降级别，不降处置：``stale`` 标记与 fail-closed 语义在
+        :meth:`_apply_staleness_guard` 里已经落定，与此方法无关。
+        """
         now_mono = time.monotonic()
         last = self._stale_alerted_at.get(symbol)
         if last is not None and (now_mono - last) < self._alert_throttle_sec:
             return
         self._stale_alerted_at[symbol] = now_mono
-        log.warning("行情时效 symbol={} {}", symbol, detail)
+        if self._in_quiet_window():
+            log.debug("行情时效（盘后静默窗口）symbol={} {}", symbol, detail)
+        else:
+            log.warning("行情时效 symbol={} {}", symbol, detail)
+
+    def _in_quiet_window(self) -> bool:
+        """当前本地时刻是否落在盘后静默窗口 [start, end) 内。"""
+        win = self._quiet_window_min
+        if not win:
+            return False
+        try:
+            start, end = int(win[0]), int(win[1])
+        except (TypeError, ValueError, IndexError):
+            return False
+        now_min = datetime.now().hour * 60 + datetime.now().minute
+        if start <= end:
+            return start <= now_min < end
+        return now_min >= start or now_min < end  # 跨零点窗口
 
     def _parse_line(self, line: str) -> Optional[Quote]:
         """解析一行 ``var hq_str_nf_AG0="...";``。"""

@@ -502,6 +502,14 @@ class TradingScheduler:
             log.warning("品种 {} 无有效行情，跳过", symbol)
             return
         # P2-3 报价时效校验：单报价年龄 = now - quote.ts 超阈值视为过期，拒绝撮合（与 P0-2 HALT 互补）。
+        #
+        # ⛔ 阈值同源（2026-09-04 团队裁决）：本阈值（配置键 quote_max_age_sec，
+        # configs/paper.yaml:188 = 180s）**必须**与 quotes.py 的
+        # QUOTE_MAX_STALENESS_SEC 相等。二者是两个独立时效门：
+        #   - 本处 → 决定**是否允许撮合**（超阈值直接 return，不成交）；
+        #   - quotes 层 → 决定**盯市估值**是否判陈旧（退回成本价）。
+        # 二者不等时，(min, max] 窗口会出现「允许成交但按成本价估值」的不一致态。
+        # → 改任一侧必须同步改另一侧，并跑 tests/test_paper_quotes.py。
         age = (now - quote.ts).total_seconds()
         if age > self._quote_max_age_sec:
             log.warning(
