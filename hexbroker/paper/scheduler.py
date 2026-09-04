@@ -752,9 +752,16 @@ class TradingScheduler:
             return 0
 
     def _track_accumulate(self, symbol: str, quote: Quote, day: date) -> None:
-        """跟踪 c0 盘中 OHLC（收盘时落盘日线快照）。"""
+        """跟踪 c0 盘中 OHLC（收盘时落盘日线快照）。
+
+        P0-1 连带修正：``quote.price`` 语义已由 field[2] 开盘价改为 field[8]
+        最新价，故**首轮撮出的 open 不再是当日开盘价**（而是首个轮询时刻的
+        最新价）。此处显式取 ``quote.open``（field[2] 真开盘价），保留原语义；
+        ``or quote.price`` 仅为字段缺失时的兜底。
+        """
+        open_px = quote.open if quote.open > 0 else quote.price
         stats = self._c0_intraday.setdefault(
-            day, {"open": quote.price, "high": quote.price, "low": quote.price, "close": quote.price}
+            day, {"open": open_px, "high": open_px, "low": open_px, "close": quote.price}
         )
         stats["high"] = max(stats["high"], quote.high or quote.price)
         stats["low"] = min(stats["low"], quote.low or quote.price)
