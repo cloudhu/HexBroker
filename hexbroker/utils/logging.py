@@ -20,6 +20,13 @@ from typing import Any, Optional
 
 from loguru import logger as _loguru_logger
 
+# numpy 视为**可选**依赖：缺失时 _json_default 跳过 numpy 分支，
+# 绝不因「序列化兜底」这类非关键路径让进程启动失败（R22）。
+try:
+    import numpy as _np
+except Exception:  # pragma: no cover - numpy 缺失属异常环境
+    _np = None  # type: ignore[assignment]
+
 _LOGGER_CONFIGURED = False
 _JSON_SINK_PATH: Optional[Path] = None
 
@@ -54,14 +61,37 @@ def get_logger(tag: str = "ROOT") -> TaggedLogger:
     return TaggedLogger(tag)
 
 
-def _json_default(o: Any) -> str:
-    """JSON 序列化兜底（P2：bool 统一为 JSON 原生类型，杜绝字符串化）。
+def _json_default(o: Any) -> Any:
+    """JSON 序列化兜底（P0-B：numpy 标量必须还原为**原生类型**，杜绝字符串化）。
 
-    ``bool`` 是 JSON 原生类型，``json.dumps`` 不会调用 default——此函数**不处理
-    bool**，确保 ``is_open``/``is_today_close`` 等布尔字段始终序列化为
-    ``true/false`` 而非 ``"True"/"False"`` 字符串（历史日志曾因旧序列化路径
-    产出字符串导致下游解析误判）。datetime/date → ISO 字符串，其余 → str。
+    历史缺陷
+    --------
+    ``json.dumps`` 只认 Python 原生类型。``np.bool_`` **不是** ``bool`` 的子类、
+    ``np.int64`` **不是** ``int`` 的子类，二者都会掉进 ``default``；旧实现统一
+    ``return str(o)`` → 审计日志落成 ``"False"`` / ``"123"`` **字符串**。
+
+    实证（``data/paper/trades.log``）：同一条成交记录里
+    ``"is_open": "False"``（字符串，来自 ``np.bool_``）
+    与 ``"is_today_close": true``（原生，Python bool）并列 —— 同一个对象的两个
+    布尔字段类型不一致。下游不得不在 ``trade_intent.py:9``（``_as_bool``）与
+    ``trade_stats.py:46``（``_norm_bool``）到处加字符串兜底，即为佐证。
+
+    修复
+    ----
+    numpy 标量一律还原为**原生** ``bool`` / ``int`` / ``float``，由 json.dumps
+    二次序列化，产出 ``false`` / ``123`` / ``1.5`` 而非 ``"False"`` / ``"123"``。
+    保留 ``_as_bool`` / ``_norm_bool`` 不动（历史日志仍需兼容，属只读兼容层）。
+
+    ⛔ 分支顺序：``np.bool_`` 必须排在数值分支**之前**——numpy 的标量类型关系
+    随版本演进，先判 bool 可杜绝「把布尔当数值」的误判。
     """
+    if _np is not None:
+        if isinstance(o, _np.bool_):
+            return bool(o)
+        if isinstance(o, _np.integer):
+            return int(o)
+        if isinstance(o, _np.floating):
+            return float(o)
     if isinstance(o, bool):
         return "true" if o else "false"  # 防御：理论不可达（json.dumps 原生处理 bool）
     if isinstance(o, (datetime, date)):

@@ -70,7 +70,16 @@ class SimBroker:
         delta = float(target_qty) - current
         if abs(delta) < 1e-12:
             return None
-        is_open = (current == 0.0) or (np.sign(delta) == np.sign(current))
+        # P0-B（2026-09-04）：``np.sign(delta) == np.sign(current)`` 返回的是
+        # **numpy.bool_**，不是 Python bool。当 current != 0（减仓/平仓/反手）
+        # 时，``or`` 短路不到左边的 Python bool，is_open 就变成 numpy.bool_。
+        # 后果：json.dumps 不认 numpy.bool_ → 掉进 _json_default → 旧实现
+        # str(o) → 审计日志落成字符串 "False"（实证 trades.log：
+        # "is_open": "False" 与 "is_today_close": true 并列）。
+        # 下游不得不在 trade_intent.py:9 / trade_stats.py:46 到处加
+        # _as_bool / _norm_bool 兜底，即为该缺陷的历史佐证。
+        # ⛔ 必须显式套 bool()，保证落盘为 JSON 原生 true/false。
+        is_open = bool((current == 0.0) or (np.sign(delta) == np.sign(current)))
 
         # 平今判定：依据当前净持仓开仓日 vs 平仓 bar 日（覆盖调用方硬编码的 False）
         is_today_close = self._compute_is_today_close(symbol, current, delta, timestamp)
