@@ -73,6 +73,7 @@ class PaperBroker:
         initial_capital: float = 100_000.0,
         budget_ratio: float = 0.30,
         data_dir: str | Path = "data/paper",
+        cross_day_rolling_extremes: bool = False,
     ) -> None:
         self._cost = cost
         self._budget_ratio = float(budget_ratio)
@@ -86,6 +87,16 @@ class PaperBroker:
         # 派生值；SimBroker.positions 仅存数量无档位，故 PaperBroker 自维护）
         self._stops: dict[str, float | None] = {}
         self._take_profits: dict[str, float | None] = {}
+        # ⚠️ 跨日滚动极值（任务B / 名实不符语义债）：
+        #   hi/lo 原实现取「当日」quote.high/low，非「持仓以来」滚动极值 → 名实不符。
+        #   默认关闭（cross_day_rolling_extremes=False）→ 维持现状（当日口径，行为零变化）；
+        #   开启后维护 `_ext_hi/_ext_lo`（自建仓以来跨日滚动极值）并随 account.json 持久化。
+        #   ⛔ 实证（2026-09-04）：risk 引擎 S1–S5 / trailing / ratchet / 硬止损当前**均不读取**
+        #   highest_since_entry/lowest_since_entry（观察/审计字段），故开启本开关**不改变任何触发点**；
+        #   留开关仅为将来某规则真消费该字段时能闸住语义，且默认保持今日行为。
+        self._cross_day_extremes = bool(cross_day_rolling_extremes)
+        self._ext_hi: dict[str, float] = {}
+        self._ext_lo: dict[str, float] = {}
 
     # ------------------------------------------------------------------
     # 执行（核心新增接口，§3.2）
@@ -137,6 +148,11 @@ class PaperBroker:
                 # 首次建仓：以 plan 档位作为持仓实际止损/止盈（加仓沿用，不覆盖）
                 self._stops[symbol] = plan.stop_price
                 self._take_profits[symbol] = plan.take_profit
+                # 任务B：自建仓起初始化跨日滚动极值（seed=开仓均价，后续每 tick 抬升）
+                if self._cross_day_extremes:
+                    entry_px = float(self._broker.avg_entry.get(symbol, trade.fill_price))
+                    self._ext_hi[symbol] = entry_px
+                    self._ext_lo[symbol] = entry_px
         else:
             stop_value = self._stops.get(symbol, plan.stop_price)
             tp_value = self._take_profits.get(symbol, plan.take_profit)
@@ -144,6 +160,11 @@ class PaperBroker:
                 # 反手：本次平仓事件用原持仓止损；反转后新仓止损以 plan 写入
                 self._stops[symbol] = plan.stop_price
                 self._take_profits[symbol] = plan.take_profit
+                # 任务B：反手视为「旧仓了结 + 新仓开启」→ 滚动极值重置为新开仓均价
+                if self._cross_day_extremes:
+                    entry_px = float(self._broker.avg_entry.get(symbol, trade.fill_price))
+                    self._ext_hi[symbol] = entry_px
+                    self._ext_lo[symbol] = entry_px
             elif abs(new_pos) <= 1e-12:
                 # P2（2026-09-04）：已平仓至 0 → 清除该品种档位。原实现从不清理，
                 # 导致空仓品种长期残留旧止损/止盈（ag0 曾残留 16247.93 /
@@ -151,6 +172,10 @@ class PaperBroker:
                 # 此处 stop_value / tp_value 已从原档位取出并写入事件，可安全清除。
                 self._stops.pop(symbol, None)
                 self._take_profits.pop(symbol, None)
+                # 任务B：平仓至 0 → 清空该品种滚动极值（不留死数据污染 account.json）
+                if self._cross_day_extremes:
+                    self._ext_hi.pop(symbol, None)
+                    self._ext_lo.pop(symbol, None)
 
         event = TradeEvent(
             trade_id=f"T{self._trade_seq:06d}",
@@ -314,6 +339,24 @@ class PaperBroker:
             bars = max(1, (datetime.now().date() - d_entry).days)
         hi = max(entry, quote.high) if quote.high > 0 else max(entry, quote.price)
         lo = min(entry, quote.low) if quote.low > 0 else min(entry, quote.price)
+        if self._cross_day_extremes:
+            # ⚠️ 任务B 跨日滚动极值（名实不符语义债修复，默认关闭）：
+            #   默认分支上两行 = 当日 quote.high/low 口径（highest_today_or_entry），
+            #   跨日持仓时昨日极值丢失。开启后改维护「持仓以来」跨日滚动极值：
+            #   _ext_hi/_ext_lo 建仓 seed=entry，此后每 tick 用当日 high/low 抬升/下压，
+            #   状态随 account.json 持久化（additive 键 ext_hi/ext_lo）。
+            #   ⛔ 只 bump 不回落：hi 只升、lo 只降，天然单调。陈旧/异常报价
+            #   （high/low 非正）不会改写（保持当前滚动值），故不会污染。
+            cur_hi = self._ext_hi.get(symbol, entry)
+            cur_lo = self._ext_lo.get(symbol, entry)
+            if quote.high and quote.high > 0 and quote.high > cur_hi:
+                cur_hi = quote.high
+            if quote.low and quote.low > 0 and (cur_lo <= 0 or quote.low < cur_lo):
+                cur_lo = quote.low if cur_lo <= 0 else min(cur_lo, quote.low)
+            hi = cur_hi if cur_hi > 0 else entry
+            lo = cur_lo if cur_lo > 0 else entry
+            self._ext_hi[symbol] = cur_hi
+            self._ext_lo[symbol] = cur_lo
         return PositionCtx(
             symbol=symbol,
             position=pos,
@@ -371,6 +414,11 @@ class PaperBroker:
             "trade_seq": self._trade_seq,
             "stops": self._stops,
             "take_profits": self._take_profits,
+            # 任务B（additive，不改既有字段 schema）：跨日滚动极值状态。
+            # 缺失/旧快照无此键 → load 默认 {} → on 模式从当前 entry 冷启动，
+            # off 模式根本不读（零影响）。
+            "ext_hi": self._ext_hi,
+            "ext_lo": self._ext_lo,
         }
         tmp = path.with_suffix(".tmp")
         tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -407,6 +455,8 @@ class PaperBroker:
             self._trade_seq = 0
             self._stops = {}
             self._take_profits = {}
+            self._ext_hi = {}
+            self._ext_lo = {}
             return False
         self._broker = SimBroker(self._cost, initial_capital=float(payload.get("initial_capital", 100_000.0)))
         self._broker.positions = {str(k): float(v) for k, v in payload.get("positions", {}).items()}
@@ -419,6 +469,9 @@ class PaperBroker:
         self._take_profits = {
             str(k): (float(v) if v is not None else None) for k, v in payload.get("take_profits", {}).items()
         }
+        # 任务B：跨日滚动极值（additive 键；旧快照缺失 → {} → on 模式从当前 entry 冷启动）
+        self._ext_hi = {str(k): float(v) for k, v in payload.get("ext_hi", {}).items()}
+        self._ext_lo = {str(k): float(v) for k, v in payload.get("ext_lo", {}).items()}
         self._peak_equity = float(payload.get("peak_equity", self._broker.initial_capital))
         self._trading_day_count = int(payload.get("trading_day_count", 0))
         ltd = payload.get("last_trading_day")

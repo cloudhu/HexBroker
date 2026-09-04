@@ -310,11 +310,21 @@ def build_components_safe(paper_cfg: Any, offline: bool = False) -> dict[str, tu
 
     def _build_broker() -> PaperBroker:
         cost = build_cost_model(paper_cfg)
+        # 任务B：跨日滚动极值开关（paper.risk.cross_day_rolling_extremes，默认 false =
+        # 当日口径现状零变化；true = 启用持仓以来跨日滚动极值）。键位兼容：优先读嵌套
+        # risk.cross_day_rolling_extremes，缺失回退扁平 risk_cross_day_rolling_extremes。
+        cross_day_ext = bool(
+            dict(paper_cfg.get("risk", {}) or {}).get(
+                "cross_day_rolling_extremes",
+                paper_cfg.get("risk_cross_day_rolling_extremes", False),
+            )
+        )
         return PaperBroker(
             cost=cost,
             initial_capital=float(paper_cfg.get("initial_capital", 100_000.0)),
             budget_ratio=float(paper_cfg.get("budget_ratio", 0.30)),
             data_dir=paper_cfg.get("data_dir", "data/paper"),
+            cross_day_rolling_extremes=cross_day_ext,
         )
 
     # 构建结果容器提前声明：``_multiplier_of`` 需要在 tick 期（构建完成之后）

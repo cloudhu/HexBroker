@@ -69,6 +69,14 @@ paper:
   #    详见交付报告「影子模式观察指标」一节。
   risk:
     shadow_stops: true
+    # 任务B 跨日滚动极值（2026-09-04 / 名实不符语义债修复）：
+    #   PositionCtx.highest/lowest_since_entry 原实现取**当日** quote.high/low（最高点
+    #   只到"今日或开仓"，跨日持仓时昨日极值丢失），变量名却叫 *_since_entry → 名实不符。
+    #   true → 启用持仓以来**跨日滚动**极值（状态随 account.json additive 键持久化）；
+    #   false（默认）= 维持现状当日口径，行为零变化。
+    #   ⛔ 实证：risk 引擎 S1–S5 / trailing / ratchet / 硬止损当前**均不读取**这两个字段
+    #     （观察/审计用），故开 true **不改变任何触发点**；留开关为将来规则闸语义。
+    cross_day_rolling_extremes: false
 
   # ---- P0-4（2026-09-01）仓位粒度放大防护 ----
   # 背景：期货最小交易单位是 1 手 → 风控批准 0.4454 手只能实开 1 手，名义敞口
