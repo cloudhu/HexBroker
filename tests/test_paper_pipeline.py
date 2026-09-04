@@ -306,6 +306,49 @@ def test_accumulate_mode_tracks_but_no_open(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# P0-1 连带：accumulate 日线的 open 必须取真开盘价（field[2]），不能用最新价
+# ---------------------------------------------------------------------------
+def test_accumulate_open_uses_quote_open_not_last_price(tmp_path):
+    """P0-1 修复把 ``quote.price`` 语义从 field[2] 开盘价改为 field[8] 最新价。
+
+    若不显式改取 ``quote.open``，``_track_accumulate`` 首轮会把**首个轮询时刻的
+    最新价**当成当日开盘价写入 c0 日线快照 —— 这是 P0-1 修复自身引入的回归，
+    会污染 c0 自积累的 OHLC（c0 处于 accumulate 模式，该 CSV 即其日线数据源）。
+
+    锁定：open 必须等于 field[2]（此处 2260），不等于 price（2265）。
+    """
+    sched, _ = _scheduler(tmp_path, sig=_eff_signal())
+    day = MON
+    now = datetime(2026, 8, 24, 10, 0)
+    # 开盘价 2260、最新价 2265、日内高低 2275/2255（模拟开盘后已波动）
+    sched._track_accumulate(
+        "c0",
+        Quote(symbol="c0", ts=now, price=2265.0, open=2260.0, high=2275.0, low=2255.0),
+        day,
+    )
+
+    stats = sched._c0_intraday[day]
+    assert stats["open"] == pytest.approx(2260.0), "open 必须取 quote.open（field[2] 真开盘价）"
+    assert stats["open"] != pytest.approx(2265.0), "open 不得退化为 quote.price（field[8] 最新价）"
+    assert stats["high"] == pytest.approx(2275.0)
+    assert stats["low"] == pytest.approx(2255.0)
+    assert stats["close"] == pytest.approx(2265.0)
+
+
+def test_accumulate_open_falls_back_to_price_when_open_missing(tmp_path):
+    """quote.open 缺失/非正 → 退回 quote.price，不得写入 0（R22：不新增停摆模式）。"""
+    sched, _ = _scheduler(tmp_path, sig=_eff_signal())
+    sched._track_accumulate(
+        "c0",
+        Quote(symbol="c0", ts=datetime(2026, 8, 24, 10, 0), price=2265.0),
+        MON,
+    )
+    stats = sched._c0_intraday[MON]
+    assert stats["open"] == pytest.approx(2265.0)
+    assert stats["open"] > 0
+
+
+# ---------------------------------------------------------------------------
 # 计划手数（P1-2：10 万账户 ag 可开 1 手）
 # ---------------------------------------------------------------------------
 def test_size_qty_ag_one_lot_at_100k():
