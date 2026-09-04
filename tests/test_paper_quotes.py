@@ -260,11 +260,16 @@ def test_quiet_window_only_changes_level_not_fail_closed(client, monkeypatch):
     """
     import hexbroker.paper.quotes as quotes_mod
 
-    old_ts = datetime.now() - timedelta(seconds=QUOTE_MAX_STALENESS_SEC + 60)
+    # ⚠️ 必须先钉死时钟，**再**用它推算 quote.ts。
+    # 反过来的写法（先用真实 datetime.now() 算 old_ts、再 patch 时钟）是时间依赖的
+    # flaky：_apply_staleness_guard 内部也调 datetime.now()（被 patch 成 16:30），
+    # 于是 lag = 16:30 - (真实时刻 - 240s) 会随真实时钟推进而变负 → 判定为「新鲜」。
+    # 本用例曾在 16:40 绿、16:59 红，即此因。
+    monkeypatch.setattr(quotes_mod, "datetime", _FixedClock(16, 30))
+    old_ts = datetime(2026, 9, 4, 16, 30, 0) - timedelta(seconds=QUOTE_MAX_STALENESS_SEC + 60)
     q = Quote(symbol="rb0", ts=old_ts, price=3166.0)
 
     # 盘后（静默窗口内）
-    monkeypatch.setattr(quotes_mod, "datetime", _FixedClock(16, 30))
     client._apply_staleness_guard(q)
     assert q.stale is True, "静默窗口不得豁免陈旧判定"
     assert q.usable() is False, "静默窗口不得让陈旧报价重新可用于盯市"
