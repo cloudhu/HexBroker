@@ -163,6 +163,11 @@ class RiskGate:
     # RiskState 构造
     # ------------------------------------------------------------------
     def build_state(self, quote: Quote, acct: AccountSnapshot, pos_ctx: PositionCtx) -> RiskState:
+        # ⚠️ 有意**不做** stale fail-closed（与 _build_marks / broker._marks 相反）：
+        # 陈旧报价的 price 仍是「最后已知的真实成交价」，用它算 pnl_pct 才能触发
+        # 保护性止损；若因陈旧退回 entry_price，pnl_pct 恒为 0 → 止损永不触发，
+        # 属新的整体停摆模式（违反 R22）。盯市估值要 fail-closed，风控判定要
+        # fail-open 到「最后已知价」——两者语义不同，勿统一。
         price = quote.price if quote and quote.price > 0 else pos_ctx.entry_price
         atr = pos_ctx.atr if pos_ctx.atr > 0 else self._default_vol * price
         realized_vol = atr / price if price > 0 else self._default_vol
