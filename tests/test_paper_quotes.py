@@ -23,9 +23,11 @@ import time
 from datetime import datetime, timedelta
 
 import pytest
+from omegaconf import OmegaConf
 
 from hexbroker.paper.quotes import (
     QUOTE_MAX_STALENESS_SEC,
+    QUOTE_QUIET_WINDOW_MIN,
     QUOTE_STALE_ALERT_THROTTLE_SEC,
     RealTimeQuoteClient,
 )
@@ -164,3 +166,107 @@ def test_usable_vs_valid_distinction():
     zero = Quote(symbol="rb0", ts=datetime.now(), price=0.0)
     assert zero.valid() is False
     assert zero.usable() is False
+
+
+# --------------------------------------------------------------------------- #
+# 阈值同源（2026-09-04 团队裁决）
+#
+# quotes 层（盯市估值判陈旧）与 scheduler 层（是否允许撮合）是两个独立时效门。
+# 二者不等时，(min, max] 窗口会出现「允许成交但按成本价估值」的不一致态 ——
+# 曾短暂取 120 vs 180，120s < age ≤ 180s 时持仓在动、权益却显示浮盈 0。
+# 故用测试把「同源」这件事锁死。
+# --------------------------------------------------------------------------- #
+def test_staleness_threshold_matches_scheduler_quote_max_age():
+    """QUOTE_MAX_STALENESS_SEC 必须等于 configs/paper.yaml 的 quote_max_age_sec。
+
+    这是跨文件不变量：只改一侧而不同步另一侧，测试必须红。
+    """
+    cfg = OmegaConf.load("configs/paper.yaml")
+    paper = cfg.get("paper", cfg)
+    poll = float(paper.get("poll_interval_sec", 60))
+    expected = float(paper.get("quote_max_age_sec", 3.0 * poll))
+    assert QUOTE_MAX_STALENESS_SEC == pytest.approx(expected), (
+        f"quotes.QUOTE_MAX_STALENESS_SEC({QUOTE_MAX_STALENESS_SEC}) 与 "
+        f"configs/paper.yaml quote_max_age_sec({expected}) 必须同源；"
+        f"改任一侧都要同步改另一侧，否则出现「允许撮合但按成本价估值」窗口"
+    )
+
+
+def test_staleness_threshold_is_not_the_old_120():
+    """防止有人把阈值「改回」120（那会重新打开不一致窗口）。"""
+    assert QUOTE_MAX_STALENESS_SEC != pytest.approx(120.0)
+
+
+# --------------------------------------------------------------------------- #
+# 盘后静默窗口（降噪）
+# --------------------------------------------------------------------------- #
+class _FixedClock:
+    """只提供 ``now()`` 的替身，用于把 ``datetime.now()`` 钉在固定时刻。"""
+
+    def __init__(self, hour: int, minute: int) -> None:
+        self._dt = datetime(2026, 9, 4, hour, minute, 0)
+
+    def now(self) -> datetime:
+        return self._dt
+
+
+def test_quiet_window_default_is_post_close_gap(client):
+    """默认静默窗口 = 日盘收盘 15:00 → 夜盘开盘 21:00。"""
+    assert QUOTE_QUIET_WINDOW_MIN == (15 * 60, 21 * 60)
+
+
+def test_quiet_window_inside_outside_and_disabled(client, monkeypatch):
+    """窗口内 / 窗口外 / 关闭窗口（None）三种情形。"""
+    import hexbroker.paper.quotes as quotes_mod
+
+    monkeypatch.setattr(quotes_mod, "datetime", _FixedClock(16, 30))  # 盘后
+    assert client._in_quiet_window() is True, "16:30 属 15:00-21:00 静默窗口"
+
+    monkeypatch.setattr(quotes_mod, "datetime", _FixedClock(10, 0))  # 盘中
+    assert client._in_quiet_window() is False, "10:00 盘中不得静默"
+
+    monkeypatch.setattr(quotes_mod, "datetime", _FixedClock(22, 0))  # 夜盘
+    assert client._in_quiet_window() is False, "22:00 夜盘不得静默"
+
+    client._quiet_window_min = None
+    monkeypatch.setattr(quotes_mod, "datetime", _FixedClock(16, 30))
+    assert client._in_quiet_window() is False, "窗口设为 None = 关闭静默，始终告警"
+
+
+def test_quiet_window_handles_cross_midnight(client, monkeypatch):
+    """跨零点窗口（如 23:00-01:00）走另一分支，不得漏判。"""
+    import hexbroker.paper.quotes as quotes_mod
+
+    client._quiet_window_min = (23 * 60, 1 * 60)  # 23:00 → 次日 01:00
+    monkeypatch.setattr(quotes_mod, "datetime", _FixedClock(23, 30))
+    assert client._in_quiet_window() is True
+    monkeypatch.setattr(quotes_mod, "datetime", _FixedClock(0, 30))
+    assert client._in_quiet_window() is True
+    monkeypatch.setattr(quotes_mod, "datetime", _FixedClock(12, 0))
+    assert client._in_quiet_window() is False
+
+
+def test_malformed_quiet_window_never_raises(client):
+    """窗口配置写歪（None / 空 / 非数字 / 长度不足）→ 当作「不静默」，绝不抛异常。"""
+    for bad in (None, (), ("x", "y"), (900,), (None, None)):
+        client._quiet_window_min = bad
+        assert client._in_quiet_window() is False
+
+
+def test_quiet_window_only_changes_level_not_fail_closed(client, monkeypatch):
+    """⛔ 关键：静默窗口只降告警级别，stale 标记与 fail-closed 必须照旧。
+
+    盘后报价照样判陈旧、照样退回成本价估值，只是不再刷屏。
+    """
+    import hexbroker.paper.quotes as quotes_mod
+
+    old_ts = datetime.now() - timedelta(seconds=QUOTE_MAX_STALENESS_SEC + 60)
+    q = Quote(symbol="rb0", ts=old_ts, price=3166.0)
+
+    # 盘后（静默窗口内）
+    monkeypatch.setattr(quotes_mod, "datetime", _FixedClock(16, 30))
+    client._apply_staleness_guard(q)
+    assert q.stale is True, "静默窗口不得豁免陈旧判定"
+    assert q.usable() is False, "静默窗口不得让陈旧报价重新可用于盯市"
+    throttled_in_quiet = client._stale_alerted_at.get("rb0")
+    assert throttled_in_quiet is not None, "静默窗口内节流状态照样记录（只是级别降为 DEBUG）"
