@@ -838,18 +838,49 @@ class TradingScheduler:
     # 行情辅助
     # ------------------------------------------------------------------
     def _build_marks(self, quotes: dict[str, Quote]) -> dict[str, float]:
-        """组合所有品种的最新价（无报价品种用持仓均价兜底）。"""
+        """组合所有品种的最新价（无报价 / 报价陈旧时用持仓均价兜底）。
+
+        P1-1：陈旧的报价（``stale=True``）**不得用于盯市**，fail-closed 退回成本价。
+        P1-2：任何成本价兜底都必须告警 —— P0-1 事故中该兜底完全静默（实证：
+        09-03 10:02:47 曾以开仓成本价 3137 盯市，日志无任何提示）。
+        """
         marks: dict[str, float] = {}
+        stale_syms: set[str] = set()
         for sym in self._symbols:
             q = quotes.get(sym)
-            if q is not None and q.price > 0:
+            if q is None:
+                continue
+            if getattr(q, "stale", False):
+                stale_syms.add(sym)
+                continue
+            if q.price > 0:
                 marks[sym] = q.price
         for sym, pos in self._broker.broker.positions.items():
             if sym not in marks and abs(pos) > 1e-12:
                 avg = self._broker.avg_entry(sym)
                 if avg > 0:
                     marks[sym] = avg
+                    log.warning(
+                        "盯市兜底 symbol={} 无可用行情{}，改用开仓成本价 {:.4f}"
+                        "（浮盈显示为 0，非真实市值）",
+                        sym,
+                        "（报价陈旧已剔除）" if sym in stale_syms else "",
+                        avg,
+                    )
         return marks
+
+    @staticmethod
+    def _quote_ts_summary(quotes: dict[str, Quote]) -> str:
+        """逐品种「行情时间 + 陈旧标记」摘要（P1-3：让冻结在日志上直接可见）。"""
+        if not quotes:
+            return "无报价"
+        parts: list[str] = []
+        for sym in sorted(quotes):
+            q = quotes[sym]
+            flag = "陈旧" if getattr(q, "stale", False) else "新"
+            ts = q.ts.strftime("%m-%d %H:%M:%S") if getattr(q, "ts", None) else "未知"
+            parts.append(f"{sym}@{ts}({flag})")
+        return " ".join(parts)
 
     def _cached_bars(self, symbol: str, day: date) -> pd.DataFrame:
         """当日缓存 K 线（避免每 tick 网络拉取）。"""
@@ -1203,7 +1234,15 @@ class TradingScheduler:
                 marks = self._build_marks(quotes)
                 acct = self._broker.snapshot(marks)
                 self._broker.save_snapshot(self._account_file)
-                log.info("账户快照已保存 equity={:.2f} cash={:.2f}", acct.equity, acct.cash)
+                # P1-3：补打逐品种 mark 价与行情时间/陈旧标记，让「盯市冻结」
+                # 在日志上直接可见（此前只打 equity/cash 两个数，冻结完全不可辨）。
+                log.info(
+                    "账户快照已保存 equity={:.2f} cash={:.2f} | marks={} | 行情={}",
+                    acct.equity,
+                    acct.cash,
+                    {s: round(float(v), 4) for s, v in sorted(marks.items())} or "无持仓",
+                    self._quote_ts_summary(quotes),
+                )
                 day = self._session.day_label(now)
                 if day is not None:
                     self._emit_daily_stats(day)

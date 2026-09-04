@@ -59,10 +59,22 @@ class Quote:
     pre_settle: float = 0.0  # 昨结算
     # P2-3：诊断保留字段（接收时刻，tz-naive 本地时间）；时效校验统一用 ``ts``（交易所行情时间）。
     timestamp: datetime = field(default_factory=dt_now)
+    # P1-1（2026-09-04）：行情陈旧标记。``ts`` 落后本机超过阈值时置 True。
+    # 陈旧报价**不得用于撮合与盯市**（fail-closed，退回成本价兜底），但仍保留对象
+    # 供展示/诊断，避免调用方拿不到任何行情。
+    stale: bool = False
 
     def valid(self) -> bool:
         """行情可用性：价格为正。"""
         return self.price is not None and self.price > 0
+
+    def usable(self) -> bool:
+        """可否用于撮合与盯市：价格为正**且**未过期。
+
+        P1-1：与 :meth:`valid` 的区别是额外校验时效——P0-1 事故的报价 ``valid()``
+        恒为真（价格确实是正数），只是永远不变，因此风控必须改用 ``usable()``。
+        """
+        return self.valid() and not self.stale
 
 
 @dataclass

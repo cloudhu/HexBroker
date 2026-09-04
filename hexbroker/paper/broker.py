@@ -144,6 +144,13 @@ class PaperBroker:
                 # 反手：本次平仓事件用原持仓止损；反转后新仓止损以 plan 写入
                 self._stops[symbol] = plan.stop_price
                 self._take_profits[symbol] = plan.take_profit
+            elif abs(new_pos) <= 1e-12:
+                # P2（2026-09-04）：已平仓至 0 → 清除该品种档位。原实现从不清理，
+                # 导致空仓品种长期残留旧止损/止盈（ag0 曾残留 16247.93 /
+                # 17275.61）并被每 5 分钟反复写回 account.json。
+                # 此处 stop_value / tp_value 已从原档位取出并写入事件，可安全清除。
+                self._stops.pop(symbol, None)
+                self._take_profits.pop(symbol, None)
 
         event = TradeEvent(
             trade_id=f"T{self._trade_seq:06d}",
@@ -167,13 +174,25 @@ class PaperBroker:
     # 资金/保证金
     # ------------------------------------------------------------------
     def _marks(self, quote: Optional[Quote] = None) -> dict[str, float]:
-        """构造 mark-to-market 价格：当前报价优先，其余用持仓均价兜底。"""
+        """构造 mark-to-market 价格：当前报价优先，其余用持仓均价兜底。
+
+        P1-1：陈旧的报价（``stale=True``）不用于盯市，fail-closed 退回成本价
+        （陈旧本身已由 ``RealTimeQuoteClient`` 节流告警，此处不重复刷屏）。
+        P1-2：``quote is None`` 时全部按开仓成本估值 —— 该分支在 P0-1 事故中
+        完全静默，现必须告警。
+        """
         marks: dict[str, float] = {}
         for sym in self._broker.positions.keys():
             fallback = self._broker.avg_entry.get(sym, 0.0)
             marks[sym] = fallback if fallback and fallback > 0 else 0.0
-        if quote is not None and quote.price > 0:
+        if quote is not None and quote.usable():
             marks[quote.symbol] = quote.price
+        elif quote is None and any(v > 0 for v in marks.values()):
+            log.warning(
+                "盯市兜底：未提供任何报价，持仓全部按开仓成本价估值 {}"
+                "（浮盈显示为 0，非真实市值）",
+                {s: round(float(v), 4) for s, v in sorted(marks.items())},
+            )
         return marks
 
     def _margin_after(self, symbol: str, target: float, marks: dict[str, float]) -> float:
