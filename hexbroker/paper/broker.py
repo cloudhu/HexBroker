@@ -22,6 +22,36 @@ from .types import AccountSnapshot, Plan, PositionCtx, Quote, TradeEvent
 
 log = get_logger("PAPER")
 
+# ---------------------------------------------------------------------------
+# 异常交易日（P1-4 补记，2026-09-04）
+# ---------------------------------------------------------------------------
+# 2026-08-24 因**三进程并发**导致数据不可信：该日复盘从未生成、_c0_intraday 等
+# 内存态早失，成交/盈亏口径被并发污染。团队裁决：该日**补记为交易日**（计入
+# trading_day_count），但其成交/盈亏**不参与** 20 日策略评估样本（只保留在审计
+# 轨迹）。凡需从评估样本剔除异常日成交的逻辑，用 ``is_anomaly_day`` 判定。
+# 集合可用字符串 "YYYY-MM-DD" 配置注入（默认含 08-24）。
+ANOMALY_TRADING_DAYS: frozenset[str] = frozenset({"2026-08-24"})
+
+
+def is_anomaly_day(day: Any, extra: Optional[frozenset[str]] = None) -> bool:
+    """某日是否标记为「异常交易日」（其成交/盈亏不参与策略评估样本）。
+
+    入参 ``day`` 接受 ``date`` / ``datetime`` / ``"YYYY-MM-DD"`` 字符串。
+    默认集合 ``ANOMALY_TRADING_DAYS``，可用 ``extra`` 叠加（便于测试/配置覆写）。
+    """
+    if day is None:
+        return False
+    if isinstance(day, datetime):
+        day_s = day.date().isoformat()
+    elif isinstance(day, date):
+        day_s = day.isoformat()
+    else:
+        day_s = str(day)
+        if len(day_s) > 10:
+            day_s = day_s[:10]
+    return day_s in ANOMALY_TRADING_DAYS or (extra is not None and day_s in extra)
+
+
 
 def _to_date(ts: Any) -> Optional[date]:
     if ts is None:
@@ -97,6 +127,8 @@ class PaperBroker:
         self._cross_day_extremes = bool(cross_day_rolling_extremes)
         self._ext_hi: dict[str, float] = {}
         self._ext_lo: dict[str, float] = {}
+        # P1-4：已补计入 count 的异常日（幂等，随快照持久化）
+        self._counted_anomaly_days: set[str] = set()
 
     # ------------------------------------------------------------------
     # 执行（核心新增接口，§3.2）
@@ -380,11 +412,42 @@ class PaperBroker:
     # 交易日计数（Q5：满 20 交易日自动评估）
     # ------------------------------------------------------------------
     def record_trading_day(self, day: date) -> None:
-        """收盘时登记一个已完成交易日。"""
-        if self._last_trading_day == day:
+        """收盘时登记一个**已完成**交易日（前向推进，单调递增）。
+
+        P1-4 补记（2026-09-04）：本方法**只接受 >= last_trading_day 的新交易日**，
+        杜绝「后登记的更早日期把 last_trading_day 回卷、导致后续重复计数」。
+        回卷/重复登记一律告警后忽略。
+        """
+        if self._last_trading_day is not None and day < self._last_trading_day:
+            log.warning(
+                "拒绝登记更早交易日（防 last_trading_day 回卷）day={} last={} —— "
+                "早于当前已登记日的补记请走 count_anomaly_day()",
+                day, self._last_trading_day,
+            )
             return
+        if self._last_trading_day == day:
+            return  # 幂等：同一天重复登记不重复计数
         self._last_trading_day = day
         self._trading_day_count += 1
+
+    def count_anomaly_day(self, day: date) -> bool:
+        """把异常交易日计入 count（补记），但**不改变** ``last_trading_day``。
+
+        P1-4：08-24 因三进程并发数据不可信、其复盘从未生成 → 正常前向登记从未
+        触发。但该日是一段真实交易时段，策略评估计数应包含它。由于它**早于**
+        当前 last_trading_day，走 ``record_trading_day`` 会把 last 回卷 → 改走
+        本方法：只 ``count += 1``（幂等：同一 ``day`` 只计一次），不回卷 last。
+
+        返回是否实际计入（重复计入返回 False）。
+        """
+        if day is None:
+            return False
+        key = day.isoformat() if isinstance(day, date) else str(day)
+        if key in self._counted_anomaly_days:
+            return False
+        self._counted_anomaly_days.add(key)
+        self._trading_day_count += 1
+        return True
 
     @property
     def trading_day_count(self) -> int:
@@ -419,6 +482,8 @@ class PaperBroker:
             # off 模式根本不读（零影响）。
             "ext_hi": self._ext_hi,
             "ext_lo": self._ext_lo,
+            # P1-4（additive）：已补计入 count 的异常交易日（幂等去重）
+            "counted_anomaly_days": sorted(self._counted_anomaly_days),
         }
         tmp = path.with_suffix(".tmp")
         tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -457,6 +522,7 @@ class PaperBroker:
             self._take_profits = {}
             self._ext_hi = {}
             self._ext_lo = {}
+            self._counted_anomaly_days = set()
             return False
         self._broker = SimBroker(self._cost, initial_capital=float(payload.get("initial_capital", 100_000.0)))
         self._broker.positions = {str(k): float(v) for k, v in payload.get("positions", {}).items()}
@@ -472,6 +538,10 @@ class PaperBroker:
         # 任务B：跨日滚动极值（additive 键；旧快照缺失 → {} → on 模式从当前 entry 冷启动）
         self._ext_hi = {str(k): float(v) for k, v in payload.get("ext_hi", {}).items()}
         self._ext_lo = {str(k): float(v) for k, v in payload.get("ext_lo", {}).items()}
+        # P1-4：已补计的异常日（幂等去重集合；旧快照缺失 → 空）
+        self._counted_anomaly_days = {
+            str(v) for v in payload.get("counted_anomaly_days", []) if v
+        }
         self._peak_equity = float(payload.get("peak_equity", self._broker.initial_capital))
         self._trading_day_count = int(payload.get("trading_day_count", 0))
         ltd = payload.get("last_trading_day")

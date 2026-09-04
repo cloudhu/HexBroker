@@ -1466,20 +1466,30 @@ class TradingScheduler:
         except Exception:
             marks = {}
         acct = self._broker.snapshot(marks)
+        # P1-4（2026-09-04）：异常交易日（如 08-24 三进程并发污染）的成交/盈亏
+        # **不参与**策略评估样本，只保留在审计轨迹。此处按成交 ts 归属日剔除。
+        from hexbroker.paper.broker import is_anomaly_day as _anom
+
+        sample_trades = [
+            t for t in self._all_trades if not _anom(getattr(t, "ts", None))
+        ]
+        excluded = len(self._all_trades) - len(sample_trades)
         self._reporter.generate_evaluation(
             day,
             acct,
-            list(self._all_trades),
+            list(sample_trades),
             self._broker.trading_day_count,
             initial_capital=self._broker.broker.initial_capital,
             trades_log_path=self._trades_log,
         )
         log.info(
-            "★★★★★ 已运行满 {} 个交易日，评估摘要已生成（权益 {:.2f} / 已实现 {:.2f} / 成交 {} 笔）★★★★★",
+            "★★★★★ 已运行满 {} 个交易日，评估摘要已生成（权益 {:.2f} / 已实现 {:.2f} / 成交 {} 笔"
+            "{}) ★★★★★",
             self._broker.trading_day_count,
             acct.equity,
             sum(acct.realized.values()),
-            len(self._all_trades),
+            len(sample_trades),
+            f"，剔除异常日 {excluded} 笔" if excluded else "",
         )
 
     def _should_exit(self) -> bool:
