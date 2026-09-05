@@ -354,6 +354,33 @@ class PaperBroker:
         """该品种持仓实际止盈档位（未设返回 ``None``）。"""
         return self._take_profits.get(symbol)
 
+    def set_trailing_stop(self, symbol: str, stop_price: Optional[float]) -> None:
+        """移动止损（ATR trailing stop）逐 tick 刷新：仅对**有持仓**品种更新实际止损档位。
+
+        ⛔ 仅更新 ``_stops``，不产生成交、不改持仓、不动现金 —— 与 ``execute_plan``
+        开仓（broker.py:181）/ 反手（broker.py:193）写入 ``_stops`` 是两条独立路径，互不覆盖。
+
+        空仓品种 / 无效止损价（``None`` / ``<=0`` / NaN）→ 幂等 no-op，避免给空仓注入幽灵档位
+        污染 ``account.json`` 与影子扫描。
+
+        这是「移动止损接线」P0-C 续接的核心修复：此前 ``_stops`` 仅在**开仓**与**反手**时
+        写入，**持仓期间永不更新**，导致 ATR trailing stop 被冻结在开仓价、完全不随价移动 ——
+        名义上的「移动止损」实为固定止损。每 tick 把 ``RiskManager`` 算出的
+        ``decision.stop_price`` 刷进 ``_stops``，影子监视器（``_shadow_stop_sweep``）即可用
+        最新档位判定是否触发（shadow_stops:true 仅记录，:false 转真实平仓）。
+        """
+        if abs(self._broker.position(symbol)) <= 1e-12:
+            return
+        if stop_price is None:
+            return
+        try:
+            sp = float(stop_price)
+        except (TypeError, ValueError):
+            return
+        if sp <= 0 or sp != sp:  # <=0 或 NaN 视为无效
+            return
+        self._stops[symbol] = sp
+
     def position_ctx(self, symbol: str, quote: Quote, atr: float = 0.0) -> PositionCtx:
         """构造持仓上下文（RiskGate 输入）。"""
         pos = self._broker.position(symbol)

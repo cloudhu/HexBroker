@@ -574,6 +574,14 @@ class TradingScheduler:
         returns, volumes, ma_price = self._aux_from_bars(bars)
         decision = self._risk_gate.evaluate(sig, quote, acct, pos_ctx, returns, volumes, ma_price)
 
+        # 移动止损接线（P0-C 续接）：每 tick 把 ATR trailing stop 刷进持仓实际档位，
+        # 使其真正随价移动；随后 _shadow_stop_sweep 用最新档位判定是否触发。
+        # 空仓 → set_trailing_stop 幂等 no-op，不污染 account.json。
+        # 防御：decision 可能缺 stop_price 属性（mock/旧路径），用 getattr 兜底避免 AttributeError。
+        _stop = getattr(decision, "stop_price", None)
+        if _stop is not None and abs(self._broker.position(symbol)) > 1e-12:
+            self._broker.set_trailing_stop(symbol, _stop)
+
         # ---- P0-2 信号无变化冷却 + P0-1 指纹生命周期（消除 60s 开-平-开-平循环） ----
         # 仅拦截「当前无持仓 + 风控意图开仓 + 信号指纹与上一轮实际开仓相同」；
         # 已有持仓的风控动作（止损/止盈/S1-S5 平仓）永远正常走 evaluate，不受影响。
@@ -908,6 +916,11 @@ class TradingScheduler:
         bars = self._cached_bars(symbol, day)
         _, _, ma_price = self._aux_from_bars(bars)
         decision = self._risk_gate.evaluate(sig, quote, acct, pos_ctx, ma_price=ma_price)
+        # 移动止损接线（P0-C 续接）：仅风控路径同样每 tick 刷新 trailing stop。
+        # 防御：decision 可能缺 stop_price 属性（mock/旧路径），用 getattr 兜底避免 AttributeError。
+        _stop = getattr(decision, "stop_price", None)
+        if _stop is not None and abs(self._broker.position(symbol)) > 1e-12:
+            self._broker.set_trailing_stop(symbol, _stop)
         # P0-4：同上，透传 atr 供风险预算法兜底定价。
         plan = self._planner.update_from_signal(
             sig, decision, quote=quote, equity=acct.equity, atr=atr
