@@ -160,3 +160,31 @@ def test_evaluation_sample_exclusion_filter():
     assert len(sample) == 1, "08-24 成交应被剔除出评估样本"
     assert sample[0].ts == datetime(2026, 8, 28, 10, 0)
     assert len(trades) == 2, "审计轨迹 _all_trades 仍保留全部（不物理删除）"
+
+
+# --------------------------------------------------------------------------- #
+# 5. load_snapshot 自动补记异常日（P1-4 自动补记，2026-09-05）
+# --------------------------------------------------------------------------- #
+def test_load_snapshot_auto_counts_anomaly_days(tmp_path):
+    """load_snapshot 必须把 ANOMALY_TRADING_DAYS 自动计入 count（不回卷 last）。
+
+    这样任意一次重启都会补记 08-24，无需手动触发；幂等（已计入不重复 +1）。
+    """
+    import json
+
+    b = _broker(data_dir=str(tmp_path))
+    b.record_trading_day(date(2026, 9, 3))  # count=1, last=09-03, 异常日未手动补记
+    path = b.save_snapshot(tmp_path / "account.json")
+    snap = json.loads(path.read_text(encoding="utf-8"))
+    assert "2026-08-24" not in snap.get("counted_anomaly_days", [])
+
+    b2 = _broker(data_dir=str(tmp_path))
+    assert b2.load_snapshot(path) is True
+    assert "2026-08-24" in b2._counted_anomaly_days, "重启后钩子应自动补记 08-24"
+    assert b2.trading_day_count == 2, "1(09-03) + 1(08-24 自动补记)"
+    assert b2._last_trading_day == date(2026, 9, 3), "自动补记不得回卷 last"
+
+    # 再加载同一快照（幂等）→ 不重复计数
+    b3 = _broker(data_dir=str(tmp_path))
+    assert b3.load_snapshot(path) is True
+    assert b3.trading_day_count == 2, "幂等：重复加载不得重复 +1"

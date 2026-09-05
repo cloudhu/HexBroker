@@ -429,6 +429,11 @@ class PaperBroker:
             return  # 幂等：同一天重复登记不重复计数
         self._last_trading_day = day
         self._trading_day_count += 1
+        # P1-4（2026-09-05）：若该日本身是异常交易日，登记进 counted 集合，
+        # 使 load_snapshot 的自动补记钩子对其幂等（避免「正常登记 + 自动补记」双重 +1）。
+        if is_anomaly_day(day):
+            _k = day.isoformat() if isinstance(day, date) else str(day)
+            self._counted_anomaly_days.add(_k)
 
     def count_anomaly_day(self, day: date) -> bool:
         """把异常交易日计入 count（补记），但**不改变** ``last_trading_day``。
@@ -544,6 +549,14 @@ class PaperBroker:
         }
         self._peak_equity = float(payload.get("peak_equity", self._broker.initial_capital))
         self._trading_day_count = int(payload.get("trading_day_count", 0))
+
+        # P1-4 自动补记（2026-09-05）：启动即把已知异常交易日（ANOMALY_TRADING_DAYS，
+        # 如 08-24 三进程并发污染）计入 count，且不回卷 last_trading_day。
+        # count_anomaly_day 幂等（已计入的日不再重复 +1），故每次重启安全、不会多计。
+        # 效果：20 日策略评估的交易日计数包含「真实存在但数据不可信」的 08-24，
+        # 同时其成交在 _maybe_evaluation 中按 is_anomaly_day 从评估样本剔除。
+        for _ad in ANOMALY_TRADING_DAYS:
+            self.count_anomaly_day(_ad)
         ltd = payload.get("last_trading_day")
         self._last_trading_day = date.fromisoformat(ltd) if ltd else None
         self._trade_seq = int(payload.get("trade_seq", 0))
