@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -129,3 +130,36 @@ def test_watchdog_stops_on_max_restarts(tmp_path):
     assert counter == 3  # 仅拉起 max_restarts 次
     assert any("[CRITICAL]" in m for m in logs)
     assert any("达到上限" in m for m in logs)
+
+
+# ---------------------------------------------------------------------------
+# ⑦ P0-A：看门狗拉起的子进程必须是「无窗口 + 独立进程组」
+# ---------------------------------------------------------------------------
+def test_watchdog_child_uses_windowless_flags():
+    captured = []
+
+    class _FakeProc:
+        returncode = 0
+
+        def __init__(self, cmd, **kw):
+            captured.append(kw)
+
+        def poll(self):
+            return 0
+
+    orig = wd_mod.subprocess.Popen
+    wd_mod.subprocess.Popen = _FakeProc
+    try:
+        w = wd_mod.Watchdog(
+            ["x"], max_restarts=1, backoff_base=0.01, backoff_max=0.01,
+            stable_sec=1.0, sleep_fn=lambda s: None, log_fn=lambda m: None,
+        )
+        w.run()
+    finally:
+        wd_mod.subprocess.Popen = orig
+
+    assert captured, "child Popen 未被调用"
+    kw = captured[0]
+    assert kw["creationflags"] & subprocess.CREATE_NO_WINDOW
+    assert kw["creationflags"] & subprocess.CREATE_NEW_PROCESS_GROUP
+    assert kw["stdout"] is not None  # 重定向到 logs/paper_console.log

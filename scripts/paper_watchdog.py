@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import signal
 import subprocess
 import sys
@@ -29,6 +30,13 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _open_child_log():
+    """交易引擎（子进程）无可见窗口，stdout/stderr 重定向到日志文件。"""
+    log_dir = ROOT / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    return open(log_dir / "paper_console.log", "a", encoding="utf-8", buffering=1)
 
 
 class Watchdog:
@@ -110,7 +118,17 @@ class Watchdog:
         )
         while not self._stop:
             try:
-                proc = subprocess.Popen(self._child_cmd)
+                proc = subprocess.Popen(
+                    self._child_cmd,
+                    # P0-A（2026-09-04）：子进程（交易引擎）必须「无可见窗口 + 独立进程组」，
+                    # 否则 (a) 可见控制台窗口被误关 = 引擎被杀（CTRL_CLOSE_EVENT，非 SIGTERM，
+                    # 日志无 _shutdown）；(b) 与看门狗共用控制台时关窗两者同死。
+                    # CREATE_NO_WINDOW 消除窗口故障面；CREATE_NEW_PROCESS_GROUP 使引擎脱离
+                    # 看门狗所在控制台组，看门狗窗口被关亦不影响引擎存活。
+                    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW,
+                    stdout=_open_child_log(),
+                    stderr=subprocess.STDOUT,
+                )
             except Exception as exc:  # noqa: BLE001
                 # 子命令无法启动（解释器/脚本缺失）→ 视为一次崩溃
                 self._log(f"[WATCHDOG][ERROR] 子进程启动失败：{exc}")
