@@ -8,7 +8,10 @@
 ⑤ P1-1 单实例预检（仅 --watchdog 路径）：避免撞锁被误判崩溃刷假 CRITICAL；
 ⑥ 锁常量同源（team-lead 点名）：偏移引用引擎模块 + 锁定机制双向互操作钉死。
 ⑦ 抢锁异常窄化（team-lead 点名收口）：非「被占用」errno 必须 fail-open，
-   不得判成「有存活实例」→ 防止「系统永远起不来且日志无异常」的全停形态。
+   不得判成「有存活实例」→ 防止「系统永远起不来且日志无异常」的全停形态；
+⑧ 抢锁**非阻塞**前提的时延断言（QA 发现后 team-lead 点名）：换成阻塞锁时
+   返回值语义完全不变、19 条用例仍全绿，只有耗时从 0.01s 涨到 ~9s，
+   故必须断言「持锁时 <1s 返回」——纯返回值断言抓不到这个退化。
 """
 from __future__ import annotations
 
@@ -490,3 +493,61 @@ def test_non_busy_oserror_during_lock_is_fail_open(tmp_path, monkeypatch):
         f"errno={injected.errno} 属非占用类失败，必须 fail-open 返回 None；"
         "判成 True 会让启动器永远跳过拉起（全停），且日志上看不出任何异常"
     )
+
+
+def test_lock_probe_returns_promptly_when_lock_held(tmp_path):
+    """⛔ 时延护栏：持锁时预检必须**秒级**返回 True，绝不能退化成阻塞等待。
+
+    ⛔ 为什么必须断言**时延**、光断言返回值不够：把非阻塞锁 ``LK_NBLCK`` 换成
+    阻塞锁 ``LK_LOCK``，返回值语义**完全不变**——阻塞重试耗尽后抛出的
+    ``EDEADLOCK(36)`` 恰好落在 ``_LOCK_BUSY_ERRNOS`` 白名单里，照样 return True。
+    QA 实测：19 条用例**全绿**，日志正常、无任何告警，只有单用例耗时从 0.34s
+    变成 9.12s。也就是说，纯返回值断言**抓不到**这个退化。
+
+    后果不是报错，而是**慢性降级**：08:55 / 13:25 / 20:55 三个时段在已有实例
+    存活时（**常态**，不是异常）每次预检多卡约 9 秒。
+
+    ⛔ 这不是理论推演：2026-09-06 提交 ``83a63ef`` 就真的把 ``LK_LOCK`` 混进过
+    HEAD（并发变异污染），已 amend 清除。
+
+    实现要点：预检放进**守护线程**并限时 join —— 万一将来退化成 ``flock(LOCK_EX)``
+    这类**永久**阻塞，本用例会**判红**，而不是把整个测试进程挂死。
+    """
+    import threading
+    import time
+
+    pid_file = tmp_path / "paper.pid"
+    pid_file.write_text(f"{os.getpid()}:0")
+    lock_offset = ltw_mod._engine_lock_offset()
+    assert lock_offset is not None, "同源偏移必须可取（引擎模块不可加载则预检失效）"
+
+    release = _hold_instance_lock(pid_file)  # 真正持住引擎同款字节锁
+    try:
+        box: dict = {}
+
+        def _probe() -> None:
+            t0 = time.perf_counter()
+            # 显式传 offset：把「按文件路径加载引擎模块」的开销排除在计时窗口外，
+            # 让这条断言只盯住**抢锁动作本身**
+            box["ret"] = ltw_mod._engine_instance_running(
+                str(pid_file), lock_offset=lock_offset
+            )
+            box["elapsed"] = time.perf_counter() - t0
+
+        th = threading.Thread(target=_probe, daemon=True)
+        th.start()
+        th.join(30.0)
+        assert not th.is_alive(), (
+            "预检 30s 内没有返回——已退化成阻塞锁（如 flock(LOCK_EX) 不带 NB）。"
+            "这不是「慢」，是**挂死**：三个时段会永久卡在预检上"
+        )
+        assert box.get("ret") is True, (
+            f"锁被占用时必须返回 True，实际 {box.get('ret')!r}"
+        )
+        assert box["elapsed"] < 1.0, (
+            f"锁被占用时预检必须**秒级**返回，实测 {box['elapsed']:.3f}s。"
+            "≈9s 的典型成因是把 LK_NBLCK 换成了阻塞锁 LK_LOCK——返回值语义不变，"
+            "但三个时段每次预检都要多等约 9 秒，且无任何告警、日志完全正常"
+        )
+    finally:
+        release()
