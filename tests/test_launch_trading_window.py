@@ -7,9 +7,12 @@
 ④ 回归护栏：不传 ``--watchdog`` 时仍直接 spawn MAIN（默认行为零变更）；
 ⑤ P1-1 单实例预检（仅 --watchdog 路径）：避免撞锁被误判崩溃刷假 CRITICAL；
 ⑥ 锁常量同源（team-lead 点名）：偏移引用引擎模块 + 锁定机制双向互操作钉死。
+⑦ 抢锁异常窄化（team-lead 点名收口）：非「被占用」errno 必须 fail-open，
+   不得判成「有存活实例」→ 防止「系统永远起不来且日志无异常」的全停形态。
 """
 from __future__ import annotations
 
+import errno
 import importlib.util
 import os
 import subprocess
@@ -441,4 +444,49 @@ def test_pid_file_matches_engine_data_dir():
     assert os.path.normpath(ltw_mod.PID_FILE) == expected, (
         f"launcher.PID_FILE 与引擎实际锁路径不一致：{ltw_mod.PID_FILE} != {expected}"
         "（引擎按 configs/paper.yaml::paper.data_dir 解析，改配置必须同步本常量）"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 异常窄化（2026-09-06 收口，team-lead 点名）
+# ---------------------------------------------------------------------------
+# ⛔ 防「全停」：未窄化前 `except Exception: return True` 把**所有**抢锁异常
+#    都判成「有存活实例」→ 启动器直接跳过拉起 → 系统永远起不来，而自动化只会
+#    安静回报「已有实例跳过」，日志上看不出任何异常。
+def test_non_busy_oserror_during_lock_is_fail_open(tmp_path, monkeypatch):
+    """抢锁抛**非「被占用」**的 errno → 必须返回 None（fail-open），绝不判 True。
+
+    白名单是**实测标定**的（win32 / CPython 3.13）：真被占用 = EACCES(13)，
+    非占用类失败 = EBADF(9) / EINVAL(22)，见 artifacts/_tmp/_R4_errno.txt。
+    """
+    pid_file = tmp_path / "paper.pid"
+    pid_file.write_text("0:0")
+    monkeypatch.setattr(ltw_mod, "_engine_lock_offset", lambda: 4096)
+
+    # 正向护栏：白名单不能是空的，也不能漏掉实测的「被占用」errno
+    assert errno.EACCES in ltw_mod._LOCK_BUSY_ERRNOS, (
+        "EACCES 是实测的『锁被占用』errno，必须在白名单内；漏掉会把真占用判成空闲，"
+        "退化回 P1-1（13:25/20:55 重复挂看门狗 → 假 CRITICAL）"
+    )
+
+    injected = OSError(errno.EPERM, "模拟非占用类抢锁失败")
+    assert injected.errno not in ltw_mod._LOCK_BUSY_ERRNOS, (
+        "注入的 errno 必须不在『锁被占用』白名单内，否则本用例失去意义"
+    )
+
+    def _raise(*_a, **_k):
+        raise injected
+
+    if sys.platform.startswith("win"):
+        import msvcrt
+
+        monkeypatch.setattr(msvcrt, "locking", _raise)
+    else:
+        import fcntl
+
+        monkeypatch.setattr(fcntl, "flock", _raise)
+
+    assert ltw_mod._engine_instance_running(str(pid_file)) is None, (
+        f"errno={injected.errno} 属非占用类失败，必须 fail-open 返回 None；"
+        "判成 True 会让启动器永远跳过拉起（全停），且日志上看不出任何异常"
     )

@@ -52,6 +52,7 @@ runtime<stable_sec 判成崩溃 → 后两个时段再拉 --watchdog 会反复�
 仅做启动，不修改任何生产代码。
 """
 import argparse
+import errno
 import io
 import os
 import subprocess
@@ -133,6 +134,45 @@ def _engine_lock_offset() -> "int | None":
         return None
 
 
+def _lock_busy_errnos() -> "set[int]":
+    """「锁被占用」对应的 errno 白名单——**实测**得出，不靠文档猜。
+
+    实测（win32 / CPython 3.13，见 artifacts/_tmp/_R4_errno.txt）：
+    - ``msvcrt.locking(LK_NBLCK)`` 撞已锁区 → ``PermissionError errno=13 (EACCES)``
+      （**不是** EDEADLOCK——后者是 ``_LK_LOCK``/``_LK_RLCK`` 重试耗尽才给）；
+    - 非占用类失败实测为 ``EBADF(9)``（坏 fd）与 ``EINVAL(22)``（参数非法），
+      这两类**必须**走 fail-open，绝不能判成「有存活实例」。
+
+    ⛔ 为什么必须窄化：``except Exception: return True`` 会把**所有**异常都判成
+    「有存活实例」→ 启动器直接跳过拉起 → **系统永远起不来，而自动化只会安静
+    回报「已有实例跳过」，日志上看不出任何异常**。这正是 R22 要防的形态——
+    探测失败绝不能变成「永远拉不起」的新停摆模式。
+
+    关于 EACCES 的两义性：它也可能是真实 ACL 拒绝。但本函数的 EACCES 来自
+    ``msvcrt.locking``/``flock`` 调用，而此前 ``os.open(..., O_RDWR)`` 已经成功
+    —— 既然本进程已持有可读可写句柄，此时的 EACCES 几乎只可能是锁冲突。
+    ``os.open`` 自身的权限失败在上游已单独判为 fail-open（返回 None）。
+    """
+
+    def _collect(names: "tuple[str, ...]") -> "set[int]":
+        out: set[int] = set()
+        for name in names:
+            code = getattr(errno, name, None)
+            if isinstance(code, int):  # 某些平台没有该常量 → 安全跳过
+                out.add(code)
+        return out
+
+    if sys.platform.startswith("win"):
+        # Windows：锁冲突 = EACCES（实测）；EDEADLOCK/EDEADLK 是 MS 文档列出的
+        # 另一种锁语义 errno，一并纳入只会把更多"真被占用"判对。
+        return _collect(("EACCES", "EDEADLOCK", "EDEADLK"))
+    # POSIX：flock(LOCK_EX|LOCK_NB) 撞已锁 → EWOULDBLOCK/EAGAIN；EACCES 兜底。
+    return _collect(("EWOULDBLOCK", "EAGAIN", "EACCES"))
+
+
+_LOCK_BUSY_ERRNOS = _lock_busy_errnos()
+
+
 def _engine_instance_running(
     pid_path: str = PID_FILE, lock_offset: "int | None" = None
 ) -> "bool | None":
@@ -148,7 +188,9 @@ def _engine_instance_running(
     ``msvcrt.locking(LK_NBLCK)`` / ``fcntl.flock(LOCK_EX|LOCK_NB)`` 抢同一字节**。
 
     返回：
-    - ``True``  → 锁被占用，有存活实例（本进程**必须让位**）；
+    - ``True``  → 锁被占用，有存活实例（本进程**必须让位**）。⛔ 仅当抢锁
+      异常的 errno 落在 ``_LOCK_BUSY_ERRNOS``（锁语义 errno，实测标定）内
+      才判 True；其余一律 None，见下面「异常窄化」；
     - ``False`` → 抢到锁，无存活实例（本函数已立即释放，可安全拉起）；
     - ``None``  → 探测本身失败，**调用方按 fail-open 处理**（照常拉起，交由
       引擎自身锁仲裁）——R22：探测失败绝不能变成「永远拉不起」的新停摆模式。
@@ -164,6 +206,12 @@ def _engine_instance_running(
 
     ⚠️ 抢到锁后**必须**在返回前释放并关闭句柄：否则本函数自己就占住了锁，
     引擎将永远无法启动（灾难性故障面）。此处用 finally 兜底。
+
+    异常窄化（2026-09-06 收口，team-lead 点名）：
+    本函数内**三处**可失败点必须口径一致——``_engine_lock_offset()`` 取不到、
+    ``os.open`` 失败、抢锁抛异常，前两处本就返回 None（fail-open），抢锁这一处
+    原来写成 ``except Exception: return True``，把**所有**异常都当成「有存活
+    实例」——这是遗漏、不是取舍。已改为按 errno 白名单判定。
     """
     if not os.path.exists(pid_path):
         return False  # 锁文件都不存在 → 必然无存活实例（也避免无谓创建文件）
@@ -191,8 +239,18 @@ def _engine_instance_running(
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             acquired = True
             return False  # 抢到锁 → 无存活实例
+        except OSError as exc:
+            # ⛔ 窄化（2026-09-06 收口）：只有「锁被占用」这一类 errno 才能判 True；
+            # 其余（EBADF 坏 fd / EINVAL 参数非法 / EPERM 等）一律返回 None →
+            # fail-open 照常拉起，交由引擎自身锁仲裁。
+            # 反例（未窄化时的故障形态）：权限异常被判成「有存活实例」→ 启动器
+            # 永远跳过拉起，而自动化只安静回报「已有实例跳过」，日志无任何异常。
+            if exc.errno in _LOCK_BUSY_ERRNOS:
+                return True  # 锁被占用 → 有存活实例（本进程必须让位）
+            return None  # 非占用类失败 → fail-open（R22：绝不全停）
         except Exception:  # noqa: BLE001
-            return True   # 锁被占用（典型）→ 有存活实例
+            # 非 OSError（原则上不该发生）→ 同样**绝不**判成「被占用」
+            return None
     finally:
         if fd >= 0:
             if acquired:
