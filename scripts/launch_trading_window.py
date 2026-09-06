@@ -36,6 +36,14 @@ cmd.exe（沙箱会拦截 cmd.exe 启动）」）。故必须在 Python 启动�
 用严格 ``parse_args()``，把未知参数喂给它会导致看门狗启动即崩（等于没装自愈），
 故未知参数只透传给「直连引擎」路径，并在日志里显式列出被丢弃的项，不做静默丢失。
 
+⛔ P1-1 单实例预检（2026-09-06，仅 --watchdog 路径）：引擎调度器没有「时段结束
+即退出」，会活满全天；撞单实例锁时引擎 ``rc=1``，而看门狗把 rc≠0 且
+runtime<stable_sec 判成崩溃 → 后两个时段再拉 --watchdog 会反复退避重启，
+约 20 分钟后刷一条**假** ``[CRITICAL] 连续崩溃 10 次``，淹没真异常。故拉起前
+先用**与引擎完全相同的 OS 字节锁**探测：已有存活实例则跳过本次拉起（rc=0，
+非错误）；探测失败则 fail-open 照常拉起。不带 --watchdog 时不做预检，
+默认路径行为零变更（撞锁的引擎直接退出，本来良性）。
+
 仅做启动，不修改任何生产代码。
 """
 import argparse
@@ -58,6 +66,11 @@ CREATE_NO_WINDOW = 0x08000000
 CREATE_NEW_CONSOLE = 0x10
 
 CONSOLE_LOG = os.path.join(ROOT, "logs", "paper_console.log")
+# 单实例锁文件（与 paper_trading_main._acquire_instance_lock 同一路径/同一语义）
+PID_FILE = os.path.join(ROOT, "data", "paper", "paper.pid")
+# 锁区偏移：必须与 paper_trading_main._LOCK_OFFSET (4096) 一致，否则探测的是
+# 另一个字节、完全失去意义（锁区避开文件头，保证运行期间诊断内容仍可读）。
+_LOCK_OFFSET = 4096
 
 
 def _engine_creationflags() -> int:
@@ -70,6 +83,68 @@ def _open_console_log() -> "io.TextIOWrapper":
     os.makedirs(log_dir, exist_ok=True)
     # 行缓冲，保证崩溃时也已落盘
     return open(CONSOLE_LOG, "a", encoding="utf-8", buffering=1)
+
+
+def _engine_instance_running(pid_path: str = PID_FILE) -> "bool | None":
+    """探测是否已有**存活**的交易引擎实例（复用引擎同款 OS 字节锁语义）。
+
+    ⛔ 不读 PID 文本判活：P1-C 取证（2026-09-03）已证明内容指纹式锁有两处
+    fail-open（``_is_pid_alive`` 把 OpenProcess ACCESS_DENIED 误判为死、锁路径
+    异常降级放行）→ 长寿旧进程与新进程并存。互斥必须由 OS 句柄仲裁：进程死亡
+    时 OS 自动释放句柄，天然无僵尸锁。故本探测与引擎用**完全相同的
+    ``msvcrt.locking(LK_NBLCK)`` / ``fcntl.flock(LOCK_EX|LOCK_NB)`` 抢同一字节**。
+
+    返回：
+    - ``True``  → 锁被占用，有存活实例（本进程**必须让位**）；
+    - ``False`` → 抢到锁，无存活实例（本函数已立即释放，可安全拉起）；
+    - ``None``  → 探测本身失败，**调用方按 fail-open 处理**（照常拉起，交由
+      引擎自身锁仲裁）——R22：探测失败绝不能变成「永远拉不起」的新停摆模式。
+
+    ⚠️ 抢到锁后**必须**在返回前释放并关闭句柄：否则本函数自己就占住了锁，
+    引擎将永远无法启动（灾难性故障面）。此处用 finally 兜底。
+    """
+    if not os.path.exists(pid_path):
+        return False  # 锁文件都不存在 → 必然无存活实例（也避免无谓创建文件）
+    fd = -1
+    acquired = False
+    try:
+        try:
+            fd = os.open(pid_path, os.O_RDWR | os.O_CREAT, 0o644)
+        except OSError:
+            return None  # fail-open：开不了文件 → 交给引擎自身锁仲裁
+        try:
+            if sys.platform.startswith("win"):
+                import msvcrt
+
+                os.lseek(fd, _LOCK_OFFSET, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            acquired = True
+            return False  # 抢到锁 → 无存活实例
+        except Exception:  # noqa: BLE001
+            return True   # 锁被占用（典型）→ 有存活实例
+    finally:
+        if fd >= 0:
+            if acquired:
+                try:
+                    if sys.platform.startswith("win"):
+                        import msvcrt
+
+                        os.lseek(fd, _LOCK_OFFSET, os.SEEK_SET)
+                        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+                    else:
+                        import fcntl
+
+                        fcntl.flock(fd, fcntl.LOCK_UN)
+                except OSError:
+                    pass
+            try:
+                os.close(fd)
+            except OSError:
+                pass
 
 
 def _build_parser() -> "argparse.ArgumentParser":
@@ -128,6 +203,24 @@ def main(argv: "list[str] | None" = None) -> int:
     if not os.path.exists(entry):
         print(f"[LAUNCH][ERROR] 入口脚本缺失: {entry}")
         return 1
+
+    # P1-1（QA 2026-09-06 实证）：仅 --watchdog 路径做单实例预检。
+    # 引擎调度器没有「时段结束即退出」，理论上活满全天；而撞单实例锁时引擎 rc=1，
+    # 看门狗把 rc≠0 且 runtime<stable_sec 判成崩溃 → 13:25/20:55 新拉起的看门狗会
+    # 反复退避重启，约 20 分钟后刷一条**假** [CRITICAL] 连续崩溃 10 次，淹没真异常
+    # （真引擎仍由第一个看门狗守护、不中断交易，但告警可信度被毁）。
+    # 不带 --watchdog 时撞锁的引擎直接退出、无人重启，本来良性 → 默认路径零变更。
+    if args.watchdog:
+        running = _engine_instance_running(PID_FILE)
+        if running is True:
+            print(
+                f"[LAUNCH] 已有存活交易引擎实例（单实例锁 {PID_FILE}）——跳过本次拉起，"
+                f"不重复挂看门狗（避免撞锁 rc=1 被误判崩溃 → 假 CRITICAL 告警）"
+            )
+            return 0
+        if running is None:
+            # 探测失败 → fail-open：照常拉起，由引擎自身锁仲裁
+            print("[LAUNCH][WARN] 单实例预检失败（按无存活处理，交由引擎自身锁仲裁）")
 
     # 透传：显式传入的已知项（看门狗与引擎都认）
     passthrough = _passthrough_args(args)

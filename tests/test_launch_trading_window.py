@@ -9,7 +9,9 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -53,7 +55,13 @@ def test_main_spawns_windowless_with_log_redirect(tmp_path, monkeypatch):
     kw = captured[0]
     assert kw["creationflags"] & subprocess.CREATE_NO_WINDOW
     assert kw["creationflags"] & subprocess.CREATE_NEW_PROCESS_GROUP
-    assert kw["stdout"] is not None  # 重定向到 logs/paper_console.log
+    # P2-1（QA 2026-09-06）：`is not None` 挡不住 stdout=DEVNULL(-3)/PIPE(-1)，
+    # 那两者会让引擎控制台输出静默消失（= P0-1「行情冻结日志不可见」原故障形态）。
+    # 改为同时排除哨兵值 + 断言真实落盘文件名。
+    assert kw["stdout"] not in (None, subprocess.DEVNULL, subprocess.PIPE), (
+        "stdout 必须重定向到真实日志文件，不得为 None/DEVNULL/PIPE"
+    )
+    assert str(getattr(kw["stdout"], "name", "")).endswith("paper_console.log")
     assert kw["stderr"] == subprocess.STDOUT
 
 
@@ -134,7 +142,11 @@ def test_watchdog_path_keeps_windowless_and_log_redirect(tmp_path, monkeypatch):
     assert kw["creationflags"] & subprocess.CREATE_NO_WINDOW
     assert kw["creationflags"] & subprocess.CREATE_NEW_PROCESS_GROUP
     assert not (kw["creationflags"] & ltw_mod.CREATE_NEW_CONSOLE), "不得使用可见窗口标志"
-    assert kw["stdout"] is not None, "stdout 必须重定向到日志文件"
+    # P2-1：同既有用例，必须排除 DEVNULL/PIPE 哨兵并锁定真实日志文件
+    assert kw["stdout"] not in (None, subprocess.DEVNULL, subprocess.PIPE), (
+        "stdout 必须重定向到真实日志文件，不得为 None/DEVNULL/PIPE"
+    )
+    assert str(getattr(kw["stdout"], "name", "")).endswith("paper_console.log")
     assert kw["stderr"] == subprocess.STDOUT
 
 
@@ -178,6 +190,122 @@ def test_watchdog_passthrough_args(tmp_path, monkeypatch):
     assert float(tail[tail.index("--stable-sec") + 1]) == pytest.approx(120.0)
     # 未显式传入的项不得注入（保持子进程自身默认值）
     assert "--backoff-base-sec" not in tail
+
+
+# ---------------------------------------------------------------------------
+# P1-1（2026-09-06）：--watchdog 单实例预检——避免撞锁被误判崩溃刷假 CRITICAL
+# ---------------------------------------------------------------------------
+def _hold_instance_lock(pid_path):
+    """真正持住引擎同款 OS 字节锁（msvcrt/flock），返回释放函数。"""
+    fd = os.open(str(pid_path), os.O_RDWR | os.O_CREAT, 0o644)
+    os.lseek(fd, ltw_mod._LOCK_OFFSET, os.SEEK_SET)
+    if sys.platform.startswith("win"):
+        import msvcrt
+
+        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def _release():
+        try:
+            os.lseek(fd, ltw_mod._LOCK_OFFSET, os.SEEK_SET)
+            if sys.platform.startswith("win"):
+                import msvcrt
+
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+    return _release
+
+
+def test_probe_detects_live_instance_via_real_os_lock(tmp_path):
+    """真锁验证：别人持住同款字节锁 → 探测必须报「有存活实例」。"""
+    pid_file = tmp_path / "paper.pid"
+    pid_file.write_text("999999:0")  # 内容是死 PID，但锁是活的 → 必须按锁判定
+    release = _hold_instance_lock(pid_file)
+    try:
+        assert ltw_mod._engine_instance_running(str(pid_file)) is True, (
+            "锁被占用必须判为有存活实例（互斥由 OS 句柄仲裁，不依赖 PID 文本）"
+        )
+    finally:
+        release()
+
+
+def test_probe_reports_free_when_no_lock(tmp_path):
+    """无人持锁 → 探测报「无存活实例」，且**不得残留占用**（否则引擎永远起不来）。"""
+    pid_file = tmp_path / "paper.pid"
+    pid_file.write_text("3876:0")  # 陈旧内容/死 PID，无进程持锁
+    assert ltw_mod._engine_instance_running(str(pid_file)) is False
+
+    # 探测后必须能立刻被别人拿到锁 —— 防止「探测函数自己占住锁」的灾难性 bug
+    release = _hold_instance_lock(pid_file)
+    release()
+
+
+def test_probe_reports_free_when_pid_file_absent(tmp_path):
+    """锁文件不存在 → 无存活实例（且不应凭空创建文件）。"""
+    pid_file = tmp_path / "nope" / "paper.pid"
+    assert ltw_mod._engine_instance_running(str(pid_file)) is False
+    assert not pid_file.exists(), "预检不应凭空创建锁文件"
+
+
+def test_watchdog_skips_when_engine_already_running(tmp_path, monkeypatch):
+    """已有存活引擎 → 跳过拉起、不 spawn、rc==0（不是错误）。"""
+    calls = []
+    _install_fake_popen(monkeypatch, calls)
+    _prepare(monkeypatch, tmp_path)
+    monkeypatch.setattr(ltw_mod, "_engine_instance_running", lambda *a, **k: True)
+
+    rc = ltw_mod.main(argv=["--watchdog"])
+    assert rc == 0, "已有存活实例属预期状态，不得报失败"
+    assert not calls, "已有存活实例时不得再 spawn 看门狗（否则必撞锁→假 CRITICAL）"
+
+
+def test_watchdog_proceeds_when_no_live_instance(tmp_path, monkeypatch):
+    """无存活实例 → 正常拉起看门狗。"""
+    calls = []
+    _install_fake_popen(monkeypatch, calls)
+    _prepare(monkeypatch, tmp_path)
+    monkeypatch.setattr(ltw_mod, "_engine_instance_running", lambda *a, **k: False)
+
+    rc = ltw_mod.main(argv=["--watchdog"])
+    assert rc == 0
+    assert calls, "无存活实例时应正常 spawn 看门狗"
+
+
+def test_watchdog_probe_failure_is_fail_open(tmp_path, monkeypatch, capsys):
+    """预检失败（返回 None）→ fail-open 照常拉起，绝不变成「永远拉不起」（R22）。"""
+    calls = []
+    _install_fake_popen(monkeypatch, calls)
+    _prepare(monkeypatch, tmp_path)
+    monkeypatch.setattr(ltw_mod, "_engine_instance_running", lambda *a, **k: None)
+
+    rc = ltw_mod.main(argv=["--watchdog"])
+    assert rc == 0
+    assert calls, "预检失败必须 fail-open 照常拉起"
+    assert "[LAUNCH][WARN]" in capsys.readouterr().out
+
+
+def test_probe_not_applied_without_watchdog(tmp_path, monkeypatch):
+    """回归护栏：不带 --watchdog 时**不做**预检（默认路径零变更）。"""
+    calls = []
+    _install_fake_popen(monkeypatch, calls)
+    _prepare(monkeypatch, tmp_path)
+
+    def _boom(*a, **k):
+        raise AssertionError("默认路径不得调用单实例预检")
+
+    monkeypatch.setattr(ltw_mod, "_engine_instance_running", _boom)
+    rc = ltw_mod.main(argv=[])
+    assert rc == 0
+    assert calls
 
 
 def test_unknown_args_do_not_error_under_watchdog(tmp_path, monkeypatch, capsys):
