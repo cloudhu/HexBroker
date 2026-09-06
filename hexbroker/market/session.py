@@ -124,7 +124,7 @@ _NIGHT_TAIL_BOUNDARY = time(4, 0)
 
 def is_cache_rewrite_blocked(
     ts: Any,
-    holidays: Optional[set] = None,
+    holidays: Optional[set[date]] = None,
     sessions: Optional[Iterable[Session]] = None,
 ) -> bool:
     """P1-2：``ts`` 是否落在「生产信号缓存禁止重写」窗口内。
