@@ -2,13 +2,17 @@
 
 覆盖：
 ① ``_engine_creationflags()`` 含 CREATE_NO_WINDOW + CREATE_NEW_PROCESS_GROUP，且不带可见窗口标志；
-② ``main()`` 实际 Popen 时透传上述标志，并把 stdout/stderr 重定向到日志文件。
+② ``main()`` 实际 Popen 时透传上述标志，并把 stdout/stderr 重定向到日志文件；
+③ ``--watchdog`` 接线（2026-09-06 补缺口）：走看门狗 supervisor 实现崩溃自愈；
+④ 回归护栏：不传 ``--watchdog`` 时仍直接 spawn MAIN（默认行为零变更）。
 """
 from __future__ import annotations
 
 import importlib.util
 import subprocess
 from pathlib import Path
+
+import pytest
 
 _SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "launch_trading_window.py"
 _SPEC = importlib.util.spec_from_file_location("launch_trading_window", str(_SCRIPT))
@@ -51,3 +55,143 @@ def test_main_spawns_windowless_with_log_redirect(tmp_path, monkeypatch):
     assert kw["creationflags"] & subprocess.CREATE_NEW_PROCESS_GROUP
     assert kw["stdout"] is not None  # 重定向到 logs/paper_console.log
     assert kw["stderr"] == subprocess.STDOUT
+
+
+# ---------------------------------------------------------------------------
+# P0-A 补缺口（2026-09-06）：--watchdog 崩溃自愈接线
+# ---------------------------------------------------------------------------
+# 背景：引擎崩溃（非 0 退出）后无人重启，只能等下一时段（08:55/13:25/20:55）
+# 自动化来拉，中间整段行情断档。--watchdog 改为拉起 scripts/paper_watchdog.py
+# （supervisor），由它按指数退避自动重启引擎。
+# ⛔ 不用 start_paper_trading_watchdog.bat：该 BAT 需 cmd.exe，而自动化沙箱
+#    拦截 cmd.exe 启动，故必须在 Python 启动器内加开关走纯 Python 路径。
+def _install_fake_popen(monkeypatch, calls):
+    """替换 Popen，捕获 (cmd, kw) 二元组。"""
+
+    class _FakeProc:
+        returncode = 0
+        pid = 12345
+
+        def __init__(self, cmd, **kw):
+            calls.append((cmd, kw))
+
+        def poll(self):
+            return 0
+
+    monkeypatch.setattr(ltw_mod.subprocess, "Popen", _FakeProc)
+
+
+def _prepare(monkeypatch, tmp_path):
+    """把入口脚本/日志路径都指向 tmp，避免 early return 与写脏仓库 logs/。"""
+    main_py = tmp_path / "paper_trading_main.py"
+    main_py.write_text("")
+    monkeypatch.setattr(ltw_mod, "MAIN", str(main_py))
+    wd_py = tmp_path / "paper_watchdog.py"
+    wd_py.write_text("")
+    monkeypatch.setattr(ltw_mod, "WATCHDOG", str(wd_py))
+    monkeypatch.setattr(ltw_mod, "CONSOLE_LOG", str(tmp_path / "logs" / "paper_console.log"))
+    return main_py, wd_py
+
+
+def test_watchdog_spawns_watchdog_script_not_main(tmp_path, monkeypatch):
+    """传 --watchdog → Popen 入口是 paper_watchdog.py（崩溃自愈 supervisor）。"""
+    calls = []
+    _install_fake_popen(monkeypatch, calls)
+    main_py, wd_py = _prepare(monkeypatch, tmp_path)
+
+    rc = ltw_mod.main(argv=["--watchdog"])
+    assert rc == 0
+    assert calls, "Popen 未被调用"
+    cmd = calls[0][0]
+    assert cmd[0] == ltw_mod.PY
+    assert cmd[1] == str(wd_py), "传 --watchdog 时应 spawn 看门狗"
+    assert cmd[1] != str(main_py), "传 --watchdog 时不得再直接 spawn 引擎"
+
+
+def test_without_watchdog_still_spawns_main(tmp_path, monkeypatch):
+    """回归护栏：不传 --watchdog → 仍直接 spawn MAIN（默认行为零变更）。"""
+    calls = []
+    _install_fake_popen(monkeypatch, calls)
+    main_py, wd_py = _prepare(monkeypatch, tmp_path)
+
+    rc = ltw_mod.main(argv=[])
+    assert rc == 0
+    assert calls, "Popen 未被调用"
+    cmd = calls[0][0]
+    assert cmd[1] == str(main_py), "默认路径必须仍 spawn 引擎（防回归）"
+    assert cmd[1] != str(wd_py)
+
+
+def test_watchdog_path_keeps_windowless_and_log_redirect(tmp_path, monkeypatch):
+    """看门狗路径同样必须「无窗口 + 独立进程组 + 日志重定向」，与引擎路径一致。"""
+    calls = []
+    _install_fake_popen(monkeypatch, calls)
+    _prepare(monkeypatch, tmp_path)
+
+    rc = ltw_mod.main(argv=["--watchdog"])
+    assert rc == 0
+    kw = calls[0][1]
+    assert kw["creationflags"] & subprocess.CREATE_NO_WINDOW
+    assert kw["creationflags"] & subprocess.CREATE_NEW_PROCESS_GROUP
+    assert not (kw["creationflags"] & ltw_mod.CREATE_NEW_CONSOLE), "不得使用可见窗口标志"
+    assert kw["stdout"] is not None, "stdout 必须重定向到日志文件"
+    assert kw["stderr"] == subprocess.STDOUT
+
+
+def test_watchdog_missing_returns_1_without_spawn(tmp_path, monkeypatch):
+    """传 --watchdog 但看门狗脚本缺失 → rc==1 且未 spawn（对齐 MAIN 缺失处理）。"""
+    calls = []
+    _install_fake_popen(monkeypatch, calls)
+    main_py, _ = _prepare(monkeypatch, tmp_path)
+    monkeypatch.setattr(ltw_mod, "WATCHDOG", str(tmp_path / "nope_paper_watchdog.py"))
+
+    rc = ltw_mod.main(argv=["--watchdog"])
+    assert rc == 1
+    assert not calls, "入口缺失时不得 spawn"
+
+
+def test_watchdog_passthrough_args(tmp_path, monkeypatch):
+    """透传参数（--config/--offline/--days/--max-restarts 等）正确附加到命令行。"""
+    calls = []
+    _install_fake_popen(monkeypatch, calls)
+    _, wd_py = _prepare(monkeypatch, tmp_path)
+
+    rc = ltw_mod.main(
+        argv=[
+            "--watchdog",
+            "--config", "configs/paper.yaml",
+            "--offline",
+            "--days", "3",
+            "--max-restarts", "7",
+            "--stable-sec", "120",
+        ]
+    )
+    assert rc == 0
+    cmd = calls[0][0]
+    assert cmd[1] == str(wd_py)
+    tail = cmd[2:]
+    assert tail[tail.index("--config") + 1] == "configs/paper.yaml"
+    assert "--offline" in tail
+    assert tail[tail.index("--days") + 1] == "3"
+    assert tail[tail.index("--max-restarts") + 1] == "7"
+    # --stable-sec 是 float 参数 → 序列化为 "120.0"；按数值断言，不锁死字符串格式
+    assert float(tail[tail.index("--stable-sec") + 1]) == pytest.approx(120.0)
+    # 未显式传入的项不得注入（保持子进程自身默认值）
+    assert "--backoff-base-sec" not in tail
+
+
+def test_unknown_args_do_not_error_under_watchdog(tmp_path, monkeypatch, capsys):
+    """未知参数在 --watchdog 下不报错（`parse_known_args`），只告警并忽略。
+
+    看门狗自身用严格 parse_args()：把未知参数喂给它会导致看门狗启动即崩
+    （等于没装自愈），故未知参数只给直连引擎路径，并显式告警不做静默丢失。
+    """
+    calls = []
+    _install_fake_popen(monkeypatch, calls)
+    _prepare(monkeypatch, tmp_path)
+
+    rc = ltw_mod.main(argv=["--watchdog", "--totally-unknown", "42"])
+    assert rc == 0, "未知参数不得导致启动失败"
+    tail = calls[0][0][2:]
+    assert "--totally-unknown" not in tail, "未知参数不得喂给严格解析的看门狗"
+    assert "[LAUNCH][WARN]" in capsys.readouterr().out, "应显式告警被忽略的参数"
