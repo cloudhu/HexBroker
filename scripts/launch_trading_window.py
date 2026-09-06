@@ -44,6 +44,11 @@ runtime<stable_sec 判成崩溃 → 后两个时段再拉 --watchdog 会反复�
 非错误）；探测失败则 fail-open 照常拉起。不带 --watchdog 时不做预检，
 默认路径行为零变更（撞锁的引擎直接退出，本来良性）。
 
+⛔ 锁常量同源（2026-09-06，team-lead 点名）：预检要抢的字节偏移**不在本文件
+另写字面量**，而是运行时引用引擎模块的 ``_LOCK_OFFSET``（见 ``_engine_lock_offset``）。
+否则将来谁改了一边，预检只会**静默失效**，最坏退化成「把空闲误判成占用 →
+系统永远拉不起来」的全停模式。锁定机制本身由互操作测试钉死。
+
 仅做启动，不修改任何生产代码。
 """
 import argparse
@@ -66,11 +71,12 @@ CREATE_NO_WINDOW = 0x08000000
 CREATE_NEW_CONSOLE = 0x10
 
 CONSOLE_LOG = os.path.join(ROOT, "logs", "paper_console.log")
-# 单实例锁文件（与 paper_trading_main._acquire_instance_lock 同一路径/同一语义）
+# 单实例锁文件（与 paper_trading_main 的 ``data_dir / paper.pid`` 同一路径/同一语义）
+# ⚠️ 必须与 configs/paper.yaml::paper.data_dir 保持一致，否则预检永远探测不到锁 →
+# 静默退化回 P1-1（假 CRITICAL）。由 test_pid_file_matches_engine_data_dir 兜底。
 PID_FILE = os.path.join(ROOT, "data", "paper", "paper.pid")
-# 锁区偏移：必须与 paper_trading_main._LOCK_OFFSET (4096) 一致，否则探测的是
-# 另一个字节、完全失去意义（锁区避开文件头，保证运行期间诊断内容仍可读）。
-_LOCK_OFFSET = 4096
+# ⛔ 锁区偏移**不在本文件另写一份字面量**——见 _engine_lock_offset()：运行时直接
+# 引用引擎模块的 _LOCK_OFFSET，使"两边各写一份、将来漂移"物理上不可能发生。
 
 
 def _engine_creationflags() -> int:
@@ -85,8 +91,55 @@ def _open_console_log() -> "io.TextIOWrapper":
     return open(CONSOLE_LOG, "a", encoding="utf-8", buffering=1)
 
 
-def _engine_instance_running(pid_path: str = PID_FILE) -> "bool | None":
+def _load_engine_module():
+    """按文件路径加载引擎模块 ``scripts/paper_trading_main.py``（同目录非包脚本）。
+
+    ⛔ 为什么要 import 引擎、而不是在这里另抄一份锁常量：预检必须与引擎抢
+    **同一个字节**。若两边各写一份 ``_LOCK_OFFSET``，将来谁改了一边，预检
+    **不会报错，只会静默失效**——最坏情况是「把空闲误判成占用 → 系统永远
+    拉不起来」，这正是项目铁律最忌讳的**全停**失效模式。同源引用让漂移
+    不可能发生：引擎改了偏移，预检自动跟着走。
+
+    加载失败（脚本被移动/重命名）→ 返回 None，调用方按 fail-open 处理。
+    引擎模块顶层只有标准库导入，无副作用，加载开销可忽略。
+    """
+    try:
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "_hb_engine_for_lock_probe", MAIN
+        )
+        if spec is None or spec.loader is None:
+            return None
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _engine_lock_offset() -> "int | None":
+    """取引擎侧单实例锁的字节偏移（**同源引用**，取不到返回 None）。
+
+    返回 None 时调用方必须 **fail-open**——宁可不做预检，也绝不能自己猜一个
+    字节偏移去加锁：猜错等于静默失效，比不做预检更危险。
+    """
+    mod = _load_engine_module()
+    if mod is None:
+        return None
+    try:
+        return int(mod._LOCK_OFFSET)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _engine_instance_running(
+    pid_path: str = PID_FILE, lock_offset: "int | None" = None
+) -> "bool | None":
     """探测是否已有**存活**的交易引擎实例（复用引擎同款 OS 字节锁语义）。
+
+    ``lock_offset`` 为 None 时自动从引擎模块取同源值（生产路径）；显式传入
+    则用于测试注入。
 
     ⛔ 不读 PID 文本判活：P1-C 取证（2026-09-03）已证明内容指纹式锁有两处
     fail-open（``_is_pid_alive`` 把 OpenProcess ACCESS_DENIED 误判为死、锁路径
@@ -100,11 +153,25 @@ def _engine_instance_running(pid_path: str = PID_FILE) -> "bool | None":
     - ``None``  → 探测本身失败，**调用方按 fail-open 处理**（照常拉起，交由
       引擎自身锁仲裁）——R22：探测失败绝不能变成「永远拉不起」的新停摆模式。
 
+    耦合契约（team-lead 2026-09-06 点名确认）：
+    - **字节偏移**已同源化（``_engine_lock_offset()`` 直接读引擎模块的
+      ``_LOCK_OFFSET``），漂移不可能发生；
+    - **锁定机制**（msvcrt.locking / fcntl.flock）无法直接复用引擎的实现
+      （它内联在 ``_acquire_instance_lock`` 里，且该函数会写 PID 内容、并把
+      「被占用」与「探测失败」都返回 None，复用它会踩「零写入」红线并把
+      fail-open 变成 fail-closed），故由 ``test_lock_probe_interops_with_engine_lock``
+      做**双向互操作**断言钉死——任一边改了偏移或换锁定方式，该测试当场红。
+
     ⚠️ 抢到锁后**必须**在返回前释放并关闭句柄：否则本函数自己就占住了锁，
     引擎将永远无法启动（灾难性故障面）。此处用 finally 兜底。
     """
     if not os.path.exists(pid_path):
         return False  # 锁文件都不存在 → 必然无存活实例（也避免无谓创建文件）
+    if lock_offset is None:
+        lock_offset = _engine_lock_offset()
+    if lock_offset is None:
+        # 拿不到引擎同源偏移 → **绝不猜一个字节去锁**（猜错 = 静默失效）
+        return None  # fail-open：交由引擎自身锁仲裁
     fd = -1
     acquired = False
     try:
@@ -116,7 +183,7 @@ def _engine_instance_running(pid_path: str = PID_FILE) -> "bool | None":
             if sys.platform.startswith("win"):
                 import msvcrt
 
-                os.lseek(fd, _LOCK_OFFSET, os.SEEK_SET)
+                os.lseek(fd, lock_offset, os.SEEK_SET)
                 msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
             else:
                 import fcntl
@@ -133,7 +200,7 @@ def _engine_instance_running(pid_path: str = PID_FILE) -> "bool | None":
                     if sys.platform.startswith("win"):
                         import msvcrt
 
-                        os.lseek(fd, _LOCK_OFFSET, os.SEEK_SET)
+                        os.lseek(fd, lock_offset, os.SEEK_SET)
                         msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
                     else:
                         import fcntl
@@ -240,15 +307,26 @@ def main(argv: "list[str] | None" = None) -> int:
     env["PYTHONPATH"] = ROOT
     env["PYTHONUNBUFFERED"] = "1"
 
-    logf = _open_console_log()
-    proc = subprocess.Popen(
-        cmd,
-        cwd=ROOT,
-        env=env,
-        creationflags=_engine_creationflags(),
-        stdout=logf,
-        stderr=subprocess.STDOUT,
-    )
+    logf = None
+    try:
+        logf = _open_console_log()
+        proc = subprocess.Popen(
+            cmd,
+            cwd=ROOT,
+            env=env,
+            creationflags=_engine_creationflags(),
+            stdout=logf,
+            stderr=subprocess.STDOUT,
+        )
+    finally:
+        # P2-2 同款卫生：父进程这边的副本在 Popen 返回后即可关闭（句柄继承是
+        # 复制语义，子进程持有自己的副本）。launcher 随即退出，OS 本来也会回收，
+        # 但显式关掉让"不持有"成为契约而非侥幸。
+        if logf is not None:
+            try:
+                logf.close()
+            except Exception:  # noqa: BLE001
+                pass
     kind = "看门狗（崩溃自愈）" if args.watchdog else "交易系统"
     print(
         f"[LAUNCH] 已在后台（无窗口）拉起{kind}, pid={proc.pid} "

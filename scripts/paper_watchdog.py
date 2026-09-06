@@ -13,6 +13,15 @@
 - 子进程 ``returncode==0``（正常退出，如 ``--days N`` 跑满）→ 看门狗停止（不重启）。
 - SIGINT/SIGTERM → 转发给子进程并优雅退出。
 
+P2-2（2026-09-06）日志句柄契约：
+- 子进程 stdout/stderr 重定向到 ``logs/paper_console.log``；父进程这边的句柄
+  **在 ``Popen()`` 返回后立刻关闭**（子进程持有的是副本，不受影响）。
+- ⚠️ **已知限制（无法在本层解决）**：子进程存活期间该日志**不能被外部轮转或
+  删除**——实测 ``rename`` 直接 ``PermissionError [WinError 32]``。原因是继承
+  句柄未带 ``FILE_SHARE_DELETE``，且子进程持有期间任何人都动不了这个文件。
+  要支持"运行中轮转"必须改**引擎侧**（自己打开日志并周期性 reopen），看门狗
+  这一层做不到。两次重启之间的空档期（无子进程存活）可以自由轮转。
+
 用法::
 
     python scripts/paper_watchdog.py [--config configs/paper.yaml] [--offline] [--days N] \\
@@ -33,7 +42,21 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def _open_child_log():
-    """交易引擎（子进程）无可见窗口，stdout/stderr 重定向到日志文件。"""
+    """交易引擎（子进程）无可见窗口，stdout/stderr 重定向到日志文件。
+
+    ⛔ 契约（P2-2，2026-09-06）：本函数返回的句柄**必须由调用方显式关闭**，
+    且必须在 ``subprocess.Popen()`` 返回后**立刻**关——子进程拿到的是句柄
+    **副本**（句柄继承是复制语义），父进程关自己的副本不影响子进程写盘。
+
+    不要指望 CPython 的 refcount 顺手关掉它。``Popen`` 对非 PIPE 的 stdout
+    文件对象**不做保留**（``Popen.stdout`` 恒为 None，属文档规定行为），故
+    当前写法下这个匿名句柄会在 ``Popen()`` 返回后 refcount 归零被立刻回收，
+    实测常规路径确实不漏（20 次真实重启，结束后父进程对该日志的句柄数 0）。
+    但那是**侥幸正确**而非**契约正确**：只要有人给它多加一个引用（提出来做
+    变量、``self._log_fh = fh``、异常 traceback 滞留），立刻变成随重启次数
+    线性增长的泄漏（实测 6 次重启 → 6 个活句柄、总句柄 +6）。显式 close 才能
+    把"释放"与"谁还持有引用"解耦。
+    """
     log_dir = ROOT / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     return open(log_dir / "paper_console.log", "a", encoding="utf-8", buffering=1)
@@ -117,7 +140,9 @@ class Watchdog:
             f"backoff={self._backoff_base}→{self._backoff_max}s stable_sec={self._stable_sec}s"
         )
         while not self._stop:
+            log_fh = None
             try:
+                log_fh = _open_child_log()
                 proc = subprocess.Popen(
                     self._child_cmd,
                     # P0-A（2026-09-04）：子进程（交易引擎）必须「无可见窗口 + 独立进程组」，
@@ -126,7 +151,7 @@ class Watchdog:
                     # CREATE_NO_WINDOW 消除窗口故障面；CREATE_NEW_PROCESS_GROUP 使引擎脱离
                     # 看门狗所在控制台组，看门狗窗口被关亦不影响引擎存活。
                     creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW,
-                    stdout=_open_child_log(),
+                    stdout=log_fh,
                     stderr=subprocess.STDOUT,
                 )
             except Exception as exc:  # noqa: BLE001
@@ -140,6 +165,18 @@ class Watchdog:
                     return 1
                 self._sleep_backoff(self._backoff_base)
                 continue
+            finally:
+                # P2-2（2026-09-06）：父进程这边的句柄**在 Popen 返回后即可关闭**。
+                # 子进程持有的是句柄副本，父进程关闭自己的副本不影响子进程写盘
+                # （实测：关闭后子进程 50 行输出 100% 完整落盘）。
+                # 用 finally 而非"子进程退出后再关"：后者在 return / continue /
+                # 异常三条路径上都要各写一遍，漏一条就是泄漏；finally 一次性兜住。
+                if log_fh is not None:
+                    try:
+                        log_fh.close()
+                    except Exception:  # noqa: BLE001
+                        # 关闭失败绝不影响看门狗主流程（R22：不引入新停摆模式）
+                        pass
 
             start = time.monotonic()
             while proc.poll() is None:

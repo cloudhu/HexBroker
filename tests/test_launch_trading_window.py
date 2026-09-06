@@ -4,7 +4,9 @@
 ① ``_engine_creationflags()`` 含 CREATE_NO_WINDOW + CREATE_NEW_PROCESS_GROUP，且不带可见窗口标志；
 ② ``main()`` 实际 Popen 时透传上述标志，并把 stdout/stderr 重定向到日志文件；
 ③ ``--watchdog`` 接线（2026-09-06 补缺口）：走看门狗 supervisor 实现崩溃自愈；
-④ 回归护栏：不传 ``--watchdog`` 时仍直接 spawn MAIN（默认行为零变更）。
+④ 回归护栏：不传 ``--watchdog`` 时仍直接 spawn MAIN（默认行为零变更）；
+⑤ P1-1 单实例预检（仅 --watchdog 路径）：避免撞锁被误判崩溃刷假 CRITICAL；
+⑥ 锁常量同源（team-lead 点名）：偏移引用引擎模块 + 锁定机制双向互操作钉死。
 """
 from __future__ import annotations
 
@@ -196,9 +198,15 @@ def test_watchdog_passthrough_args(tmp_path, monkeypatch):
 # P1-1（2026-09-06）：--watchdog 单实例预检——避免撞锁被误判崩溃刷假 CRITICAL
 # ---------------------------------------------------------------------------
 def _hold_instance_lock(pid_path):
-    """真正持住引擎同款 OS 字节锁（msvcrt/flock），返回释放函数。"""
+    """真正持住引擎同款 OS 字节锁（msvcrt/flock），返回释放函数。
+
+    偏移量从 launcher 的同源解析器取（不再引用任何本地字面量），这样本 helper
+    与生产路径用的是同一个数，测试不会自己给自己打保票。
+    """
+    offset = ltw_mod._engine_lock_offset()
+    assert offset is not None, "同源偏移必须可取（引擎模块不可加载则全部预检失效）"
     fd = os.open(str(pid_path), os.O_RDWR | os.O_CREAT, 0o644)
-    os.lseek(fd, ltw_mod._LOCK_OFFSET, os.SEEK_SET)
+    os.lseek(fd, offset, os.SEEK_SET)
     if sys.platform.startswith("win"):
         import msvcrt
 
@@ -210,7 +218,7 @@ def _hold_instance_lock(pid_path):
 
     def _release():
         try:
-            os.lseek(fd, ltw_mod._LOCK_OFFSET, os.SEEK_SET)
+            os.lseek(fd, offset, os.SEEK_SET)
             if sys.platform.startswith("win"):
                 import msvcrt
 
@@ -323,3 +331,114 @@ def test_unknown_args_do_not_error_under_watchdog(tmp_path, monkeypatch, capsys)
     tail = calls[0][0][2:]
     assert "--totally-unknown" not in tail, "未知参数不得喂给严格解析的看门狗"
     assert "[LAUNCH][WARN]" in capsys.readouterr().out, "应显式告警被忽略的参数"
+
+
+# ---------------------------------------------------------------------------
+# 锁常量同源（2026-09-06，team-lead 点名确认，方案 A + B 组合）
+# ---------------------------------------------------------------------------
+# ⛔ 风险：预检与引擎必须抢**同一个字节**。若两边各写一份 _LOCK_OFFSET，
+#    将来谁改了一边，预检**不会报错，只会静默失效**——最坏情况是「把空闲
+#    误判成占用 → 系统永远拉不起来」，这是项目铁律最忌讳的全停失效模式。
+#
+#    方案：偏移走 A（运行时引用引擎模块，漂移物理上不可能发生）；
+#          锁定机制走 B（无法复用引擎的内联实现，用互操作测试钉死行为）。
+def test_lock_offset_is_sourced_from_engine(monkeypatch):
+    """字节偏移必须是**同源引用**：launcher 里不得再留字面量。
+
+    变异护栏：把 ``_engine_lock_offset()`` 改成返回另一个数（如 8192）→ ②③红。
+    """
+    # ① launcher 自身不得再持有 _LOCK_OFFSET 字面量
+    assert not hasattr(ltw_mod, "_LOCK_OFFSET"), (
+        "launcher 不得再定义 _LOCK_OFFSET 字面量（必须运行时从引擎模块取同源值），"
+        "否则重新引入『两边各写一份、将来静默漂移』的全停风险"
+    )
+
+    engine_mod = ltw_mod._load_engine_module()
+    assert engine_mod is not None, "引擎模块必须可加载——预检依赖它取同源偏移"
+
+    # ② 解析出的值必须与引擎逐值相等（是引用，不是抄一份）
+    resolved = ltw_mod._engine_lock_offset()
+    assert resolved == engine_mod._LOCK_OFFSET, (
+        f"预检偏移 {resolved} 与引擎偏移 {engine_mod._LOCK_OFFSET} 不一致——"
+        "两边锁的不是同一个字节，预检完全失去意义"
+    )
+
+    # ③ 必须是**调用时**从引擎模块取，而不是 import 期快照或写死的常量。
+    #    把引擎模块换成桩：桩说 7777，预检就必须用 7777。
+    class _StubEngine:
+        _LOCK_OFFSET = 7777
+
+    monkeypatch.setattr(ltw_mod, "_load_engine_module", lambda: _StubEngine())
+    assert ltw_mod._engine_lock_offset() == 7777, (
+        "预检偏移必须每次调用时从引擎模块现场读取；读成别的值说明又退化成了写死常量"
+    )
+
+    # ④ 引擎模块取不到 → 返回 None（调用方 fail-open），绝不自己猜一个偏移
+    monkeypatch.setattr(ltw_mod, "_load_engine_module", lambda: None)
+    assert ltw_mod._engine_lock_offset() is None, (
+        "取不到引擎同源偏移时必须返回 None 让调用方 fail-open，"
+        "绝不能猜一个字节去锁（猜错 = 静默失效，比不做预检更危险）"
+    )
+
+
+def test_lock_probe_interops_with_engine_lock(tmp_path):
+    """双向互操作：用**引擎自己的** ``_acquire_instance_lock`` 验证探测行为。
+
+    这条才是锁耦合的真正护栏——它不比对数字，而比对**行为**：引擎拿到的锁，
+    预检必须认；引擎放掉的锁，预检必须放行。任一边改了偏移或换锁定方式
+    （一边 ``msvcrt.locking``、另一边 ``LockFileEx``），这里立刻红。
+
+    变异护栏：把引擎 ``_acquire_instance_lock`` 里的 ``os.lseek(fd, _LOCK_OFFSET)``
+    改成 ``_LOCK_OFFSET + 1``（模拟单边漂移）→ 本用例红。
+    """
+    engine_mod = ltw_mod._load_engine_module()
+    pid_file = tmp_path / "paper.pid"
+    pid_file.write_text("0:0")
+
+    # ① 引擎持锁 → 探测必须报「有存活实例」
+    #    失配方向：报 False → 13:25/20:55 重复挂看门狗 → 撞锁 rc=1 → 假 CRITICAL
+    lock = engine_mod._acquire_instance_lock(pid_file)
+    assert lock is not None, "首个实例必须能拿到锁（否则本用例前提不成立）"
+    try:
+        assert ltw_mod._engine_instance_running(str(pid_file)) is True, (
+            "引擎持有的锁，launcher 预检必须识别为占用；识别不了就等于没做预检，"
+            "会退化回 P1-1 的假 [CRITICAL] 连续崩溃告警"
+        )
+        # P1-C 附带保证：锁区避开文件头 → 实例运行期间诊断内容仍可读
+        assert pid_file.read_text(encoding="utf-8").startswith(str(os.getpid())), (
+            "锁区不得覆盖文件头，否则实例运行期间健康检查读不到 PID 诊断内容"
+            "（P1-C 取证已证明锁 byte 0 会导致实测 PermissionError）"
+        )
+    finally:
+        lock.release()
+
+    # ② 引擎释放 → 探测必须报「无存活实例」
+    #    失配方向：报 True → **永远拉不起来**，项目铁律最忌讳的全停失效模式
+    assert ltw_mod._engine_instance_running(str(pid_file)) is False, (
+        "引擎已释放锁，预检必须放行；误判为占用会导致系统永远拉不起来（全停）"
+    )
+
+    # ③ 探测之后引擎仍能再次拿到锁（探测不得残留占用）
+    lock2 = engine_mod._acquire_instance_lock(pid_file)
+    assert lock2 is not None, "预检后引擎必须仍能取得锁——探测函数不得残留占用"
+    lock2.release()
+
+
+def test_pid_file_matches_engine_data_dir():
+    """锁**路径**也必须与引擎一致（同一类漂移面，走 Plan B 护栏）。
+
+    引擎用 ``Path(paper_cfg.get("data_dir", "data/paper")) / "paper.pid"``，
+    launcher 里是常量。若将来有人改 ``configs/paper.yaml::paper.data_dir`` 而
+    launcher 没跟着改 → 预检永远探测不到锁 → 静默退化回 P1-1 假 CRITICAL。
+    因改动生产配置属于低频且需评审的操作，这里用「读配置逐值比对」兜底，
+    不把配置加载塞进 launcher 的运行时路径（避免新增运行时依赖与失败面）。
+    """
+    from omegaconf import OmegaConf
+
+    cfg = OmegaConf.load(Path(ltw_mod.ROOT) / "configs" / "paper.yaml")
+    data_dir = str(OmegaConf.select(cfg, "paper.data_dir", default="data/paper"))
+    expected = os.path.normpath(os.path.join(ltw_mod.ROOT, data_dir, "paper.pid"))
+    assert os.path.normpath(ltw_mod.PID_FILE) == expected, (
+        f"launcher.PID_FILE 与引擎实际锁路径不一致：{ltw_mod.PID_FILE} != {expected}"
+        "（引擎按 configs/paper.yaml::paper.data_dir 解析，改配置必须同步本常量）"
+    )
