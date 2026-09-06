@@ -29,7 +29,20 @@ _SPEC = importlib.util.spec_from_file_location("launch_trading_window", str(_SCR
 ltw_mod = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(ltw_mod)
 
+# ⛔ CI（ubuntu runner）2026-09-06：本文件有两类**本质 Windows 专属**的用例——
+# ① 断言引用 subprocess.CREATE_NO_WINDOW / CREATE_NEW_PROCESS_GROUP（仅 Windows
+#    存在，POSIX 上 AttributeError）；② 单实例锁同源契约依赖引擎模块
+#    （paper_trading_main.py，msvcrt 字节锁），POSIX 上引擎模块不可加载、
+#    _load_engine_module() 返回 None → 同源偏移断言必红。这两类统一标 skipif，
+#    其余 13 条（参数解析/命令构建/预检 fail-open/日志重定向路径选择等纯逻辑）
+#    跨平台真实可跑、继续在 CI 覆盖。
+_WIN_ONLY = pytest.mark.skipif(
+    not sys.platform.startswith("win"),
+    reason="Windows 专属契约（subprocess.CREATE_* 常量 / msvcrt 字节锁同源）；POSIX 上前提不成立",
+)
 
+
+@_WIN_ONLY
 def test_engine_creationflags_windowless():
     flags = ltw_mod._engine_creationflags()
     assert flags & subprocess.CREATE_NO_WINDOW
@@ -38,6 +51,7 @@ def test_engine_creationflags_windowless():
     assert not (flags & ltw_mod.CREATE_NEW_CONSOLE)
 
 
+@_WIN_ONLY
 def test_main_spawns_windowless_with_log_redirect(tmp_path, monkeypatch):
     captured = []
 
@@ -138,6 +152,7 @@ def test_without_watchdog_still_spawns_main(tmp_path, monkeypatch):
     assert cmd[1] != str(wd_py)
 
 
+@_WIN_ONLY
 def test_watchdog_path_keeps_windowless_and_log_redirect(tmp_path, monkeypatch):
     """看门狗路径同样必须「无窗口 + 独立进程组 + 日志重定向」，与引擎路径一致。"""
     calls = []
@@ -239,6 +254,7 @@ def _hold_instance_lock(pid_path):
     return _release
 
 
+@_WIN_ONLY
 def test_probe_detects_live_instance_via_real_os_lock(tmp_path):
     """真锁验证：别人持住同款字节锁 → 探测必须报「有存活实例」。"""
     pid_file = tmp_path / "paper.pid"
@@ -252,6 +268,7 @@ def test_probe_detects_live_instance_via_real_os_lock(tmp_path):
         release()
 
 
+@_WIN_ONLY
 def test_probe_reports_free_when_no_lock(tmp_path):
     """无人持锁 → 探测报「无存活实例」，且**不得残留占用**（否则引擎永远起不来）。"""
     pid_file = tmp_path / "paper.pid"
@@ -390,6 +407,7 @@ def test_unknown_args_do_not_error_under_watchdog(tmp_path, monkeypatch, capsys)
 #
 #    方案：偏移走 A（运行时引用引擎模块，漂移物理上不可能发生）；
 #          锁定机制走 B（无法复用引擎的内联实现，用互操作测试钉死行为）。
+@_WIN_ONLY
 def test_lock_offset_is_sourced_from_engine(monkeypatch):
     """字节偏移必须是**同源引用**：launcher 里不得再留字面量。
 
@@ -429,6 +447,7 @@ def test_lock_offset_is_sourced_from_engine(monkeypatch):
     )
 
 
+@_WIN_ONLY
 def test_lock_probe_interops_with_engine_lock(tmp_path):
     """双向互操作：用**引擎自己的** ``_acquire_instance_lock`` 验证探测行为。
 
@@ -537,6 +556,7 @@ def test_non_busy_oserror_during_lock_is_fail_open(tmp_path, monkeypatch):
     )
 
 
+@_WIN_ONLY
 def test_lock_probe_returns_promptly_when_lock_held(tmp_path):
     """⛔ 时延护栏：持锁时预检必须**秒级**返回 True，绝不能退化成阻塞等待。
 

@@ -40,6 +40,16 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
+# 子进程创建标志（P0-A：无可见窗口 + 独立进程组）。⛔ 必须在**模块级**按平台取好，
+# 不能写在 Popen 调用点的 kwargs 里：``subprocess.CREATE_*`` 是 Windows-only 常量，
+# POSIX 上 AttributeError——写在调用点会让每次 spawn 都抛出、又被下方 ``except``
+# 吞成「子进程启动失败」（CI ubuntu runner 实证：真实 spawn 集成用例 5 条连崩、
+# counter.txt 永不生成）。POSIX 上传 0（creationflags 参数被忽略，行为正确）。
+if sys.platform.startswith("win"):
+    _CHILD_CREATIONFLAGS = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+else:  # POSIX：无「窗口」概念，独立进程组语义由 POSIX 进程模型天然满足
+    _CHILD_CREATIONFLAGS = 0
+
 
 def _open_child_log():
     """交易引擎（子进程）无可见窗口，stdout/stderr 重定向到日志文件。
@@ -150,7 +160,9 @@ class Watchdog:
                     # 日志无 _shutdown）；(b) 与看门狗共用控制台时关窗两者同死。
                     # CREATE_NO_WINDOW 消除窗口故障面；CREATE_NEW_PROCESS_GROUP 使引擎脱离
                     # 看门狗所在控制台组，看门狗窗口被关亦不影响引擎存活。
-                    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW,
+                    # ⛔ 常量经模块级 _CHILD_CREATIONFLAGS 平台分支取得（勿在此处直接
+                    # 引用 subprocess.CREATE_*，POSIX 上 AttributeError，见模块头注释）。
+                    creationflags=_CHILD_CREATIONFLAGS,
                     stdout=log_fh,
                     stderr=subprocess.STDOUT,
                 )

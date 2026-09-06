@@ -35,6 +35,10 @@ jobs:
           # 属于 pytest 套件的一部分。此前只在 lint job 安装 → test job 上该门禁整条
           # skip（静默失效），且 test_ruff_gate_is_interpreter_agnostic 直接失败。
           pip install ruff
+          # czce 官方源单测需要 requests：生产侧为 [sources] extra 懒加载（缺依赖不
+          # 阻断 import），但测试 mock requests.get 必须可 import。requests 轻量，
+          # 直接安装；akshare/pytdx/tqsdk 等重依赖仍不装（对应源 health_check=False）。
+          pip install requests
 
       - name: Run test suite
         run: |

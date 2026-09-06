@@ -25,6 +25,8 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
+
 # paper_watchdog.py 位于 scripts/（非包），按文件路径加载模块
 _SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "paper_watchdog.py"
 _SPEC = importlib.util.spec_from_file_location("paper_watchdog", str(_SCRIPT))
@@ -140,6 +142,15 @@ def test_watchdog_stops_on_max_restarts(tmp_path):
 # ---------------------------------------------------------------------------
 # ⑦ P0-A：看门狗拉起的子进程必须是「无窗口 + 独立进程组」
 # ---------------------------------------------------------------------------
+# ⛔ CI（ubuntu runner）2026-09-06：断言里的 subprocess.CREATE_* 是 Windows-only
+#    常量，POSIX 上 AttributeError → 本用例只能声明为 Windows 专属契约。
+#    跨平台 spawn 正确性由下方真实 spawn 集成用例（⑤⑥ + P2-2 三条）覆盖——
+#    那些用例在修掉生产代码的平台硬编码后（_CHILD_CREATIONFLAGS 模块级分支）
+#    于 POSIX 上同样真实可跑。
+@pytest.mark.skipif(
+    not sys.platform.startswith("win"),
+    reason="断言 subprocess.CREATE_*（Windows-only 常量）的无窗口语义；POSIX 无此概念",
+)
 def test_watchdog_child_uses_windowless_flags():
     captured = []
 

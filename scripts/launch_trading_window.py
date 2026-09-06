@@ -59,7 +59,15 @@ import subprocess
 import sys
 import time
 
-ROOT = r"E:\Workspace\HexBroker"
+# ⛔ 可移植性（CI 2026-09-06 实证修复）：ROOT 不得硬编码绝对路径——写死 Windows
+# 盘符后，脚本被搬到任何其它位置（换盘/迁移/CI checkout）时 MAIN/WATCHDOG/
+# CONSOLE_LOG/PID_FILE/PYTHONPATH/cwd 全部静默失效。改为从本文件位置推导
+# （scripts/ 的上级 = 仓库根）。本机 E:\Workspace\HexBroker 部署时推导结果与旧
+# 硬编码逐字符一致 → 生产行为零变更（test_pid_file_matches_engine_data_dir 以
+# 真实 configs/paper.yaml 逐值兜底，本地绿即证明推导正确）。
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# 引擎解释器：本机托管 venv 的 python。⚠️ 仍为本机绝对路径——launcher 只在本机
+# 生产运行；迁移部署时需同步修改此行（CI 测试断言 cmd[0]==PY 自比照，不依赖具体值）。
 PY = r"C:\Users\Administrator\.workbuddy\binaries\python\envs\default\Scripts\python.exe"
 MAIN = os.path.join(ROOT, "scripts", "paper_trading_main.py")
 # P0-A：崩溃自愈 supervisor（不传 --watchdog 时不涉及，默认路径零变更）
