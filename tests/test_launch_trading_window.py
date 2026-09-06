@@ -322,6 +322,48 @@ def test_probe_not_applied_without_watchdog(tmp_path, monkeypatch):
     assert calls
 
 
+def test_slow_probe_emits_warn_without_changing_control_flow(tmp_path, monkeypatch, capsys):
+    """P3-3：预检耗时超阈值 → 打慢预检告警，**且控制流完全不受影响**。
+
+    背景：非阻塞预检 ~0.01s，退化成阻塞锁（LK_NBLCK→LK_LOCK）~9s 且返回值
+    语义完全不变 —— 时延护栏只在跑测试时生效，三个时段无人值守，需要这条
+    运行时信号。⛔ 告警只许打印：不许 return/raise/改拉起判定（R22）。
+    """
+    calls = []
+    _install_fake_popen(monkeypatch, calls)
+    _prepare(monkeypatch, tmp_path)
+
+    import time as _time
+
+    def _slow_probe(*a, **k):
+        _time.sleep(2.5)  # > SLOW_PROBE_WARN_SEC(2.0)
+        return False
+
+    monkeypatch.setattr(ltw_mod, "_engine_instance_running", _slow_probe)
+    rc = ltw_mod.main(argv=["--watchdog"])
+
+    assert rc == 0, "慢预检只告警，不得影响返回码"
+    assert calls, "慢预检不得阻断后续拉起逻辑"
+    out = capsys.readouterr().out
+    assert "[LAUNCH][WARN] 单实例预检耗时" in out, "超阈值必须打慢预检告警"
+    assert "2." in out, "告警必须携带实测耗时（可读性：运维要知道慢到什么程度）"
+
+
+def test_fast_probe_emits_no_slow_probe_warn(tmp_path, monkeypatch, capsys):
+    """P3-3 反向：正常速度预检**不得**出现慢预检告警（否则告警变新噪声源）。"""
+    calls = []
+    _install_fake_popen(monkeypatch, calls)
+    _prepare(monkeypatch, tmp_path)
+    monkeypatch.setattr(ltw_mod, "_engine_instance_running", lambda *a, **k: False)
+
+    rc = ltw_mod.main(argv=["--watchdog"])
+
+    assert rc == 0
+    assert calls
+    out = capsys.readouterr().out
+    assert "单实例预检耗时" not in out, "正常速度预检不得触发慢预检告警（告警必须保持可信）"
+
+
 def test_unknown_args_do_not_error_under_watchdog(tmp_path, monkeypatch, capsys):
     """未知参数在 --watchdog 下不报错（`parse_known_args`），只告警并忽略。
 

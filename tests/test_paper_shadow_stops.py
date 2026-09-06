@@ -436,3 +436,152 @@ def test_dedup_disabled_when_window_nonpositive(tmp_path):
                      now=t0 + _dt.timedelta(seconds=i))
         assert len(r) == 1
     assert _count_lines(tmp_path / "s.jsonl") == 3, "关闭去重应每次命中都写"
+
+
+# --------------------------------------------------------------------------- #
+# 7. P2-3 事件语义（2026-09-06）：event_id / first_hit
+# --------------------------------------------------------------------------- #
+# 背景：300s 去重只控制写盘节奏，一个持续 6h 的触发段仍会产生 ~72 行。
+# 09-21「是否转真实平仓」的唯一决策依据就是这份 jsonl —— 若没有事件语义，
+# 直接 count 行数回答「止损触发了几次」会高估一到两个数量级。
+# 事件边界 = tick 级触发状态连续性：价格离开触发区哪怕一个 tick，旧事件结束。
+
+def _scan_stop(mon, symbol="rb0", now=NOW, stop=2900.0, price=2890.0):
+    return mon.scan(
+        symbol=symbol, position=1.0, price=price, stop=stop,
+        take_profit=None, avg_entry=3000.0, quote_ts=now, now=now,
+    )
+
+
+def _read_rows(tmp_path, name="shadow_stops.jsonl") -> list[dict]:
+    path = tmp_path / name
+    if not path.exists():
+        return []
+    return [json.loads(x) for x in path.read_text(encoding="utf-8").splitlines()]
+
+
+def test_continuous_trigger_yields_one_event_and_first_hit_only_once(tmp_path):
+    """持续触发跨 3 个去重窗口 → 1 个 event_id，仅首条 first_hit=True。
+
+    这是本次修复的主场景：修复前这 3 行会被当成 3 次「触发」，
+    count 高估 3 倍（真实行情里一个段是 70+ 行 → 高估一到两个数量级）。
+    """
+    mon = _monitor(tmp_path)
+    t0 = NOW
+    for offset in (0, 301, 602):  # 每次都越过 300s 去重窗 → 都落盘
+        rows = _scan_stop(mon, now=t0 + _dt.timedelta(seconds=offset))
+        assert len(rows) == 1, f"offset={offset} 应落盘一条（窗口外重新 emit）"
+
+    rows = _read_rows(tmp_path)
+    assert len(rows) == 3
+    ids = {r["event_id"] for r in rows}
+    assert len(ids) == 1, f"同一连续触发段必须共用一个 event_id，实际 {ids}"
+    assert sum(1 for r in rows if r["first_hit"]) == 1, "只有首条标 first_hit=True"
+    assert rows[0]["first_hit"] is True
+    assert rows[1]["first_hit"] is False and rows[2]["first_hit"] is False
+
+
+def test_new_event_after_price_leaves_trigger_zone(tmp_path):
+    """价格离开触发区（哪怕只隔一个 tick）→ 旧事件结束，再触发是新事件。
+
+    时间线：t0 触发（事件 A 落盘）→ t0+301 回到止损上方（不触发，
+    事件 A 结束）→ t0+602 再次跌破（新事件 B；距上次 emit 602s ≥ 300s
+    窗口 → 放行落盘）。
+    """
+    mon = _monitor(tmp_path)
+    t0 = NOW
+    _scan_stop(mon, now=t0)                                              # A 落盘
+    _scan_stop(mon, now=t0 + _dt.timedelta(seconds=301), price=3000.0)   # 离开触发区
+    rows_b = _scan_stop(mon, now=t0 + _dt.timedelta(seconds=602))        # 再次跌破 → B
+    assert len(rows_b) == 1, "602s ≥ 300s 窗口，必须重新 emit 落盘"
+
+    rows = _read_rows(tmp_path)
+    assert len(rows) == 2
+
+    # ⛔ 关键断言：第二条必须属于**新事件**，不得并进第一段
+    assert rows[1]["event_id"] != rows[0]["event_id"], (
+        "价格离开过触发区（中间 tick 未触发），旧事件必须结束；"
+        "并进同一段会把两次真实触发算成一次，低估事件数"
+    )
+    assert rows[1]["first_hit"] is True, "新事件的首条落盘记录必须标 first_hit=True"
+
+
+def test_new_event_first_tick_deduped_still_flags_first_disk_row(tmp_path):
+    """新事件首 tick 撞去重窗被拦 → 该段首条**落盘**记录仍必须标 first_hit=True。
+
+    场景：t=0 触发（事件 A 落盘）→ t=60 短暂离开 → t=120 回到触发区
+    （新事件 B！但距上次 emit 仅 120s < 300s → 去重拦截，不落盘）
+    → t=440 仍触发（事件 B 延续，越过窗口 → 落盘）。
+    分析侧按 event_id 分组时，B 段首条落盘记录必须可识别。
+    """
+    mon = _monitor(tmp_path)
+    t0 = NOW
+    _scan_stop(mon, now=t0)                                            # A 落盘 first_hit=True
+    _scan_stop(mon, now=t0 + _dt.timedelta(seconds=60), price=3000.0)  # 离开
+    r3 = _scan_stop(mon, now=t0 + _dt.timedelta(seconds=120))          # B 首tick，被 300s 窗拦截
+    assert r3 == [], "距上次 emit 120s < 300s，必须被去重拦截（既有语义不动）"
+    rows_b = _scan_stop(mon, now=t0 + _dt.timedelta(seconds=440))      # B 段越过窗口
+    assert len(rows_b) == 1
+
+    rows = _read_rows(tmp_path)
+    assert len(rows) == 2
+    assert rows[1]["event_id"] != rows[0]["event_id"], "t=120 起是价格离开后重新进入 → 新事件"
+    assert rows[1]["first_hit"] is True, (
+        "B 段首条落盘记录必须标 True——pending_first 只在真正落盘时消费"
+    )
+
+
+def test_simultaneous_stop_and_tp_get_independent_event_ids(tmp_path):
+    """跳空同时命中止损+止盈 → 两条记录、两个独立 event_id（kind 不同）。"""
+    mon = _monitor(tmp_path)
+    t0 = NOW
+    rows = mon.scan(
+        symbol="rb0", position=1.0, price=3000.0, stop=3100.0,
+        take_profit=2900.0, avg_entry=3000.0, quote_ts=t0, now=t0,
+    )
+    assert len(rows) == 2, "STOP 与 TP 必须都留痕（既有语义）"
+    ids = {r["kind"]: r["event_id"] for r in rows}
+    assert ids[KIND_STOP] != ids[KIND_TP], "不同 kind 的事件段必须独立编号"
+
+
+def test_event_ids_isolated_across_symbols(tmp_path):
+    """同 tick、同 kind、不同 symbol → 各自独立事件段，不得串扰。"""
+    mon = _monitor(tmp_path)
+    t0 = NOW
+    r1 = _scan_stop(mon, symbol="rb0", now=t0)
+    r2 = _scan_stop(mon, symbol="cu0", now=t0)
+    assert len(r1) == 1 and len(r2) == 1
+    assert r1[0]["event_id"] != r2[0]["event_id"], "event_id 必须含 symbol，防跨品种串扰"
+
+
+def test_event_state_corruption_is_fail_open(tmp_path):
+    """事件状态被人为破坏 → 不抛异常、退化为按新事件处理（R22）。"""
+    mon = _monitor(tmp_path)
+    t0 = NOW
+    mon._event_state[("rb0", KIND_STOP)] = "garbage"   # 非 dict
+    rows = _scan_stop(mon, now=t0)
+    assert len(rows) == 1, "状态损坏不得中断判定/落盘"
+    assert rows[0]["first_hit"] is True, "fail-open：退化为新事件"
+
+    mon._in_trigger[("rb0", KIND_STOP)] = "not-a-bool"  # 再砸一处
+    rows2 = _scan_stop(mon, now=t0 + _dt.timedelta(seconds=301))
+    assert len(rows2) == 1, "状态损坏不得中断 tick（第二次）"
+
+
+def test_reset_dedup_also_clears_event_state(tmp_path):
+    """reset_dedup 必须同步清事件状态，否则复位后首段触发被误判成旧段延续。"""
+    mon = _monitor(tmp_path)
+    t0 = NOW
+    _scan_stop(mon, now=t0)
+    mon.reset_dedup()
+    rows = _scan_stop(mon, now=t0 + _dt.timedelta(seconds=10))  # 窗口内（10s<300s）
+    # 去重哨兵也被清了 → 放行落盘
+    assert len(rows) == 1
+    assert rows[0]["first_hit"] is True, "复位后第一段必须是全新事件"
+
+
+def test_shadow_fields_order_carries_event_semantics():
+    """SHADOW_FIELDS 常量必须携带新字段且位置稳定（落盘格式契约）。"""
+    assert SHADOW_FIELDS[:3] == ("ts", "event_id", "first_hit"), (
+        "event_id/first_hit 必须紧跟 ts，位置属于落盘契约的一部分"
+    )

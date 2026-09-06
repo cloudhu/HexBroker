@@ -57,6 +57,7 @@ import io
 import os
 import subprocess
 import sys
+import time
 
 ROOT = r"E:\Workspace\HexBroker"
 PY = r"C:\Users\Administrator\.workbuddy\binaries\python\envs\default\Scripts\python.exe"
@@ -78,6 +79,10 @@ CONSOLE_LOG = os.path.join(ROOT, "logs", "paper_console.log")
 PID_FILE = os.path.join(ROOT, "data", "paper", "paper.pid")
 # ⛔ 锁区偏移**不在本文件另写一份字面量**——见 _engine_lock_offset()：运行时直接
 # 引用引擎模块的 _LOCK_OFFSET，使"两边各写一份、将来漂移"物理上不可能发生。
+
+# P3-3 慢预检告警阈值（秒）：非阻塞预检实测 ~0.01s，阻塞锁退化实测 ~9s，
+# 差 3 个数量级 → 2.0s 留足余量又不会漏报。只用于打印 WARN，不影响控制流。
+SLOW_PROBE_WARN_SEC = 2.0
 
 
 def _engine_creationflags() -> int:
@@ -351,7 +356,22 @@ def main(argv: "list[str] | None" = None) -> int:
     # （真引擎仍由第一个看门狗守护、不中断交易，但告警可信度被毁）。
     # 不带 --watchdog 时撞锁的引擎直接退出、无人重启，本来良性 → 默认路径零变更。
     if args.watchdog:
+        # P3-3 运行时慢预检告警：非阻塞预检实测 ~0.01s，退化成阻塞锁（LK_NBLCK
+        # 被换成 LK_LOCK）实测 ~9s 且**返回值语义完全不变**——时延护栏
+        # （test_lock_probe_returns_promptly_when_lock_held）只在跑测试时生效，
+        # 三个时段无人值守，这里补一条运行时信号。
+        # ⛔ R22：本告警**只打印，绝不改变控制流**——不许影响 running 判定、
+        # 不许 return/raise。宁可少一道护栏，不可全停。
+        probe_t0 = time.perf_counter()
         running = _engine_instance_running(PID_FILE)
+        probe_elapsed = time.perf_counter() - probe_t0
+        if probe_elapsed > SLOW_PROBE_WARN_SEC:
+            print(
+                f"[LAUNCH][WARN] 单实例预检耗时 {probe_elapsed:.2f}s，超过阈值 "
+                f"{SLOW_PROBE_WARN_SEC:.1f}s —— 典型成因是抢锁退化成阻塞锁"
+                f"（LK_NBLCK 被换成 LK_LOCK，返回值语义不变），"
+                f"请检查 _engine_instance_running() 的锁模式"
+            )
         if running is True:
             print(
                 f"[LAUNCH] 已有存活交易引擎实例（单实例锁 {PID_FILE}）——跳过本次拉起，"
