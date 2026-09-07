@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import datetime as _dt
 from datetime import datetime
 
@@ -585,3 +586,175 @@ def test_shadow_fields_order_carries_event_semantics():
     assert SHADOW_FIELDS[:3] == ("ts", "event_id", "first_hit"), (
         "event_id/first_hit 必须紧跟 ts，位置属于落盘契约的一部分"
     )
+
+
+# --------------------------------------------------------------------------- #
+# 8. P2-3 交叉复核补强（2026-09-06 QA 独立复核，fresh eyes）
+# --------------------------------------------------------------------------- #
+# 本节不是重复第 7 节，而是补第 7 节**没咬住**的三类变异：
+#   (a) _mark_event_closed 的跨品种清理范围（变异 M4 原为 SURVIVE）；
+#   (b) _event_lock / _lock 的嵌套持有（死锁面，静态看代码看不出来）；
+#   (c) 多品种并发下的事件状态串扰。
+# 判据：每个测试都必须能咬住一个明确的恶意改动（见交付报告的变异清单）。
+
+
+def test_closing_one_symbol_event_does_not_close_another(tmp_path):
+    """关闭 rb0 的事件段**绝不能**顺手关掉 cu0 的在跑事件段。
+
+    ⛔ 这是变异 M4（把 ``_mark_event_closed`` 里的 ``kind[0] != symbol``
+    过滤去掉）专门要打的场景：原测试集对它 SURVIVE —— 已有的
+    ``test_event_ids_isolated_across_symbols`` 只验了「开事件」不串扰，
+    没验「关事件」不串扰，故障形态是 cu0 明明从未离开触发区却被判成
+    新事件 → 事件数**高估**。
+    """
+    mon = _monitor(tmp_path)
+    t0 = NOW
+    r_rb = _scan_stop(mon, symbol="rb0", now=t0)      # rb0 事件 A 落盘
+    r_cu = _scan_stop(mon, symbol="cu0", now=t0)      # cu0 事件 B 落盘
+    assert len(r_rb) == 1 and len(r_cu) == 1
+    ev_cu = r_cu[0]["event_id"]
+
+    # rb0 离开触发区 → 只应关闭 **rb0** 的事件段
+    _scan_stop(mon, symbol="rb0", now=t0 + _dt.timedelta(seconds=301), price=3000.0)
+
+    # cu0 从未离开触发区（中间没有任何一次 cu0 的 scan 未命中）→ 仍是 B 段延续
+    r_cu2 = _scan_stop(mon, symbol="cu0", now=t0 + _dt.timedelta(seconds=602))
+    assert len(r_cu2) == 1, "距上次 emit 602s ≥ 300s 窗口，必须落盘"
+    assert r_cu2[0]["event_id"] == ev_cu, (
+        "rb0 关闭事件段时误清了 cu0 的状态 → cu0 被判成新事件（事件数高估）"
+    )
+    assert r_cu2[0]["first_hit"] is False, "cu0 是 B 段延续，不得再标首条"
+
+
+def test_event_and_disk_locks_are_never_nested(tmp_path):
+    """⛔ R22：``_event_lock`` 与去重/落盘 ``_lock`` 必须**永不同时持有**。
+
+    两条锁一旦嵌套（线程 1 持 ``_event_lock`` 等 ``_lock``、线程 2 持
+    ``_lock`` 等 ``_event_lock``）就是教科书级死锁，且只在多品种并发下偶发
+    —— 单测跑不出来、盘中直接全停。这里把「嵌套获取」变成可断言事件，
+    覆盖命中/去重/未命中/重新触发四条路径。
+    """
+    mon = _monitor(tmp_path)
+    held = {"_lock": False, "_event_lock": False}
+    violations: list[str] = []
+
+    class _ProbeLock:
+        def __init__(self, name: str, other: str) -> None:
+            self._real = threading.Lock()
+            self.name, self.other = name, other
+
+        def acquire(self, *a, **kw):
+            if held[self.other]:
+                violations.append(f"{self.name} 在已持有 {self.other} 时再次获取")
+            ok = self._real.acquire(*a, **kw)
+            if ok:
+                held[self.name] = True
+            return ok
+
+        def release(self) -> None:
+            held[self.name] = False
+            self._real.release()
+
+        def __enter__(self):
+            self.acquire()
+            return self
+
+        def __exit__(self, *exc):
+            self.release()
+            return False
+
+    mon._lock = _ProbeLock("_lock", "_event_lock")
+    mon._event_lock = _ProbeLock("_event_lock", "_lock")
+
+    t0 = NOW
+    _scan_stop(mon, now=t0)                                              # 命中 → 落盘
+    _scan_stop(mon, now=t0 + _dt.timedelta(seconds=301))                 # 命中 → 落盘
+    _scan_stop(mon, now=t0 + _dt.timedelta(seconds=302))                 # 命中 → 撞去重窗
+    _scan_stop(mon, now=t0 + _dt.timedelta(seconds=603), price=3000.0)   # 未命中 → 关闭事件段
+    _scan_stop(mon, now=t0 + _dt.timedelta(seconds=904))                 # 重新触发 → 新事件
+    assert not violations, f"检测到锁嵌套（死锁面）：{violations}"
+
+
+def test_event_state_isolated_across_symbols_under_concurrency(tmp_path):
+    """多品种并发扫描：每品种各自一条事件段，互不串扰（``_event_lock`` 有效性）。
+
+    关掉去重（``dedup_window_sec=0``）让每个 tick 都落盘，放大 races 窗口；
+    每个品种全程**未离开**触发区，故每个品种必须恰好 1 个 event_id、
+    恰好 1 条 ``first_hit=True``。
+    """
+    mon = _monitor(tmp_path, dedup_window_sec=0)
+    n = 120
+    errors: list[BaseException] = []
+
+    def _worker(symbol: str) -> None:
+        try:
+            for i in range(n):
+                _scan_stop(mon, symbol=symbol, now=NOW + _dt.timedelta(seconds=i))
+        except BaseException as exc:  # noqa: BLE001 — 收集后统一断言
+            errors.append(exc)
+
+    symbols = ("rb0", "cu0", "ag0")
+    threads = [threading.Thread(target=_worker, args=(s,)) for s in symbols]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors, f"并发扫描抛异常：{errors}"
+    rows = _read_rows(tmp_path)
+    by_symbol: dict[str, list[dict]] = {}
+    for r in rows:
+        by_symbol.setdefault(r["symbol"], []).append(r)
+    assert {s: len(by_symbol.get(s, [])) for s in symbols} == {s: n for s in symbols}, (
+        f"关去重后每品种应落盘 {n} 条"
+    )
+    for sym in symbols:
+        rs = by_symbol[sym]
+        ids = {r["event_id"] for r in rs}
+        assert len(ids) == 1, f"{sym} 全程未离开触发区，必须只有 1 个事件段，实际 {len(ids)}"
+        assert sum(1 for r in rs if r["first_hit"]) == 1, f"{sym} 必须只有一条 first_hit=True"
+
+
+@pytest.mark.xfail(
+    reason="已知缺陷 D2：持仓归零时 _shadow_stop_sweep 直接 continue，"
+           "在跑事件段永不关闭 → 后续新仓的首次触发被并进旧事件（事件数低估）",
+    strict=False,
+)
+def test_flat_position_closes_open_shadow_event(tmp_path):
+    """持仓归零（信号/风控平仓）后，该品种在跑的影子事件段必须关闭。
+
+    ``_shadow_stop_sweep`` 里 ``if abs(pos) <= 1e-12: continue`` 会**完全跳过**
+    ``monitor.scan`` —— 于是上一秒还在触发区的品种，事件段在内存里一直
+    「开着」。之后若再建仓并立刻跌破止损，会被判成旧事件段的延续
+    （``first_hit=False``、复用旧 event_id）→ 一次真实触发凭空消失，
+    事件数**低估**。与昨日修掉的「scan 未命中提前 return 绕过关闭」
+    是同一类缺陷，只是发生在调用层。
+    """
+    sched, _ctx = _scheduler(tmp_path)
+    mon = ShadowStopMonitor(path=tmp_path / "shadow_stops.jsonl")
+    sched._shadow_stops = mon
+
+    t0 = NOW
+    in_zone = _quote(2890.0)      # 低于止损 2900 → 触发
+    out_zone = _quote(3000.0)     # 回到止损上方 → 不触发
+
+    _open_long(sched, qty=1.0, price=3000.0, stop=2900.0)
+    sched._shadow_stop_sweep({"rb0": in_zone}, t0, MON)                  # 事件 A 落盘
+
+    # 持仓归零（等价于信号/风控平仓）
+    sched._broker.execute_plan(
+        Plan(symbol="rb0", direction=0, target_qty=0.0, target_pos_pct=0.0), out_zone, t0
+    )
+    assert abs(sched._broker.position("rb0")) <= 1e-12
+    sched._shadow_stop_sweep({"rb0": in_zone}, t0 + _dt.timedelta(seconds=301), MON)
+
+    # 重新建仓并再次跌破止损 → 必须是**新**事件
+    _open_long(sched, qty=1.0, price=3000.0, stop=2900.0)
+    sched._shadow_stop_sweep({"rb0": in_zone}, t0 + _dt.timedelta(seconds=602), MON)
+
+    rows = _read_rows(tmp_path)
+    assert len(rows) == 2, f"应落盘 2 条，实际 {len(rows)}"
+    assert rows[1]["event_id"] != rows[0]["event_id"], (
+        "持仓归零时事件段未关闭 → 新仓首次触发被并进旧事件（事件数低估）"
+    )
+    assert rows[1]["first_hit"] is True

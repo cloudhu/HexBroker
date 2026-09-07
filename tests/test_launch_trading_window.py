@@ -810,3 +810,30 @@ def test_spawn_enoent_propagates_immediately(tmp_path, monkeypatch):
         ltw_mod.main(argv=["--watchdog"])
     assert excinfo.value.errno == errno.ENOENT
     assert len(calls) == 1, "ENOENT 属确定性失败，重试无意义（只应尝试一次）"
+
+
+def test_slow_probe_does_not_force_launch_when_instance_running(tmp_path, monkeypatch, capsys):
+    """P3-3 R22 的**另一半**：慢预检 + 预检报「有存活实例」→ 照旧跳过拉起。
+
+    已有用例只钉了「慢告警不许拦下拉起」（``calls`` 非空）。本用例钉反向：
+    慢告警同样**不许逼着拉起** —— 告警分支只许 print，两个方向都不能越界。
+    （用假时钟而非真 sleep，避免给全量套件再加 2.5s。）
+    """
+    calls = []
+    _install_fake_popen(monkeypatch, calls)
+    _prepare(monkeypatch, tmp_path)
+
+    ticks = iter([0.0, 5.0])  # 首次 0.0，第二次 5.0 → probe_elapsed=5.0 > 2.0
+
+    def _fake_perf_counter() -> float:
+        return next(ticks, 5.0)
+
+    monkeypatch.setattr(ltw_mod.time, "perf_counter", _fake_perf_counter)
+    monkeypatch.setattr(ltw_mod, "_engine_instance_running", lambda *a, **k: True)
+
+    rc = ltw_mod.main(argv=["--watchdog"])
+
+    assert rc == 0
+    assert calls == [], "预检报有存活实例 → 慢预检告警绝不能变成强行拉起"
+    out = capsys.readouterr().out
+    assert "[LAUNCH][WARN] 单实例预检耗时" in out, "慢预检告警必须照常打印"
