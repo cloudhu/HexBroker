@@ -1,0 +1,225 @@
+{
+  "parent": {
+    "pid": 17840,
+    "GetConsoleWindow": 1247342,
+    "GetConsoleProcessList": 11
+  },
+  "results": {
+    "C0_0_inherit": {
+      "wb": {
+        "flags": "0x0",
+        "popen_pid": 8828,
+        "ctrl_break": "skipped_no_group",
+        "spawn": "ok",
+        "rc": 0,
+        "child": {
+          "pid": 9432,
+          "GetConsoleWindow": 1247342,
+          "GetConsoleProcessList": 7,
+          "sigbreak_register": "OK",
+          "stdout_ok": true,
+          "stderr_ok": true,
+          "ctrl_break_delivered": false
+        },
+        "stdout_has_ok": true,
+        "stderr_has_ok": true,
+        "err_log_tail": "STDERR-OK\n"
+      },
+      "hb": {
+        "spawn": "interp_missing: E:\\Workspace\\HexBroker\\.venv\\Scripts\\python.exe"
+      }
+    },
+    "C1_NPG_only": {
+      "wb": {
+        "flags": "0x200",
+        "popen_pid": 9328,
+        "ctrl_break": "sent",
+        "spawn": "ok",
+        "rc": 0,
+        "child": {
+          "pid": 2184,
+          "GetConsoleWindow": 1247342,
+          "GetConsoleProcessList": 7,
+          "sigbreak_register": "OK",
+          "stdout_ok": true,
+          "stderr_ok": true,
+          "ctrl_break_delivered": true
+        },
+        "stdout_has_ok": true,
+        "stderr_has_ok": true,
+        "err_log_tail": "STDERR-OK\n"
+      },
+      "hb": {
+        "spawn": "interp_missing: E:\\Workspace\\HexBroker\\.venv\\Scripts\\python.exe"
+      }
+    },
+    "C2_NOWIN_NPG_old_tier3": {
+      "wb": {
+        "flags": "0x8000200",
+        "popen_pid": 18612,
+        "ctrl_break": "sent",
+        "spawn": "ok",
+        "rc": 0,
+        "child": {
+          "pid": 20216,
+          "GetConsoleWindow": 0,
+          "GetConsoleProcessList": 2,
+          "sigbreak_register": "OK",
+          "stdout_ok": true,
+          "stderr_ok": true,
+          "ctrl_break_delivered": false
+        },
+        "stdout_has_ok": true,
+        "stderr_has_ok": true,
+        "err_log_tail": "STDERR-OK\n"
+      },
+      "hb": {
+        "spawn": "interp_missing: E:\\Workspace\\HexBroker\\.venv\\Scripts\\python.exe"
+      }
+    },
+    "C3_DETACHED_NPG": {
+      "wb": {
+        "flags": "0x208",
+        "popen_pid": 19688,
+        "ctrl_break": "sent",
+        "spawn": "ok",
+        "rc": 0,
+        "child": {
+          "pid": 19488,
+          "GetConsoleWindow": 4064166,
+          "GetConsoleProcessList": 1,
+          "sigbreak_register": "OK",
+          "stdout_ok": true,
+          "stderr_ok": true,
+          "ctrl_break_delivered": false
+        },
+        "stdout_has_ok": true,
+        "stderr_has_ok": true,
+        "err_log_tail": "STDERR-OK\n"
+      },
+      "hb": {
+        "spawn": "interp_missing: E:\\Workspace\\HexBroker\\.venv\\Scripts\\python.exe"
+      }
+    },
+    "C4_DETACHED_NOWIN_NPG_conflict": {
+      "wb": {
+        "flags": "0x8000208",
+        "popen_pid": 19384,
+        "ctrl_break": "sent",
+        "spawn": "ok",
+        "rc": 0,
+        "child": {
+          "pid": 16900,
+          "GetConsoleWindow": 4129702,
+          "GetConsoleProcessList": 1,
+          "sigbreak_register": "OK",
+          "stdout_ok": true,
+          "stderr_ok": true,
+          "ctrl_break_delivered": false
+        },
+        "stdout_has_ok": true,
+        "stderr_has_ok": true,
+        "err_log_tail": "STDERR-OK\n"
+      },
+      "hb": {
+        "spawn": "interp_missing: E:\\Workspace\\HexBroker\\.venv\\Scripts\\python.exe"
+      }
+    },
+    "C5_BREAKAWAY_NPG": {
+      "wb": {
+        "flags": "0x1000200",
+        "popen_pid": 17668,
+        "ctrl_break": "sent",
+        "spawn": "ok",
+        "rc": 0,
+        "child": {
+          "pid": 20448,
+          "GetConsoleWindow": 1247342,
+          "GetConsoleProcessList": 10,
+          "sigbreak_register": "OK",
+          "stdout_ok": true,
+          "stderr_ok": true,
+          "ctrl_break_delivered": true
+        },
+        "stdout_has_ok": true,
+        "stderr_has_ok": true,
+        "err_log_tail": "STDERR-OK\n"
+      },
+      "hb": {
+        "spawn": "interp_missing: E:\\Workspace\\HexBroker\\.venv\\Scripts\\python.exe"
+      }
+    },
+    "C6_BREAKAWAY_NOWIN_NPG": {
+      "wb": {
+        "flags": "0x9000200",
+        "popen_pid": 11488,
+        "ctrl_break": "sent",
+        "spawn": "ok",
+        "rc": 0,
+        "child": {
+          "pid": 17664,
+          "GetConsoleWindow": 0,
+          "GetConsoleProcessList": 2,
+          "sigbreak_register": "OK",
+          "stdout_ok": true,
+          "stderr_ok": true,
+          "ctrl_break_delivered": false
+        },
+        "stdout_has_ok": true,
+        "stderr_has_ok": true,
+        "err_log_tail": "STDERR-OK\n"
+      },
+      "hb": {
+        "spawn": "interp_missing: E:\\Workspace\\HexBroker\\.venv\\Scripts\\python.exe"
+      }
+    },
+    "C7_DETACHED_BREAKAWAY_NPG": {
+      "wb": {
+        "flags": "0x1000208",
+        "popen_pid": 5264,
+        "ctrl_break": "sent",
+        "spawn": "ok",
+        "rc": 0,
+        "child": {
+          "pid": 15432,
+          "GetConsoleWindow": 1247242,
+          "GetConsoleProcessList": 1,
+          "sigbreak_register": "OK",
+          "stdout_ok": true,
+          "stderr_ok": true,
+          "ctrl_break_delivered": false
+        },
+        "stdout_has_ok": true,
+        "stderr_has_ok": true,
+        "err_log_tail": "STDERR-OK\n"
+      },
+      "hb": {
+        "spawn": "interp_missing: E:\\Workspace\\HexBroker\\.venv\\Scripts\\python.exe"
+      }
+    },
+    "C8_tier1_full": {
+      "wb": {
+        "flags": "0x9000208",
+        "popen_pid": 15856,
+        "ctrl_break": "sent",
+        "spawn": "ok",
+        "rc": 0,
+        "child": {
+          "pid": 15404,
+          "GetConsoleWindow": 4326310,
+          "GetConsoleProcessList": 1,
+          "sigbreak_register": "OK",
+          "stdout_ok": true,
+          "stderr_ok": true,
+          "ctrl_break_delivered": false
+        },
+        "stdout_has_ok": true,
+        "stderr_has_ok": true,
+        "err_log_tail": "STDERR-OK\n"
+      },
+      "hb": {
+        "spawn": "interp_missing: E:\\Workspace\\HexBroker\\.venv\\Scripts\\python.exe"
+      }
+    }
+  }
+}

@@ -393,33 +393,47 @@ def test_log_handle_closed_even_when_spawn_fails(tmp_path, monkeypatch):
 
 # ---------------------------------------------------------------------------
 # ⑨ 2026-09-07「进程被外部回收」修复：子进程创建标志降级链 + fail-open
+#    （晚间补丁：真值表实验后重排——DETACHED_PROCESS 全链禁用）
 # ---------------------------------------------------------------------------
 # 与 launch_trading_window.py 同一套口径（两条链数值必须一致，见
-# test_child_tiers_match_launcher_tiers）：最强一组带 DETACHED_PROCESS +
-# CREATE_BREAKAWAY_FROM_JOB，被 OS 拒绝时降级重试。
+# test_child_tiers_match_launcher_tiers）：第 1/2 级为真值表实测的「无窗口
+# console」家族（子进程 GetConsoleWindow()==0，收不到 CTRL_CLOSE_EVENT）；
+# DETACHED_PROCESS(0x8) 真值表定罪（经 venv 重定向器链路让真引擎重新挂上
+# 带窗 console）全链禁用；BREAKAWAY 被 OS 拒绝时降级重试。
 #
 # ⛔ 为什么看门狗这一层**尤其**需要 fail-open：看门狗把「子进程启动失败」计入
 # crash_count 并退避重试，若 BREAKAWAY 在每次重试时都失败，会连刷 10 次假的
 # [CRITICAL] 连续崩溃——正是 P1-1 花一整轮才消灭的告警污染形态，而且真因
 # （一条 WinError 5）会被淹没在 10 条 CRITICAL 里。
 #
-# ⛔ 断言引用 subprocess.DETACHED_PROCESS / CREATE_BREAKAWAY_FROM_JOB
-#    （Windows-only 常量），必须带 _WIN_ONLY，否则 CI ubuntu runner 会红。
+# ⛔ 断言引用 subprocess.CREATE_*（Windows-only 常量），必须带 _WIN_ONLY，
+#    否则 CI ubuntu runner 会红。
 _WD_WIN_ONLY = pytest.mark.skipif(
     not sys.platform.startswith("win"),
-    reason="Windows 专属契约（DETACHED_PROCESS / CREATE_BREAKAWAY_FROM_JOB）；POSIX 无此概念",
+    reason="Windows 专属契约（subprocess.CREATE_* 常量）；POSIX 无此概念",
 )
 
 
 def test_child_creationflags_tiers_platform_shape():
-    """跨平台形状：POSIX 恒 [0]；Windows 3 级且单调降级，末级 == 旧值。"""
+    """跨平台形状：POSIX 恒 [0]；Windows 3 级单调降级，全链无 DETACHED_PROCESS。"""
     tiers = wd_mod._child_creationflags_tiers()
     assert tiers, "降级链不得为空（空链 = 永远拉不起子进程）"
     if sys.platform.startswith("win"):
         assert len(tiers) == 3
         for i in range(len(tiers) - 1):
             assert tiers[i + 1] & ~tiers[i] == 0, "降级链只许做减法"
-        assert tiers[-1] == wd_mod._CHILD_CREATIONFLAGS
+        assert tiers[0] == (
+            subprocess.CREATE_BREAKAWAY_FROM_JOB
+            | subprocess.CREATE_NO_WINDOW
+            | subprocess.CREATE_NEW_PROCESS_GROUP
+        ), f"第 1 级必须 = BREAKAWAY|NO_WINDOW|NPG（真值表 C6），实际 0x{tiers[0]:08X}"
+        assert tiers[-1] == subprocess.CREATE_NEW_PROCESS_GROUP, (
+            "末级必须退到仅 CREATE_NEW_PROCESS_GROUP（fail-open 兜底，R22）"
+        )
+        for i, flags in enumerate(tiers):
+            assert not (flags & 0x00000008), (
+                f"第 {i + 1} 级含 DETACHED_PROCESS(0x8)——真值表已定罪，全链禁用"
+            )
     else:
         assert tiers == [0], "POSIX 上 creationflags 非 0 会被 CPython 直接 ValueError"
 
@@ -444,12 +458,16 @@ def test_child_tiers_match_launcher_tiers():
 
 
 @_WD_WIN_ONLY
-def test_child_flags_include_detach_and_breakaway():
-    flags = wd_mod._child_creationflags_tiers()[0]
-    assert flags & subprocess.DETACHED_PROCESS
-    assert flags & subprocess.CREATE_BREAKAWAY_FROM_JOB
-    assert flags & subprocess.CREATE_NO_WINDOW
-    assert flags & subprocess.CREATE_NEW_PROCESS_GROUP
+def test_child_flags_exclude_detached_and_pin_windowless_tier1():
+    """真值表关键断言：无窗口家族占前两级，DETACHED_PROCESS 全链禁用。"""
+    tiers = wd_mod._child_creationflags_tiers()
+    assert tiers[0] == 0x09000200, f"tier-1 必须是真值表 C6（0x9000200），实际 0x{tiers[0]:08X}"
+    assert tiers[1] == 0x08000200, f"tier-2 必须是真值表 C2（0x8000200），实际 0x{tiers[1]:08X}"
+    for i, flags in enumerate(tiers):
+        assert not (flags & 0x00000008), (
+            f"第 {i + 1} 级含 DETACHED_PROCESS——真值表 C3/C4/C7/C8 实测全部"
+            f"让真引擎重新挂上带窗 console（GetConsoleWindow()≠0）"
+        )
 
 
 @_WD_WIN_ONLY
@@ -479,10 +497,42 @@ def test_spawn_child_falls_back_when_breakaway_rejected(tmp_path):
         wd_mod.subprocess.Popen = orig
 
     assert len(calls) == 2, "应恰好降级重试一次"
+    assert flags == 0x08000200, f"降级后应 = tier-2（真值表 C2 无窗口），实际 0x{flags:08X}"
     assert not (flags & subprocess.CREATE_BREAKAWAY_FROM_JOB)
-    assert flags & subprocess.DETACHED_PROCESS
+    assert not (flags & 0x00000008), "降级链任何一级都不得引入 DETACHED_PROCESS"
     assert calls[0]["stdout"] is calls[1]["stdout"], "降级重试必须复用同一日志句柄"
     assert any("[WATCHDOG][WARN]" in m for m in logs), "降级必须留痕"
+
+
+@_WD_WIN_ONLY
+def test_spawn_child_falls_back_to_npg_only_when_windowless_rejected(tmp_path):
+    """NO_WINDOW 也被拒 → 降到仅 CREATE_NEW_PROCESS_GROUP（fail-open 兜底，R22）。"""
+    calls = []
+
+    class _FakeProc:
+        returncode = 0
+
+        def __init__(self, cmd, **kw):
+            calls.append(kw)
+            if kw.get("creationflags", 0) & (
+                subprocess.CREATE_NO_WINDOW | subprocess.CREATE_BREAKAWAY_FROM_JOB
+            ):
+                raise OSError(5, "拒绝访问")
+
+        def poll(self):
+            return 0
+
+    orig = wd_mod.subprocess.Popen
+    wd_mod.subprocess.Popen = _FakeProc
+    try:
+        log_fh = tmp_path / "paper_console.log"
+        with open(log_fh, "a", encoding="utf-8") as fh:
+            proc, flags = wd_mod._spawn_child(["x"], fh, lambda m: None)
+    finally:
+        wd_mod.subprocess.Popen = orig
+
+    assert len(calls) == 3, "两级被拒后应降到第 3 级"
+    assert flags == subprocess.CREATE_NEW_PROCESS_GROUP
 
 
 @_WD_WIN_ONLY
@@ -505,3 +555,115 @@ def test_spawn_child_all_tiers_fail_raises(tmp_path):
         wd_mod.subprocess.Popen = orig
 
     assert len(calls) == len(wd_mod._child_creationflags_tiers())
+
+
+# ---------------------------------------------------------------------------
+# ⑩ 2026-09-07 死亡取证增强（B-3）：子进程异常退出时写一行
+#    [WATCHDOG][FORENSIC]（rc + runtime + 所用标志 + 疑似死因）。
+#    ⛔ 取证是旁路增强：诊断函数内部一切失败都 fail-open 成「未知…」，
+#    绝不影响重启决策（R22）——下面两条 fail-open 用例钉死这一前提。
+# ---------------------------------------------------------------------------
+def test_diagnose_child_death_window_close_marker(tmp_path):
+    """日志尾部出现 forrtl window-CLOSE → 死因指向 CTRL_CLOSE_EVENT（console 被关）。"""
+    log = tmp_path / "paper_console.log"
+    log.write_text(
+        "正常启动行...\nforrtl: error (200): window-CLOSE\n", encoding="utf-8"
+    )
+    verdict = wd_mod._diagnose_child_death(1, console_log_path=log)
+    assert "window-CLOSE" in verdict, f"应指向 window-CLOSE，实际：{verdict}"
+
+
+def test_diagnose_child_death_traceback_marker(tmp_path):
+    log = tmp_path / "paper_console.log"
+    log.write_text("...\nTraceback (most recent call last):\n  ...\n", encoding="utf-8")
+    verdict = wd_mod._diagnose_child_death(1, console_log_path=log)
+    assert "Python" in verdict and "异常" in verdict, f"应指向 Python 异常，实际：{verdict}"
+
+
+def test_diagnose_child_death_clean_log_falls_back_to_rc_semantics(tmp_path):
+    """日志无已知特征：rc=1 → 提示启动早期失败；未知 rc → 明说「未知」。"""
+    log = tmp_path / "paper_console.log"
+    log.write_text("一切正常输出\n", encoding="utf-8")
+    assert "启动早期失败" in wd_mod._diagnose_child_death(1, console_log_path=log)
+    assert "未知" in wd_mod._diagnose_child_death(-9, console_log_path=log)
+
+
+def test_diagnose_child_death_status_control_c_exit(tmp_path):
+    """0xC000013A（控制台 CTRL 事件终止）即使日志无特征也要点名。"""
+    log = tmp_path / "paper_console.log"
+    log.write_text("无特征输出\n", encoding="utf-8")
+    for rc in (3221225786, -1073741510):
+        verdict = wd_mod._diagnose_child_death(rc, console_log_path=log)
+        assert "0xC000013A" in verdict, f"rc={rc} 应点名 STATUS_CONTROL_C_EXIT，实际：{verdict}"
+
+
+def test_diagnose_child_death_missing_log_is_fail_open(tmp_path):
+    """⛔ R22：日志读不到必须返回「未知…」而不是抛错——取证绝不能影响重启决策。"""
+    verdict = wd_mod._diagnose_child_death(1, console_log_path=tmp_path / "nope.log")
+    assert verdict.startswith("未知")
+
+
+def test_run_writes_forensic_line_once_on_crash(tmp_path, monkeypatch):
+    """集成：run() 检测到子进程崩溃（rc!=0）时恰好写一条 [WATCHDOG][FORENSIC]。
+
+    ⛔ 只读真实 paper_console.log 的尾部做诊断（fail-open），但断言只钉
+    「有这条 + 含 rc/flags」——日志内容本身不注入断言，保证用例与仓库
+    日志状态无关（hermetic）。
+    """
+    logs = []
+    opened = []
+
+    class _FakeProc:
+        returncode = 1
+        pid = 424242
+
+        def poll(self):
+            return 1  # 一轮 poll 即「已死」
+
+    def _fake_open_child_log():
+        fh = open(tmp_path / "child_console.log", "a", encoding="utf-8", buffering=1)
+        opened.append(fh)
+        return fh
+
+    monkeypatch.setattr(
+        wd_mod, "_spawn_child", lambda cmd, fh, log_fn: (_FakeProc(), 0x09000200)
+    )
+    monkeypatch.setattr(wd_mod, "_open_child_log", _fake_open_child_log)
+
+    wd = wd_mod.Watchdog(["x"], max_restarts=1, sleep_fn=lambda s: None, log_fn=logs.append)
+    rc = wd.run()
+
+    assert rc == 1, "max_restarts=1 的崩溃应直接达上限停止"
+    forensic = [m for m in logs if "[WATCHDOG][FORENSIC]" in m]
+    assert len(forensic) == 1, f"应恰好一条取证行，实际 {len(forensic)} 条：{forensic}"
+    assert "rc=1" in forensic[0]
+    assert "0x09000200" in forensic[0], "取证行必须带上本次 spawn 实际使用的创建标志"
+    for fh in opened:
+        assert fh.closed, "日志句柄契约（P2-2）：run() 必须 close 子日志句柄"
+
+
+def test_run_no_forensic_line_on_clean_exit(tmp_path, monkeypatch):
+    """rc==0 正常退出不是「死亡」，不得刷取证行（避免噪音淹没真异常）。"""
+    logs = []
+
+    class _FakeProc:
+        returncode = 0
+        pid = 424243
+
+        def poll(self):
+            return 0
+
+    monkeypatch.setattr(
+        wd_mod, "_spawn_child", lambda cmd, fh, log_fn: (_FakeProc(), 0x08000200)
+    )
+    monkeypatch.setattr(
+        wd_mod,
+        "_open_child_log",
+        lambda: open(tmp_path / "child_console.log", "a", encoding="utf-8", buffering=1),
+    )
+
+    wd = wd_mod.Watchdog(["x"], sleep_fn=lambda s: None, log_fn=logs.append)
+    rc = wd.run()
+
+    assert rc == 0
+    assert not [m for m in logs if "[WATCHDOG][FORENSIC]" in m], "正常退出不得出现取证行"

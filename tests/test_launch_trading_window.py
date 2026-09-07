@@ -12,10 +12,12 @@
 ⑧ 抢锁**非阻塞**前提的时延断言（QA 发现后 team-lead 点名）：换成阻塞锁时
    返回值语义完全不变、19 条用例仍全绿，只有耗时从 0.01s 涨到 ~9s，
    故必须断言「持锁时 <1s 返回」——纯返回值断言抓不到这个退化。
-⑨ 2026-09-07「进程被外部回收」修复：创建标志**降级链** —— 最强一组含
-   DETACHED_PROCESS + CREATE_BREAKAWAY_FROM_JOB；被 OS 拒绝时必须 fail-open
-   降级重试，绝不让护栏变成「引擎拉不起来」（R22）；全链失败必须抛出，
-   绝不静默返回成功。
+⑨ 2026-09-07「进程被外部回收」修复（晚间补丁：真值表实验后重排）：创建标志
+   **降级链** 0x9000200 → 0x8000200 → 0x200；前两级为真值表实测的「无窗口
+   console」家族（收不到 CTRL_CLOSE_EVENT）；DETACHED_PROCESS(0x8) 经真值表
+   定罪（经 venv 重定向器链路让真引擎重新挂上带窗 console）**全链禁用**；
+   BREAKAWAY 被 OS 拒绝时必须 fail-open 降级重试，绝不让护栏变成「引擎拉
+   不起来」（R22）；全链失败必须抛出，绝不静默返回成功。
 """
 from __future__ import annotations
 
@@ -621,21 +623,28 @@ def test_lock_probe_returns_promptly_when_lock_held(tmp_path):
 
 # ---------------------------------------------------------------------------
 # ⑨ 2026-09-07「进程被外部回收」修复：创建标志降级链 + fail-open
+#    （晚间补丁：真值表实验后重排——DETACHED_PROCESS 全链禁用）
 # ---------------------------------------------------------------------------
-# 背景：08:44 拉起的看门狗/引擎在 shell 会话结束时被一并清理（日志无 traceback、
-# 看门狗无重启记录、心跳精确冻结在会话 teardown 时刻）。修复方向是叠加 Windows
-# 脱离语义（DETACHED_PROCESS / CREATE_BREAKAWAY_FROM_JOB），但 BREAKAWAY 在
-# Job 未授权时会让 CreateProcess **直接失败**——「加护栏」反而变成「拉不起来」，
-# 属 R22 明令禁止的新增全停失效模式。故必须是**链**且必须 fail-open。
+# 背景：08:44 拉起的看门狗/引擎在 shell 会话结束时被一并清理；今日 paper_console.log
+# 又出现 4 次 ``forrtl: error (200): window-CLOSE``。真值表实验（9 组标志 ×
+# 生产同款 venv 重定向器解释器，artifacts/_tmp/probe_console_flags.py）测得：
+#   - 唯一「真·无 console 窗口」（GetConsoleWindow()==0，收不到 CTRL_CLOSE_EVENT）
+#     的家族是 CREATE_NO_WINDOW **且不含 DETACHED_PROCESS**（C6=0x9000200、C2=0x8000200）；
+#   - 凡含 DETACHED_PROCESS(0x8) 的组合（C3/C4/C7/C8，含旧 tier-1 全家桶 0x9000208）
+#     经重定向器链路会让**真引擎重新挂上一条带窗口的新 console**（GetConsoleWindow()≠0）
+#     ——这就是 window-CLOSE 拦不住的根因，故全链禁用并删除该常量。
+# 且 BREAKAWAY 在 Job 未授权时会让 CreateProcess **直接失败**——「加护栏」反而
+# 变成「拉不起来」，属 R22 明令禁止的新增全停失效模式。故必须是**链**且必须 fail-open。
 #
-# ⛔ 这些断言清一色是 Windows 专属（引用 subprocess.DETACHED_PROCESS /
-#    CREATE_BREAKAWAY_FROM_JOB，POSIX 上 AttributeError），必须带 _WIN_ONLY，
+# ⛔ 涉及 Windows-only 常量（subprocess.CREATE_* 等）的断言必须带 _WIN_ONLY，
 #    否则 CI ubuntu runner 会红（2026-09-06 已因此修过一轮）。
 def test_creationflags_tiers_platform_shape():
     """跨平台形状断言（本条**不带** skipif，CI 也要跑）。
 
-    - Windows：3 级、单调降级（每级是前一级的子集）、末级 == 2026-09-06 前的
-      旧值（NPG|NO_WINDOW）——保证最坏情况退回到「已验证可拉起」的行为；
+    - Windows：3 级、单调降级（每级是前一级的子集）、
+      第 1 级 == 无窗口 console + 进程组 + BREAKAWAY（真值表 C6），
+      末级 == 仅 CREATE_NEW_PROCESS_GROUP（fail-open 兜底），
+      且**每一级都不得含 DETACHED_PROCESS(0x8)**（真值表定罪，全链禁用）；
     - POSIX：必须是 ``[0]`` 且 ``_engine_creationflags() == 0``。CPython 在
       POSIX 分支上对 ``creationflags != 0`` **直接 raise ValueError**，不是忽略
       ——旧实现无条件返回 Windows 常量，Linux 上任何真实 spawn 都会当场抛错。
@@ -650,9 +659,20 @@ def test_creationflags_tiers_platform_shape():
                 f"第 {i + 2} 级(0x{tiers[i + 1]:08X}) 必须是第 {i + 1} 级"
                 f"(0x{tiers[i]:08X}) 的子集——降级链只许做减法"
             )
-        assert tiers[-1] == (ltw_mod.CREATE_NEW_PROCESS_GROUP | ltw_mod.CREATE_NO_WINDOW), (
-            "末级必须退回到 2026-09-06 前的旧标志（已验证可拉起），否则降级失去意义"
+        assert tiers[0] == (
+            subprocess.CREATE_BREAKAWAY_FROM_JOB
+            | subprocess.CREATE_NO_WINDOW
+            | subprocess.CREATE_NEW_PROCESS_GROUP
+        ), f"第 1 级必须 = BREAKAWAY|NO_WINDOW|NPG（真值表 C6），实际 0x{tiers[0]:08X}"
+        assert tiers[-1] == subprocess.CREATE_NEW_PROCESS_GROUP, (
+            "末级必须退到仅 CREATE_NEW_PROCESS_GROUP（fail-open 兜底：NO_WINDOW "
+            "万一被拒也照常拉起，R22）"
         )
+        for i, flags in enumerate(tiers):
+            assert not (flags & 0x00000008), (
+                f"第 {i + 1} 级含 DETACHED_PROCESS(0x8)——真值表已定罪（经 venv "
+                f"重定向器链路让真引擎重新挂上带窗 console），全链禁用"
+            )
     else:
         assert tiers == [0], (
             "POSIX 上 creationflags 非 0 会被 CPython 直接 ValueError，必须恒为 [0]"
@@ -663,17 +683,34 @@ def test_creationflags_tiers_platform_shape():
 
 
 @_WIN_ONLY
-def test_engine_creationflags_include_detach_and_breakaway():
-    """最强一组必须含 DETACHED_PROCESS + CREATE_BREAKAWAY_FROM_JOB，且不带可见窗口。"""
-    flags = ltw_mod._engine_creationflags_tiers()[0]
-    assert flags & subprocess.DETACHED_PROCESS, "缺少 DETACHED_PROCESS（脱离父控制台）"
-    assert flags & subprocess.CREATE_BREAKAWAY_FROM_JOB, (
-        "缺少 CREATE_BREAKAWAY_FROM_JOB（脱离父 Job Object）"
+def test_truth_table_windowless_family_is_tier1_tier2():
+    """真值表关键断言（2026-09-07 实测，deliverables/2026-09-07_console_flags_truth_table.json）。
+
+    - C6=0x9000200（BRK|NO_WINDOW|NPG）与 C2=0x8000200（NO_WINDOW|NPG）是
+      9 组中**仅有的**「子进程 GetConsoleWindow()==0」组合（无窗口可关 =
+      收不到 CTRL_CLOSE_EVENT）→ 必须占据链的前两级；
+    - 任何含 DETACHED_PROCESS(0x8) 的组合（C3/C4/C7/C8）实测子进程
+      GetConsoleWindow()≠0（重定向器链路下真引擎重新获得带窗 console）→
+      全链禁用（连常量都已从 launcher 删除，回归若重新引入当场红）。
+    """
+    tiers = ltw_mod._engine_creationflags_tiers()
+    assert tiers[0] == 0x09000200, (
+        f"tier-1 必须是真值表 C6（0x9000200，无窗口 console 家族），实际 0x{tiers[0]:08X}"
     )
-    # 原有语义一个都不能丢
-    assert flags & subprocess.CREATE_NO_WINDOW
-    assert flags & subprocess.CREATE_NEW_PROCESS_GROUP
-    assert not (flags & ltw_mod.CREATE_NEW_CONSOLE)
+    assert tiers[1] == 0x08000200, (
+        f"tier-2 必须是真值表 C2（0x8000200，无窗口 console 家族），实际 0x{tiers[1]:08X}"
+    )
+    for i, flags in enumerate(tiers):
+        assert not (flags & 0x00000008), f"第 {i + 1} 级含 DETACHED_PROCESS（真值表 C3/C4/C7/C8 均失败）"
+        assert not (flags & ltw_mod.CREATE_NEW_CONSOLE), "任何一级都不得带可见窗口标志"
+
+
+@_WIN_ONLY
+def test_engine_creationflags_still_windowless_base():
+    """旧契约保持：_engine_creationflags()（= 第 2 级）仍是 NPG|NO_WINDOW。"""
+    flags = ltw_mod._engine_creationflags()
+    assert flags == (ltw_mod.CREATE_NEW_PROCESS_GROUP | ltw_mod.CREATE_NO_WINDOW)
+    assert not (flags & 0x00000008), "DETACHED_PROCESS 已全链禁用，基础值同样不得携带"
 
 
 def _install_fake_popen_selective(monkeypatch, calls, reject):
@@ -699,7 +736,7 @@ def _install_fake_popen_selective(monkeypatch, calls, reject):
     monkeypatch.setattr(ltw_mod.subprocess, "Popen", _FakeProc)
 
 
-def _prepare_detached(monkeypatch, tmp_path):
+def _prepare_ready(monkeypatch, tmp_path):
     """``_prepare`` + 把单实例预检固定为「无存活实例」。
 
     ⛔ 为什么必须钉死：本组用例断言的是 **Popen 被尝试了几次**，而预检一旦报
@@ -712,19 +749,20 @@ def _prepare_detached(monkeypatch, tmp_path):
 
 
 @_WIN_ONLY
-def test_main_spawns_with_full_detach_flags(tmp_path, monkeypatch):
-    """正常路径：main() 必须用**最强一组**标志拉起（未降级）。"""
+def test_main_spawns_with_tier1_windowless_flags(tmp_path, monkeypatch):
+    """正常路径：main() 必须用**第 1 级**（真值表 C6，无窗口 console）拉起。"""
     calls = []
     _install_fake_popen_selective(monkeypatch, calls, lambda flags: False)
-    _prepare_detached(monkeypatch, tmp_path)
+    _prepare_ready(monkeypatch, tmp_path)
 
     assert ltw_mod.main(argv=["--watchdog"]) == 0
     assert len(calls) == 1, "未被拒绝时不得出现多余的重试"
     flags = calls[0]["creationflags"]
-    assert flags & subprocess.DETACHED_PROCESS
+    assert flags == 0x09000200, f"必须用 tier-1（0x9000200），实际 0x{flags:08X}"
     assert flags & subprocess.CREATE_BREAKAWAY_FROM_JOB
     assert flags & subprocess.CREATE_NO_WINDOW
     assert flags & subprocess.CREATE_NEW_PROCESS_GROUP
+    assert not (flags & 0x00000008), "DETACHED_PROCESS 已真值表定罪，正常路径同样不得出现"
 
 
 @_WIN_ONLY
@@ -739,31 +777,40 @@ def test_spawn_falls_back_when_breakaway_rejected(tmp_path, monkeypatch, capsys)
         monkeypatch, calls,
         lambda flags: bool(flags & subprocess.CREATE_BREAKAWAY_FROM_JOB),
     )
-    _prepare_detached(monkeypatch, tmp_path)
+    _prepare_ready(monkeypatch, tmp_path)
 
     rc = ltw_mod.main(argv=["--watchdog"])
     assert rc == 0, "标志被拒必须降级重试成功，绝不能变成启动失败"
     assert len(calls) == 2, "应恰好重试一次"
     assert calls[0]["creationflags"] & subprocess.CREATE_BREAKAWAY_FROM_JOB
     fallback = calls[1]["creationflags"]
+    assert fallback == 0x08000200, (
+        f"降级后应 = tier-2（0x8000200，真值表 C2 无窗口 console），实际 0x{fallback:08X}"
+    )
     assert not (fallback & subprocess.CREATE_BREAKAWAY_FROM_JOB), "降级后必须去掉失败的那一位"
-    assert fallback & subprocess.DETACHED_PROCESS, "只降级失败位，DETACHED 应保留"
-    assert fallback & subprocess.CREATE_NO_WINDOW and fallback & subprocess.CREATE_NEW_PROCESS_GROUP
+    assert not (fallback & 0x00000008), "降级链任何一级都不得引入 DETACHED_PROCESS"
     assert "[LAUNCH][WARN]" in capsys.readouterr().out, "降级必须留痕，否则运维无从知晓"
 
 
 @_WIN_ONLY
-def test_spawn_falls_back_to_legacy_when_only_legacy_allowed(tmp_path, monkeypatch):
-    """连 DETACHED 也被拒 → 必须一路降到**旧标志**（2026-09-06 前，已验证可拉起）。"""
+def test_spawn_falls_back_to_npg_only_when_windowless_rejected(tmp_path, monkeypatch):
+    """NO_WINDOW 也被拒 → 必须降到仅 CREATE_NEW_PROCESS_GROUP（fail-open 兜底）。
+
+    兜底语义（R22）：第 3 级不再追求「无窗口」，宁要「可被关窗杀」也要把
+    引擎拉起来——拉不起来才是最坏的失效模式。
+    """
     calls = []
-    legacy = ltw_mod.CREATE_NEW_PROCESS_GROUP | ltw_mod.CREATE_NO_WINDOW
-    _install_fake_popen_selective(monkeypatch, calls, lambda flags: flags != legacy)
-    _prepare_detached(monkeypatch, tmp_path)
+    npg_only = subprocess.CREATE_NEW_PROCESS_GROUP
+    _install_fake_popen_selective(
+        monkeypatch, calls,
+        lambda flags: bool(flags & (subprocess.CREATE_NO_WINDOW | subprocess.CREATE_BREAKAWAY_FROM_JOB)),
+    )
+    _prepare_ready(monkeypatch, tmp_path)
 
     rc = ltw_mod.main(argv=["--watchdog"])
     assert rc == 0
     assert len(calls) == 3, "两级被拒后应降到第 3 级"
-    assert calls[-1]["creationflags"] == legacy
+    assert calls[-1]["creationflags"] == npg_only
 
 
 @_WIN_ONLY
@@ -775,7 +822,7 @@ def test_spawn_all_tiers_fail_raises_no_silent_success(tmp_path, monkeypatch):
     """
     calls = []
     _install_fake_popen_selective(monkeypatch, calls, lambda flags: True)
-    _prepare_detached(monkeypatch, tmp_path)
+    _prepare_ready(monkeypatch, tmp_path)
 
     with pytest.raises(OSError):
         ltw_mod.main(argv=["--watchdog"])
@@ -804,7 +851,7 @@ def test_spawn_enoent_propagates_immediately(tmp_path, monkeypatch):
             return 0
 
     monkeypatch.setattr(ltw_mod.subprocess, "Popen", _FakeProc)
-    _prepare_detached(monkeypatch, tmp_path)
+    _prepare_ready(monkeypatch, tmp_path)
 
     with pytest.raises(OSError) as excinfo:
         ltw_mod.main(argv=["--watchdog"])

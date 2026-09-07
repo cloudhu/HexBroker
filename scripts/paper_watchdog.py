@@ -49,19 +49,31 @@ ROOT = Path(__file__).resolve().parents[1]
 # counter.txt 永不生成）。POSIX 上传 0（creationflags 参数被忽略，行为正确）。
 if sys.platform.startswith("win"):
     _CHILD_CREATIONFLAGS = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
-    # 2026-09-07 新增「脱离」语义（与 launch_trading_window.py 同一套口径）：
-    # - DETACHED_PROCESS：子进程不继承看门狗的控制台；
-    # - CREATE_BREAKAWAY_FROM_JOB：子进程不继承看门狗所在的 Job Object。
-    _CHILD_DETACHED_PROCESS = subprocess.DETACHED_PROCESS
+    # 2026-09-07 真值表修订（与 launch_trading_window.py 同一套口径）：
+    # - CREATE_BREAKAWAY_FROM_JOB：子进程不继承看门狗所在的 Job Object；
+    #   Job 未授权时 CreateProcess 会失败 → 只放降级链第 1 级，失败即降级。
+    # ⛔ DETACHED_PROCESS **全面禁用**（真值表定罪，2026-09-07）：生产解释器是
+    #   venv 重定向器（Scripts\python.exe → 真解释器），Popen 的 creationflags
+    #   不会传给重定向器再拉起的真解释器；重定向器无 console 后，Windows 会给
+    #   真引擎**新建一条带窗口的 console**（GetConsoleWindow()≠0）→ 引擎重新
+    #   可被 window-CLOSE 杀死——这正是旧 tier-1 全家桶（0x9000208）拦不住
+    #   ``forrtl: error (200): window-CLOSE`` 的根因。本文件不再保留该常量。
     _CHILD_BREAKAWAY_FROM_JOB = subprocess.CREATE_BREAKAWAY_FROM_JOB
 else:  # POSIX：无「窗口/Job」概念，独立进程组语义由 POSIX 进程模型天然满足
     _CHILD_CREATIONFLAGS = 0
-    _CHILD_DETACHED_PROCESS = 0
     _CHILD_BREAKAWAY_FROM_JOB = 0
 
 
 def _child_creationflags_tiers() -> list[int]:
     """子进程创建标志**降级链**（最强 → 最弱），与 launcher 口径一致。
+
+    链（真值表 2026-09-07 实测，``deliverables/2026-09-07_console_flags_truth_table.json``）：
+
+    1. ``BREAKAWAY | NO_WINDOW | NPG``（C6=0x9000200）：子进程
+       ``GetConsoleWindow()==0``——无窗口可关，物理上收不到 CTRL_CLOSE_EVENT；
+    2. ``NO_WINDOW | NPG``（C2=0x8000200，即 :data:`_CHILD_CREATIONFLAGS`）：
+       同为无窗口 console 家族；
+    3. 仅 ``NPG``：fail-open 兜底（NO_WINDOW 万一被拒也照常拉起，R22）。
 
     ⛔ 为什么不能只用一个「最强」值：``CREATE_BREAKAWAY_FROM_JOB`` 在所在 Job
     未授予 breakaway 权限时会让 ``CreateProcess`` **直接失败**（WinError 5），
@@ -70,16 +82,18 @@ def _child_creationflags_tiers() -> list[int]:
     连刷 10 次假 ``[CRITICAL]``——正是 P1-1 花了一整轮才消灭的告警污染形态。
     故先在本函数内降级重试，把「标志被拒」挡在看门狗的崩溃计数之外。
 
+    ⛔ 全链禁用 DETACHED_PROCESS(0x8)：真值表实测它让真引擎重新挂上带窗
+    console（比不加还糟）。详见模块头注释与 launch_trading_window.py 同名节。
+
     POSIX：``[0]``（CPython 在 POSIX 上对非 0 creationflags 直接 ValueError）。
     """
     if not sys.platform.startswith("win"):
         return [0]
-    full = (
-        _CHILD_CREATIONFLAGS
-        | _CHILD_DETACHED_PROCESS
-        | _CHILD_BREAKAWAY_FROM_JOB
-    )
-    return [full, full & ~_CHILD_BREAKAWAY_FROM_JOB, _CHILD_CREATIONFLAGS]
+    return [
+        _CHILD_CREATIONFLAGS | _CHILD_BREAKAWAY_FROM_JOB,
+        _CHILD_CREATIONFLAGS,
+        subprocess.CREATE_NEW_PROCESS_GROUP,
+    ]
 
 
 def _spawn_child(
@@ -140,6 +154,67 @@ def _open_child_log():
     log_dir = ROOT / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     return open(log_dir / "paper_console.log", "a", encoding="utf-8", buffering=1)
+
+
+# ---------------------------------------------------------------------------
+# 死亡取证（2026-09-07 增强，team-lead 派单 B-3）：看门狗检测到子进程异常退出
+# 时，把「退出码 + runtime + 所用创建标志 + 疑似死因」写成**一行**日志，
+# 下次事故不必再开一轮「日志考古」。
+# ---------------------------------------------------------------------------
+_FORENSIC_TAIL_BYTES = 8000
+
+# paper_console.log 尾部特征 → 疑似死因（按优先级取第一个命中的；小写比对）
+_DEATH_MARKERS = (
+    (
+        "window-close",
+        "forrtl window-CLOSE（console 窗口被关 → CTRL_CLOSE_EVENT；真值表结论："
+        "含 DETACHED_PROCESS 的组合会让引擎重新挂上带窗 console，2026-09-07 已全链禁用）",
+    ),
+    ("forrtl", "Fortran/MKL 运行时异常（见 paper_console.log 尾部 forrtl 行）"),
+    (
+        "traceback (most recent call last)",
+        "Python 未捕获异常（见 paper_console.log 尾部 traceback）",
+    ),
+    ("memoryerror", "疑似内存不足（MemoryError）"),
+)
+
+
+def _diagnose_child_death(
+    returncode: int,
+    console_log_path: "str | Path | None" = None,
+    tail_bytes: int = _FORENSIC_TAIL_BYTES,
+) -> str:
+    """根据退出码与 ``paper_console.log`` 尾部特征推断**疑似死因**（一行短句）。
+
+    ⛔ 纯只读 + fail-open：日志读不到 / 任何异常都返回「未知…」，**绝不抛错**
+    ——取证是旁路增强，绝不能影响看门狗的重启决策（R22）。判定是「疑似」
+    而非「确认」：特征匹配只提供方向，最终结论仍需人工看日志尾部。
+    """
+    if console_log_path is None:
+        console_log_path = ROOT / "logs" / "paper_console.log"
+    try:
+        with open(console_log_path, "r", encoding="utf-8", errors="replace") as fh:
+            fh.seek(0, os.SEEK_END)
+            size = fh.tell()
+            fh.seek(max(0, size - int(tail_bytes)), os.SEEK_SET)
+            tail = fh.read()
+    except OSError as exc:
+        return f"未知（读取 {console_log_path} 失败：{exc}）"
+    except Exception as exc:  # noqa: BLE001
+        return f"未知（取证读取异常：{type(exc).__name__}）"
+    lowered = tail.lower()
+    for marker, verdict in _DEATH_MARKERS:
+        if marker in lowered:
+            return verdict
+    # 日志无已知特征时，用退出码本身能说明的事补一手
+    if returncode in (3221225786, -1073741510):  # 0xC000013A（含符号化表示）
+        return (
+            "退出码 0xC000013A（STATUS_CONTROL_C_EXIT：控制台 CTRL 事件终止，"
+            "如 CTRL_CLOSE/CTRL_C；结合窗口是否存在判断）"
+        )
+    if returncode == 1:
+        return "rc=1 且日志尾部无已知特征（疑似启动早期失败：配置/依赖/锁冲突，看日志首行）"
+    return "未知（日志尾部无已知特征）"
 
 
 class Watchdog:
@@ -230,10 +305,13 @@ class Watchdog:
                 # 看门狗所在控制台组，看门狗窗口被关亦不影响引擎存活。
                 # ⛔ 常量经模块级 _CHILD_CREATIONFLAGS 平台分支取得（勿在此处直接
                 # 引用 subprocess.CREATE_*，POSIX 上 AttributeError，见模块头注释）。
-                # 2026-09-07：改为走 _spawn_child() 的**降级链**（最强一组带
-                # DETACHED_PROCESS + CREATE_BREAKAWAY_FROM_JOB；被 OS 拒绝时
-                # 自动降级，绝不让护栏变成拉不起来 —— R22）。
-                proc = _spawn_child(self._child_cmd, log_fh, self._log)[0]
+                # 2026-09-07：走 _spawn_child() 的**降级链**——第 1/2 级为真值表
+                # 实测的「无窗口 console」家族（子进程 GetConsoleWindow()==0，
+                # 收不到 CTRL_CLOSE_EVENT）；第 1 级另带 CREATE_BREAKAWAY_FROM_JOB，
+                # 被 OS 拒绝时自动降级，绝不让护栏变成拉不起来（R22）。
+                # 全链禁用 DETACHED_PROCESS（真值表定罪：经 venv 重定向器链路
+                # 它会让真引擎重新挂上带窗 console）。取回 flags_used 供死亡取证。
+                proc, flags_used = _spawn_child(self._child_cmd, log_fh, self._log)
             except Exception as exc:  # noqa: BLE001
                 # 子命令无法启动（解释器/脚本缺失）→ 视为一次崩溃
                 self._log(f"[WATCHDOG][ERROR] 子进程启动失败：{exc}")
@@ -272,6 +350,15 @@ class Watchdog:
 
             rc = int(proc.returncode)
             runtime = time.monotonic() - start
+            if rc != 0:
+                # 2026-09-07 死亡取证增强（B-3）：一行写清 rc/runtime/所用标志/
+                # 疑似死因。⛔ 取证是旁路增强：_diagnose_child_death 内部对一切
+                # 失败 fail-open 成「未知…」，绝不影响下方重启决策（R22）。
+                self._log(
+                    f"[WATCHDOG][FORENSIC] 子进程死亡取证: rc={rc}, "
+                    f"runtime={runtime:.0f}s, flags=0x{flags_used:08X}, "
+                    f"疑似死因={_diagnose_child_death(rc)}"
+                )
             should, crash_count, backoff = self.decide_restart(rc, runtime, crash_count)
             if not should:
                 if rc == 0:

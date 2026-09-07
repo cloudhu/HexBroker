@@ -73,6 +73,25 @@ runtime<stable_sec 判成崩溃 → 后两个时段再拉 --watchdog 会反复�
     2. 它们本身有风险（breakaway 未授权 → CreateProcess 失败），所以必须
        配降级链 + fail-open，见 :func:`_engine_creationflags_tiers`。
 
+⛔ 2026-09-07 晚间补丁（window-CLOSE 真值表实验后）：**DETACHED_PROCESS 全面禁用**。
+    真值表实验（9 组创建标志 × 生产同款 venv 重定向器解释器，脚本
+    ``artifacts/_tmp/probe_console_flags.py``，数据
+    ``deliverables/2026-09-07_console_flags_truth_table.json``）测得：
+
+    - 唯一能产出「真·无 console 窗口」子进程的家族是 **CREATE_NO_WINDOW
+      （且不含 DETACHED_PROCESS）**：子进程 ``GetConsoleWindow()==0``——
+      没有窗口就没人能「关窗口」，物理上收不到 CTRL_CLOSE_EVENT；
+    - 凡含 DETACHED_PROCESS 的组合（含旧 tier-1 全家桶 0x9000208），重定向器
+      无 console 后 Windows 会给**真解释器（真引擎）新建一条带窗口的
+      console**（``GetConsoleWindow()≠0``）→ 引擎重新可被 window-CLOSE 杀死。
+      这正是旧 tier-1 拦不住 ``forrtl: error (200): window-CLOSE`` 的根因：
+      Popen 的 creationflags 只作用在 venv 重定向器上，**不会传给重定向器
+      再拉起的真解释器**；
+    - DETACHED 与 CREATE_NO_WINDOW 并非「叠加表达彻底脱离」，而是互相拆台。
+
+    故降级链重排为 0x9000200 → 0x8000200 → 0x200，并**删除
+    DETACHED_PROCESS 常量**（杜绝随手加回来）。
+
 仅做启动，不修改任何生产代码。
 """
 import argparse
@@ -103,13 +122,14 @@ CREATE_NEW_PROCESS_GROUP = 0x200
 CREATE_NO_WINDOW = 0x08000000
 # 旧名（仅文档引用，已弃用）：原实现用它弹出可见窗口，是 P0-A 根因。
 CREATE_NEW_CONSOLE = 0x10
-# 2026-09-07「进程被外部回收」修复新增：
-# - DETACHED_PROCESS：新进程**不继承父控制台**（与 CREATE_NO_WINDOW 叠加表达
-#   「彻底脱离父会话」的意图）；
+# 2026-09-07「window-CLOSE 根治」修订（真值表实验定罪，见模块头 2026-09-07 晚间补丁）：
 # - CREATE_BREAKAWAY_FROM_JOB：子进程**不继承父进程的 Windows Job Object**。
-#   ⛔ 它是本次唯一「可能因 Job 未授权而让 CreateProcess 失败」的标志，故只
-#   在降级链第 1 级使用，失败即降级（见 _engine_creationflags_tiers）。
-DETACHED_PROCESS = 0x00000008
+#   ⛔ 它是唯一「可能因 Job 未授权而让 CreateProcess 失败」的标志，故只在
+#   降级链第 1 级使用，失败即降级（见 _engine_creationflags_tiers）。
+# ⛔⛔ DETACHED_PROCESS(0x8) **全面禁用**，本文件不再保留该常量：真值表实测，
+#   经 venv 重定向器链路（Popen → Scripts\python.exe → 真解释器），凡含
+#   DETACHED 的组合都让真引擎**重新获得一条带窗口的新 console**
+#   （GetConsoleWindow()≠0）→ 比不加还糟。删除常量 = 物理上杜绝「随手加回」。
 CREATE_BREAKAWAY_FROM_JOB = 0x01000000
 
 CONSOLE_LOG = os.path.join(ROOT, "logs", "paper_console.log")
@@ -149,23 +169,29 @@ def _engine_creationflags_tiers() -> "list[int]":
     禁止的新增「全停」失效模式。故必须 fail-open：失败就降级重抛一次。
 
     链的每一级都必须是前一级的**子集**（``tiers[i+1] & ~tiers[i] == 0``），
-    由 ``test_creationflags_tiers_monotonically_degrade`` 钉死：
+    由 ``test_creationflags_tiers_platform_shape`` 钉死：
 
-    1. 最强：进程组 + 无窗口 + DETACHED_PROCESS + CREATE_BREAKAWAY_FROM_JOB；
-    2. 去掉 BREAKAWAY（**只有它会因权限被拒**），保留 DETACHED；
-    3. 最弱：退回 2026-09-06 前的 ``NPG | NO_WINDOW`` —— 已验证可拉起。
+    1. 最强：无窗口 console + 进程组 + CREATE_BREAKAWAY_FROM_JOB
+       （真值表 C6=0x9000200：子进程 ``GetConsoleWindow()==0``——不挂可关
+       窗口的 console，物理上收不到 CTRL_CLOSE_EVENT）；
+    2. 去掉 BREAKAWAY（**只有它会因权限被拒**）= 2026-09-06 前的旧标志
+       （真值表 C2=0x8000200：同为无窗口 console，且是全链已验证最久的组合）；
+    3. 最弱：仅 CREATE_NEW_PROCESS_GROUP（fail-open 兜底：NO_WINDOW 万一被
+       拒也照常拉起——宁要「可被关窗杀」也不要「拉不起来」，R22）。
+
+    ⛔ 全链**禁止** DETACHED_PROCESS(0x8)：真值表实测，经 venv 重定向器链路，
+    DETACHED 会让真解释器重新获得一条**带窗口**的新 console（C3/C4/C7/C8 的
+    ``GetConsoleWindow()`` 均 ≠0），比不加还糟。详见模块头 2026-09-07 补丁节。
 
     POSIX：``[0]``（单级，创建标志概念不存在）。
     """
     if not sys.platform.startswith("win"):
         return [0]
-    full = (
-        CREATE_NEW_PROCESS_GROUP
-        | CREATE_NO_WINDOW
-        | DETACHED_PROCESS
-        | CREATE_BREAKAWAY_FROM_JOB
-    )
-    return [full, full & ~CREATE_BREAKAWAY_FROM_JOB, _engine_creationflags()]
+    return [
+        CREATE_BREAKAWAY_FROM_JOB | CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP,
+        _engine_creationflags(),
+        CREATE_NEW_PROCESS_GROUP,
+    ]
 
 
 def _spawn_detached(
@@ -536,8 +562,10 @@ def main(argv: "list[str] | None" = None) -> int:
     logf = None
     try:
         logf = _open_console_log()
-        # 2026-09-07：创建标志改为「降级链」——最强一组带脱离 Job 语义，
-        # 被 OS 拒绝时自动降级，绝不让护栏变成「拉不起来」（R22）。
+        # 2026-09-07：创建标志改为「降级链」——第 1 级带脱离 Job 语义，
+        # 被 OS 拒绝时自动降级，绝不让护栏变成「拉不起来」（R22）；
+        # 第 1/2 级为真值表实测的「无窗口 console」家族（收不到
+        # CTRL_CLOSE_EVENT），全链禁用 DETACHED_PROCESS（真值表定罪）。
         # ⛔ 日志句柄仍由本函数负责关闭（P2-2 契约）：_spawn_detached 只借用。
         proc, flags_used = _spawn_detached(cmd, cwd=ROOT, env=env, stdout=logf)
     finally:
