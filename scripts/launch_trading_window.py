@@ -49,6 +49,30 @@ runtime<stable_sec 判成崩溃 → 后两个时段再拉 --watchdog 会反复�
 否则将来谁改了一边，预检只会**静默失效**，最坏退化成「把空闲误判成占用 →
 系统永远拉不起来」的全停模式。锁定机制本身由互操作测试钉死。
 
+⛔ 2026-09-07「进程被外部回收」事故（本次修复）——结论先说在前面：
+    本次改动**不能**解决「由本自动化沙箱会话拉起的进程在会话结束时被一并清理」
+    这一类死亡。实测取证（4 组标志各拉一个心跳子进程，跨 shell 会话检查）：
+
+    - 本进程 ``IsProcessInJob() == True`` → 确实身处 Windows Job Object；
+    - ``CREATE_NEW_PROCESS_GROUP|CREATE_NO_WINDOW``、``+DETACHED_PROCESS``、
+      ``+CREATE_BREAKAWAY_FROM_JOB``、``全部叠加`` —— **四组行为完全一致**：
+      同会话内心跳稳定增长到 n=25（25 秒），会话一结束心跳**立刻冻结**；
+    - 死亡点**精确对齐会话 teardown**（不是固定 N 秒、不是崩溃：日志无
+      traceback、看门狗无「子进程异常退出」记录）。
+
+    即沙箱层的进程树回收不是靠 Windows 控制台/Job 继承语义实现的，故
+    ``DETACHED_PROCESS`` / ``CREATE_BREAKAWAY_FROM_JOB`` 对它无效。
+    → **生产推荐启动方式仍是用户双击 ``start_paper_trading_watchdog.bat``**
+    （或任务计划程序），那才是真正脱离本会话的进程树。详见
+    ``deliverables/`` 下的当日报告。
+
+    那为什么还要加这些标志？两个理由，都不是为了修沙箱：
+    1. 面向**真实用户会话**启动（双击 BAT / 计划任务）：这些标志是标准
+       Windows 脱离语义，能挡住「父控制台被关」「父 Job 被关闭连带杀子树」
+       两类真实故障（本仓库 09-04 就吃过 CTRL_CLOSE_EVENT 的亏）；
+    2. 它们本身有风险（breakaway 未授权 → CreateProcess 失败），所以必须
+       配降级链 + fail-open，见 :func:`_engine_creationflags_tiers`。
+
 仅做启动，不修改任何生产代码。
 """
 import argparse
@@ -79,6 +103,14 @@ CREATE_NEW_PROCESS_GROUP = 0x200
 CREATE_NO_WINDOW = 0x08000000
 # 旧名（仅文档引用，已弃用）：原实现用它弹出可见窗口，是 P0-A 根因。
 CREATE_NEW_CONSOLE = 0x10
+# 2026-09-07「进程被外部回收」修复新增：
+# - DETACHED_PROCESS：新进程**不继承父控制台**（与 CREATE_NO_WINDOW 叠加表达
+#   「彻底脱离父会话」的意图）；
+# - CREATE_BREAKAWAY_FROM_JOB：子进程**不继承父进程的 Windows Job Object**。
+#   ⛔ 它是本次唯一「可能因 Job 未授权而让 CreateProcess 失败」的标志，故只
+#   在降级链第 1 级使用，失败即降级（见 _engine_creationflags_tiers）。
+DETACHED_PROCESS = 0x00000008
+CREATE_BREAKAWAY_FROM_JOB = 0x01000000
 
 CONSOLE_LOG = os.path.join(ROOT, "logs", "paper_console.log")
 # 单实例锁文件（与 paper_trading_main 的 ``data_dir / paper.pid`` 同一路径/同一语义）
@@ -94,8 +126,101 @@ SLOW_PROBE_WARN_SEC = 2.0
 
 
 def _engine_creationflags() -> int:
-    """引擎子进程创建标志：独立进程组 + 无窗口。"""
+    """引擎子进程创建标志：独立进程组 + 无窗口（**Windows 语义，POSIX 恒 0**）。
+
+    ⛔ 为什么必须做平台分支：CPython 在 POSIX 分支里对 ``creationflags != 0``
+    **直接 raise ValueError**（"creationflags is only supported on Windows"），
+    不是「忽略」。旧实现无条件返回 Windows 常量，在 Linux 上任何真实 spawn
+    都会当场抛错（单测用假 Popen 所以看不出来）。故 POSIX 一律返回 0。
+    """
+    if not sys.platform.startswith("win"):
+        return 0
     return CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
+
+
+def _engine_creationflags_tiers() -> "list[int]":
+    """创建标志**降级链**（从最强到最弱），供 :func:`_spawn_detached` 依次尝试。
+
+    ⛔ 为什么是「一条链」而不是「一个值」（2026-09-07 进程被回收事故修复）：
+    最强的一组含 ``CREATE_BREAKAWAY_FROM_JOB``，而**当所在 Job 未授予
+    breakaway 权限时，Windows 会让 ``CreateProcess`` 直接失败**（典型
+    ``WinError 5 拒绝访问``）——也就是说「加护栏」这个动作本身可能把引擎
+    **拉都拉不起来**。这比原故障（进程晚点被回收）更糟，属于铁律 R22 明令
+    禁止的新增「全停」失效模式。故必须 fail-open：失败就降级重抛一次。
+
+    链的每一级都必须是前一级的**子集**（``tiers[i+1] & ~tiers[i] == 0``），
+    由 ``test_creationflags_tiers_monotonically_degrade`` 钉死：
+
+    1. 最强：进程组 + 无窗口 + DETACHED_PROCESS + CREATE_BREAKAWAY_FROM_JOB；
+    2. 去掉 BREAKAWAY（**只有它会因权限被拒**），保留 DETACHED；
+    3. 最弱：退回 2026-09-06 前的 ``NPG | NO_WINDOW`` —— 已验证可拉起。
+
+    POSIX：``[0]``（单级，创建标志概念不存在）。
+    """
+    if not sys.platform.startswith("win"):
+        return [0]
+    full = (
+        CREATE_NEW_PROCESS_GROUP
+        | CREATE_NO_WINDOW
+        | DETACHED_PROCESS
+        | CREATE_BREAKAWAY_FROM_JOB
+    )
+    return [full, full & ~CREATE_BREAKAWAY_FROM_JOB, _engine_creationflags()]
+
+
+def _spawn_detached(
+    cmd: "list[str]",
+    *,
+    cwd: str,
+    env: "dict[str, str]",
+    stdout: "io.TextIOWrapper",
+    tiers: "list[int] | None" = None,
+    log_fn=print,
+) -> "tuple[subprocess.Popen, int]":
+    """按 :func:`_engine_creationflags_tiers` 逐级尝试拉起子进程。
+
+    返回 ``(proc, flags_used)``。
+
+    ⛔ R22 fail-open：任一级因**标志**被拒（典型 ``WinError 5``）→ 打 WARN
+    并降级重试；**绝不**让「加了护栏」变成「引擎拉不起来」。
+    ⛔ 反向红线：全链都失败时必须**原样抛出**最后一个异常，绝不能吞掉后
+    ``return 0``——那会变成「报告成功、实际没起」的静默全停，比抛错更危险
+    （自动化会以为引擎在跑）。由 ``test_spawn_all_tiers_fail_raises`` 钉死。
+
+    ``stdout`` 由调用方打开并负责关闭（P2-2 日志句柄契约）；本函数**只借用**，
+    不 close——否则降级重试时句柄已被关掉，第二级必然失败。
+    """
+    if tiers is None:
+        tiers = _engine_creationflags_tiers()
+    last_exc: "BaseException | None" = None
+    for idx, flags in enumerate(tiers):
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                cwd=cwd,
+                env=env,
+                creationflags=flags,
+                stdout=stdout,
+                stderr=subprocess.STDOUT,
+            )
+            return proc, flags
+        except OSError as exc:
+            # ENOENT（解释器/脚本不存在）不是标志问题，降级重试只会刷 3 条
+            # 一模一样的告警把真因淹没 → 直接抛出。
+            if exc.errno == errno.ENOENT:
+                raise
+            last_exc = exc
+            log_fn(
+                f"[LAUNCH][WARN] 第 {idx + 1}/{len(tiers)} 组创建标志 "
+                f"(0x{flags:08X}) 拉起失败：{type(exc).__name__}: {exc} —— "
+                f"降级重试（R22：绝不让引擎因护栏而拉不起来）"
+            )
+        except Exception as exc:  # noqa: BLE001
+            # 非 OSError（如参数非法）→ 重试同样无意义，立刻抛出真因
+            raise
+    if last_exc is None:  # tiers 为空（防御：不应发生）
+        raise RuntimeError("_engine_creationflags_tiers() 返回空链，无法拉起子进程")
+    raise last_exc
 
 
 def _open_console_log() -> "io.TextIOWrapper":
@@ -411,14 +536,10 @@ def main(argv: "list[str] | None" = None) -> int:
     logf = None
     try:
         logf = _open_console_log()
-        proc = subprocess.Popen(
-            cmd,
-            cwd=ROOT,
-            env=env,
-            creationflags=_engine_creationflags(),
-            stdout=logf,
-            stderr=subprocess.STDOUT,
-        )
+        # 2026-09-07：创建标志改为「降级链」——最强一组带脱离 Job 语义，
+        # 被 OS 拒绝时自动降级，绝不让护栏变成「拉不起来」（R22）。
+        # ⛔ 日志句柄仍由本函数负责关闭（P2-2 契约）：_spawn_detached 只借用。
+        proc, flags_used = _spawn_detached(cmd, cwd=ROOT, env=env, stdout=logf)
     finally:
         # P2-2 同款卫生：父进程这边的副本在 Popen 返回后即可关闭（句柄继承是
         # 复制语义，子进程持有自己的副本）。launcher 随即退出，OS 本来也会回收，
@@ -433,6 +554,14 @@ def main(argv: "list[str] | None" = None) -> int:
         f"[LAUNCH] 已在后台（无窗口）拉起{kind}, pid={proc.pid} "
         f"—— 控制台输出见 {CONSOLE_LOG}"
     )
+    # 诊断行：运维要能一眼看出是否发生了降级（第 1 级 = 未降级）。
+    # ⛔ 纯打印，用 in 判断兜底，绝不因索引异常影响主流程（R22）。
+    tier_no = (
+        _engine_creationflags_tiers().index(flags_used) + 1
+        if flags_used in _engine_creationflags_tiers()
+        else 0
+    )
+    print(f"[LAUNCH] 创建标志 0x{flags_used:08X}（降级链第 {tier_no} 级）")
     if args.watchdog:
         print(f"[LAUNCH] 看门狗命令行: {' '.join(cmd)}")
     return 0

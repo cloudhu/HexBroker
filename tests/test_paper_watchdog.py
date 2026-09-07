@@ -389,3 +389,119 @@ def test_log_handle_closed_even_when_spawn_fails(tmp_path, monkeypatch):
     assert rc == 1, "启动失败达上限应返回 1"
     assert len(held) == 1, f"应只开过 1 次日志句柄，实际 {len(held)}"
     assert held[0].closed, "Popen 抛异常时也必须关掉日志句柄（finally 兜底）"
+
+
+# ---------------------------------------------------------------------------
+# ⑨ 2026-09-07「进程被外部回收」修复：子进程创建标志降级链 + fail-open
+# ---------------------------------------------------------------------------
+# 与 launch_trading_window.py 同一套口径（两条链数值必须一致，见
+# test_child_tiers_match_launcher_tiers）：最强一组带 DETACHED_PROCESS +
+# CREATE_BREAKAWAY_FROM_JOB，被 OS 拒绝时降级重试。
+#
+# ⛔ 为什么看门狗这一层**尤其**需要 fail-open：看门狗把「子进程启动失败」计入
+# crash_count 并退避重试，若 BREAKAWAY 在每次重试时都失败，会连刷 10 次假的
+# [CRITICAL] 连续崩溃——正是 P1-1 花一整轮才消灭的告警污染形态，而且真因
+# （一条 WinError 5）会被淹没在 10 条 CRITICAL 里。
+#
+# ⛔ 断言引用 subprocess.DETACHED_PROCESS / CREATE_BREAKAWAY_FROM_JOB
+#    （Windows-only 常量），必须带 _WIN_ONLY，否则 CI ubuntu runner 会红。
+_WD_WIN_ONLY = pytest.mark.skipif(
+    not sys.platform.startswith("win"),
+    reason="Windows 专属契约（DETACHED_PROCESS / CREATE_BREAKAWAY_FROM_JOB）；POSIX 无此概念",
+)
+
+
+def test_child_creationflags_tiers_platform_shape():
+    """跨平台形状：POSIX 恒 [0]；Windows 3 级且单调降级，末级 == 旧值。"""
+    tiers = wd_mod._child_creationflags_tiers()
+    assert tiers, "降级链不得为空（空链 = 永远拉不起子进程）"
+    if sys.platform.startswith("win"):
+        assert len(tiers) == 3
+        for i in range(len(tiers) - 1):
+            assert tiers[i + 1] & ~tiers[i] == 0, "降级链只许做减法"
+        assert tiers[-1] == wd_mod._CHILD_CREATIONFLAGS
+    else:
+        assert tiers == [0], "POSIX 上 creationflags 非 0 会被 CPython 直接 ValueError"
+
+
+@_WD_WIN_ONLY
+def test_child_tiers_match_launcher_tiers():
+    """耦合护栏：看门狗与 launcher 的降级链必须**逐值相同**。
+
+    两边各写一份、将来漂移，是最难查的一类回归——表现是「launcher 说用了
+    第 1 级、看门狗却在用第 3 级」，日志上看不出任何异常。故用测试钉死。
+    """
+    import importlib.util
+
+    launcher = (
+        Path(__file__).resolve().parents[1] / "scripts" / "launch_trading_window.py"
+    )
+    spec = importlib.util.spec_from_file_location("ltw_for_tiers", str(launcher))
+    ltw = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ltw)
+
+    assert wd_mod._child_creationflags_tiers() == ltw._engine_creationflags_tiers()
+
+
+@_WD_WIN_ONLY
+def test_child_flags_include_detach_and_breakaway():
+    flags = wd_mod._child_creationflags_tiers()[0]
+    assert flags & subprocess.DETACHED_PROCESS
+    assert flags & subprocess.CREATE_BREAKAWAY_FROM_JOB
+    assert flags & subprocess.CREATE_NO_WINDOW
+    assert flags & subprocess.CREATE_NEW_PROCESS_GROUP
+
+
+@_WD_WIN_ONLY
+def test_spawn_child_falls_back_when_breakaway_rejected(tmp_path):
+    """R22 fail-open：BREAKAWAY 被拒 → 降级重试，且**同一个**日志句柄复用。"""
+    calls = []
+    logs = []
+
+    class _FakeProc:
+        returncode = 0
+
+        def __init__(self, cmd, **kw):
+            calls.append(kw)
+            if kw.get("creationflags", 0) & subprocess.CREATE_BREAKAWAY_FROM_JOB:
+                raise OSError(5, "拒绝访问（模拟 Job 未授权 breakaway）")
+
+        def poll(self):
+            return 0
+
+    orig = wd_mod.subprocess.Popen
+    wd_mod.subprocess.Popen = _FakeProc
+    try:
+        log_fh = tmp_path / "paper_console.log"
+        with open(log_fh, "a", encoding="utf-8") as fh:
+            proc, flags = wd_mod._spawn_child(["x"], fh, logs.append)
+    finally:
+        wd_mod.subprocess.Popen = orig
+
+    assert len(calls) == 2, "应恰好降级重试一次"
+    assert not (flags & subprocess.CREATE_BREAKAWAY_FROM_JOB)
+    assert flags & subprocess.DETACHED_PROCESS
+    assert calls[0]["stdout"] is calls[1]["stdout"], "降级重试必须复用同一日志句柄"
+    assert any("[WATCHDOG][WARN]" in m for m in logs), "降级必须留痕"
+
+
+@_WD_WIN_ONLY
+def test_spawn_child_all_tiers_fail_raises(tmp_path):
+    """反向红线：全链失败必须抛出（由 run() 的崩溃分支处理），绝不返回假 proc。"""
+    calls = []
+
+    def _always_reject(cmd, **kw):
+        calls.append(kw)
+        raise OSError(5, "拒绝访问")
+
+    orig = wd_mod.subprocess.Popen
+    wd_mod.subprocess.Popen = _always_reject
+    try:
+        log_fh = tmp_path / "paper_console.log"
+        with open(log_fh, "a", encoding="utf-8") as fh:
+            with pytest.raises(OSError):
+                wd_mod._spawn_child(["x"], fh, lambda m: None)
+    finally:
+        wd_mod.subprocess.Popen = orig
+
+    assert len(calls) == len(wd_mod._child_creationflags_tiers())

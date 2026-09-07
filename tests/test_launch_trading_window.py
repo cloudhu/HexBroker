@@ -12,6 +12,10 @@
 ⑧ 抢锁**非阻塞**前提的时延断言（QA 发现后 team-lead 点名）：换成阻塞锁时
    返回值语义完全不变、19 条用例仍全绿，只有耗时从 0.01s 涨到 ~9s，
    故必须断言「持锁时 <1s 返回」——纯返回值断言抓不到这个退化。
+⑨ 2026-09-07「进程被外部回收」修复：创建标志**降级链** —— 最强一组含
+   DETACHED_PROCESS + CREATE_BREAKAWAY_FROM_JOB；被 OS 拒绝时必须 fail-open
+   降级重试，绝不让护栏变成「引擎拉不起来」（R22）；全链失败必须抛出，
+   绝不静默返回成功。
 """
 from __future__ import annotations
 
@@ -613,3 +617,196 @@ def test_lock_probe_returns_promptly_when_lock_held(tmp_path):
         )
     finally:
         release()
+
+
+# ---------------------------------------------------------------------------
+# ⑨ 2026-09-07「进程被外部回收」修复：创建标志降级链 + fail-open
+# ---------------------------------------------------------------------------
+# 背景：08:44 拉起的看门狗/引擎在 shell 会话结束时被一并清理（日志无 traceback、
+# 看门狗无重启记录、心跳精确冻结在会话 teardown 时刻）。修复方向是叠加 Windows
+# 脱离语义（DETACHED_PROCESS / CREATE_BREAKAWAY_FROM_JOB），但 BREAKAWAY 在
+# Job 未授权时会让 CreateProcess **直接失败**——「加护栏」反而变成「拉不起来」，
+# 属 R22 明令禁止的新增全停失效模式。故必须是**链**且必须 fail-open。
+#
+# ⛔ 这些断言清一色是 Windows 专属（引用 subprocess.DETACHED_PROCESS /
+#    CREATE_BREAKAWAY_FROM_JOB，POSIX 上 AttributeError），必须带 _WIN_ONLY，
+#    否则 CI ubuntu runner 会红（2026-09-06 已因此修过一轮）。
+def test_creationflags_tiers_platform_shape():
+    """跨平台形状断言（本条**不带** skipif，CI 也要跑）。
+
+    - Windows：3 级、单调降级（每级是前一级的子集）、末级 == 2026-09-06 前的
+      旧值（NPG|NO_WINDOW）——保证最坏情况退回到「已验证可拉起」的行为；
+    - POSIX：必须是 ``[0]`` 且 ``_engine_creationflags() == 0``。CPython 在
+      POSIX 分支上对 ``creationflags != 0`` **直接 raise ValueError**，不是忽略
+      ——旧实现无条件返回 Windows 常量，Linux 上任何真实 spawn 都会当场抛错。
+    """
+    tiers = ltw_mod._engine_creationflags_tiers()
+    assert tiers, "降级链不得为空（空链 = 永远拉不起子进程）"
+
+    if sys.platform.startswith("win"):
+        assert len(tiers) == 3, f"Windows 上应为 3 级降级链，实际 {[hex(t) for t in tiers]}"
+        for i in range(len(tiers) - 1):
+            assert tiers[i + 1] & ~tiers[i] == 0, (
+                f"第 {i + 2} 级(0x{tiers[i + 1]:08X}) 必须是第 {i + 1} 级"
+                f"(0x{tiers[i]:08X}) 的子集——降级链只许做减法"
+            )
+        assert tiers[-1] == (ltw_mod.CREATE_NEW_PROCESS_GROUP | ltw_mod.CREATE_NO_WINDOW), (
+            "末级必须退回到 2026-09-06 前的旧标志（已验证可拉起），否则降级失去意义"
+        )
+    else:
+        assert tiers == [0], (
+            "POSIX 上 creationflags 非 0 会被 CPython 直接 ValueError，必须恒为 [0]"
+        )
+        assert ltw_mod._engine_creationflags() == 0, (
+            "POSIX 上 _engine_creationflags() 必须返回 0（同上：非 0 会 ValueError）"
+        )
+
+
+@_WIN_ONLY
+def test_engine_creationflags_include_detach_and_breakaway():
+    """最强一组必须含 DETACHED_PROCESS + CREATE_BREAKAWAY_FROM_JOB，且不带可见窗口。"""
+    flags = ltw_mod._engine_creationflags_tiers()[0]
+    assert flags & subprocess.DETACHED_PROCESS, "缺少 DETACHED_PROCESS（脱离父控制台）"
+    assert flags & subprocess.CREATE_BREAKAWAY_FROM_JOB, (
+        "缺少 CREATE_BREAKAWAY_FROM_JOB（脱离父 Job Object）"
+    )
+    # 原有语义一个都不能丢
+    assert flags & subprocess.CREATE_NO_WINDOW
+    assert flags & subprocess.CREATE_NEW_PROCESS_GROUP
+    assert not (flags & ltw_mod.CREATE_NEW_CONSOLE)
+
+
+def _install_fake_popen_selective(monkeypatch, calls, reject):
+    """安装会**按标志选择性拒绝**的假 Popen。
+
+    ``reject(flags) -> bool``：返回 True 则本次 spawn 抛 OSError(5)（模拟
+    Job 未授权 breakaway 时 CreateProcess 被拒）。
+    """
+
+    class _FakeProc:
+        returncode = 0
+        pid = 12345
+
+        def __init__(self, cmd, **kw):
+            flags = kw.get("creationflags", 0)
+            calls.append(kw)
+            if reject(flags):
+                raise OSError(5, "拒绝访问（模拟 Job 未授权 breakaway）")
+
+        def poll(self):
+            return 0
+
+    monkeypatch.setattr(ltw_mod.subprocess, "Popen", _FakeProc)
+
+
+def _prepare_detached(monkeypatch, tmp_path):
+    """``_prepare`` + 把单实例预检固定为「无存活实例」。
+
+    ⛔ 为什么必须钉死：本组用例断言的是 **Popen 被尝试了几次**，而预检一旦报
+    「有存活实例」，``main()`` 会在 spawn 之前 ``return 0``——真有引擎在跑时
+    用例就会假红（且红得莫名其妙）。预检本身由其它用例专门覆盖，这里固定它
+    以隔离变量。
+    """
+    _prepare(monkeypatch, tmp_path)
+    monkeypatch.setattr(ltw_mod, "_engine_instance_running", lambda *a, **k: False)
+
+
+@_WIN_ONLY
+def test_main_spawns_with_full_detach_flags(tmp_path, monkeypatch):
+    """正常路径：main() 必须用**最强一组**标志拉起（未降级）。"""
+    calls = []
+    _install_fake_popen_selective(monkeypatch, calls, lambda flags: False)
+    _prepare_detached(monkeypatch, tmp_path)
+
+    assert ltw_mod.main(argv=["--watchdog"]) == 0
+    assert len(calls) == 1, "未被拒绝时不得出现多余的重试"
+    flags = calls[0]["creationflags"]
+    assert flags & subprocess.DETACHED_PROCESS
+    assert flags & subprocess.CREATE_BREAKAWAY_FROM_JOB
+    assert flags & subprocess.CREATE_NO_WINDOW
+    assert flags & subprocess.CREATE_NEW_PROCESS_GROUP
+
+
+@_WIN_ONLY
+def test_spawn_falls_back_when_breakaway_rejected(tmp_path, monkeypatch, capsys):
+    """⛔ R22 fail-open：BREAKAWAY 被拒 → 必须**降级重试**，绝不让引擎拉不起来。
+
+    这是本次修复的核心护栏：若没有降级，Job 未授权时 CreateProcess 直接失败，
+    「加了护栏」反而导致系统永远起不来，且日志上只是一条 WinError 5。
+    """
+    calls = []
+    _install_fake_popen_selective(
+        monkeypatch, calls,
+        lambda flags: bool(flags & subprocess.CREATE_BREAKAWAY_FROM_JOB),
+    )
+    _prepare_detached(monkeypatch, tmp_path)
+
+    rc = ltw_mod.main(argv=["--watchdog"])
+    assert rc == 0, "标志被拒必须降级重试成功，绝不能变成启动失败"
+    assert len(calls) == 2, "应恰好重试一次"
+    assert calls[0]["creationflags"] & subprocess.CREATE_BREAKAWAY_FROM_JOB
+    fallback = calls[1]["creationflags"]
+    assert not (fallback & subprocess.CREATE_BREAKAWAY_FROM_JOB), "降级后必须去掉失败的那一位"
+    assert fallback & subprocess.DETACHED_PROCESS, "只降级失败位，DETACHED 应保留"
+    assert fallback & subprocess.CREATE_NO_WINDOW and fallback & subprocess.CREATE_NEW_PROCESS_GROUP
+    assert "[LAUNCH][WARN]" in capsys.readouterr().out, "降级必须留痕，否则运维无从知晓"
+
+
+@_WIN_ONLY
+def test_spawn_falls_back_to_legacy_when_only_legacy_allowed(tmp_path, monkeypatch):
+    """连 DETACHED 也被拒 → 必须一路降到**旧标志**（2026-09-06 前，已验证可拉起）。"""
+    calls = []
+    legacy = ltw_mod.CREATE_NEW_PROCESS_GROUP | ltw_mod.CREATE_NO_WINDOW
+    _install_fake_popen_selective(monkeypatch, calls, lambda flags: flags != legacy)
+    _prepare_detached(monkeypatch, tmp_path)
+
+    rc = ltw_mod.main(argv=["--watchdog"])
+    assert rc == 0
+    assert len(calls) == 3, "两级被拒后应降到第 3 级"
+    assert calls[-1]["creationflags"] == legacy
+
+
+@_WIN_ONLY
+def test_spawn_all_tiers_fail_raises_no_silent_success(tmp_path, monkeypatch):
+    """⛔ 反向红线：全链失败必须**抛出**，绝不吞掉后返回成功。
+
+    静默失败是最坏形态——自动化会回报「已拉起」而实际没有任何引擎在跑，
+    且日志上无异常（这是 R22 最忌讳的、看不出问题的全停）。
+    """
+    calls = []
+    _install_fake_popen_selective(monkeypatch, calls, lambda flags: True)
+    _prepare_detached(monkeypatch, tmp_path)
+
+    with pytest.raises(OSError):
+        ltw_mod.main(argv=["--watchdog"])
+    assert len(calls) == len(ltw_mod._engine_creationflags_tiers()), (
+        "每一级都必须被尝试过，才能断定全链失败"
+    )
+
+
+def test_spawn_enoent_propagates_immediately(tmp_path, monkeypatch):
+    """跨平台：ENOENT（解释器/脚本缺失）不是标志问题 → 立刻抛出，不做无谓重试。
+
+    降级重试的前提是「换组标志有可能成功」。文件不存在时三组都会以同样方式失败，
+    重试只会刷三条一模一样的告警、把真因淹没。
+    """
+    calls = []
+
+    class _FakeProc:
+        returncode = 0
+        pid = 12345
+
+        def __init__(self, cmd, **kw):
+            calls.append(kw)
+            raise OSError(errno.ENOENT, "没有那个文件或目录（模拟解释器缺失）")
+
+        def poll(self):
+            return 0
+
+    monkeypatch.setattr(ltw_mod.subprocess, "Popen", _FakeProc)
+    _prepare_detached(monkeypatch, tmp_path)
+
+    with pytest.raises(OSError) as excinfo:
+        ltw_mod.main(argv=["--watchdog"])
+    assert excinfo.value.errno == errno.ENOENT
+    assert len(calls) == 1, "ENOENT 属确定性失败，重试无意义（只应尝试一次）"

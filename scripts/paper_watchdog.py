@@ -31,6 +31,8 @@ P2-2（2026-09-06）日志句柄契约：
 from __future__ import annotations
 
 import argparse
+import errno
+import io
 import os
 import signal
 import subprocess
@@ -47,8 +49,76 @@ ROOT = Path(__file__).resolve().parents[1]
 # counter.txt 永不生成）。POSIX 上传 0（creationflags 参数被忽略，行为正确）。
 if sys.platform.startswith("win"):
     _CHILD_CREATIONFLAGS = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
-else:  # POSIX：无「窗口」概念，独立进程组语义由 POSIX 进程模型天然满足
+    # 2026-09-07 新增「脱离」语义（与 launch_trading_window.py 同一套口径）：
+    # - DETACHED_PROCESS：子进程不继承看门狗的控制台；
+    # - CREATE_BREAKAWAY_FROM_JOB：子进程不继承看门狗所在的 Job Object。
+    _CHILD_DETACHED_PROCESS = subprocess.DETACHED_PROCESS
+    _CHILD_BREAKAWAY_FROM_JOB = subprocess.CREATE_BREAKAWAY_FROM_JOB
+else:  # POSIX：无「窗口/Job」概念，独立进程组语义由 POSIX 进程模型天然满足
     _CHILD_CREATIONFLAGS = 0
+    _CHILD_DETACHED_PROCESS = 0
+    _CHILD_BREAKAWAY_FROM_JOB = 0
+
+
+def _child_creationflags_tiers() -> list[int]:
+    """子进程创建标志**降级链**（最强 → 最弱），与 launcher 口径一致。
+
+    ⛔ 为什么不能只用一个「最强」值：``CREATE_BREAKAWAY_FROM_JOB`` 在所在 Job
+    未授予 breakaway 权限时会让 ``CreateProcess`` **直接失败**（WinError 5），
+    也就是「加护栏」本身会把引擎变成**拉不起来**。看门狗若在这里失败，会被
+    下面 ``run()`` 的 ``except`` 当成一次崩溃计入 ``crash_count``，退避重试后
+    连刷 10 次假 ``[CRITICAL]``——正是 P1-1 花了一整轮才消灭的告警污染形态。
+    故先在本函数内降级重试，把「标志被拒」挡在看门狗的崩溃计数之外。
+
+    POSIX：``[0]``（CPython 在 POSIX 上对非 0 creationflags 直接 ValueError）。
+    """
+    if not sys.platform.startswith("win"):
+        return [0]
+    full = (
+        _CHILD_CREATIONFLAGS
+        | _CHILD_DETACHED_PROCESS
+        | _CHILD_BREAKAWAY_FROM_JOB
+    )
+    return [full, full & ~_CHILD_BREAKAWAY_FROM_JOB, _CHILD_CREATIONFLAGS]
+
+
+def _spawn_child(
+    child_cmd: list[str], log_fh: "io.TextIOWrapper", log_fn=print
+) -> "tuple[subprocess.Popen, int]":
+    """按降级链拉起子进程，返回 ``(proc, flags_used)``。
+
+    ⛔ R22 fail-open：某一级被 OS 拒绝（典型 WinError 5）→ 打 WARN 并降级。
+    ⛔ 全链失败 → **原样抛出**最后一个异常，由 ``run()`` 的既有崩溃分支处理
+    （计入崩溃 + 退避重试）；**绝不**在这里吞掉后返回一个假 proc——那会让
+    看门狗以为子进程在跑，实际没有任何引擎（静默全停）。
+
+    ``log_fh`` 由调用方打开并负责关闭（P2-2 契约）；本函数**只借用**，不 close，
+    否则降级重试时句柄已关、后续各级必然失败。
+    """
+    tiers = _child_creationflags_tiers()
+    last_exc: BaseException | None = None
+    for idx, flags in enumerate(tiers):
+        try:
+            proc = subprocess.Popen(
+                child_cmd,
+                creationflags=flags,
+                stdout=log_fh,
+                stderr=subprocess.STDOUT,
+            )
+            return proc, flags
+        except OSError as exc:
+            if exc.errno == errno.ENOENT:
+                raise  # 解释器/脚本缺失不是标志问题，重试只会淹没真因
+            last_exc = exc
+            log_fn(
+                f"[WATCHDOG][WARN] 第 {idx + 1}/{len(tiers)} 组创建标志 "
+                f"(0x{flags:08X}) 拉起失败：{type(exc).__name__}: {exc} —— 降级重试"
+            )
+        except Exception:  # noqa: BLE001
+            raise
+    if last_exc is None:
+        raise RuntimeError("_child_creationflags_tiers() 返回空链，无法拉起子进程")
+    raise last_exc
 
 
 def _open_child_log():
@@ -153,19 +223,17 @@ class Watchdog:
             log_fh = None
             try:
                 log_fh = _open_child_log()
-                proc = subprocess.Popen(
-                    self._child_cmd,
-                    # P0-A（2026-09-04）：子进程（交易引擎）必须「无可见窗口 + 独立进程组」，
-                    # 否则 (a) 可见控制台窗口被误关 = 引擎被杀（CTRL_CLOSE_EVENT，非 SIGTERM，
-                    # 日志无 _shutdown）；(b) 与看门狗共用控制台时关窗两者同死。
-                    # CREATE_NO_WINDOW 消除窗口故障面；CREATE_NEW_PROCESS_GROUP 使引擎脱离
-                    # 看门狗所在控制台组，看门狗窗口被关亦不影响引擎存活。
-                    # ⛔ 常量经模块级 _CHILD_CREATIONFLAGS 平台分支取得（勿在此处直接
-                    # 引用 subprocess.CREATE_*，POSIX 上 AttributeError，见模块头注释）。
-                    creationflags=_CHILD_CREATIONFLAGS,
-                    stdout=log_fh,
-                    stderr=subprocess.STDOUT,
-                )
+                # P0-A（2026-09-04）：子进程（交易引擎）必须「无可见窗口 + 独立进程组」，
+                # 否则 (a) 可见控制台窗口被误关 = 引擎被杀（CTRL_CLOSE_EVENT，非 SIGTERM，
+                # 日志无 _shutdown）；(b) 与看门狗共用控制台时关窗两者同死。
+                # CREATE_NO_WINDOW 消除窗口故障面；CREATE_NEW_PROCESS_GROUP 使引擎脱离
+                # 看门狗所在控制台组，看门狗窗口被关亦不影响引擎存活。
+                # ⛔ 常量经模块级 _CHILD_CREATIONFLAGS 平台分支取得（勿在此处直接
+                # 引用 subprocess.CREATE_*，POSIX 上 AttributeError，见模块头注释）。
+                # 2026-09-07：改为走 _spawn_child() 的**降级链**（最强一组带
+                # DETACHED_PROCESS + CREATE_BREAKAWAY_FROM_JOB；被 OS 拒绝时
+                # 自动降级，绝不让护栏变成拉不起来 —— R22）。
+                proc = _spawn_child(self._child_cmd, log_fh, self._log)[0]
             except Exception as exc:  # noqa: BLE001
                 # 子命令无法启动（解释器/脚本缺失）→ 视为一次崩溃
                 self._log(f"[WATCHDOG][ERROR] 子进程启动失败：{exc}")
